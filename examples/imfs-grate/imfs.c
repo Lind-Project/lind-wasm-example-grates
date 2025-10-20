@@ -666,7 +666,7 @@ load_file(char *path)
                 }
         }
 
-        int imfs_fd = imfs_open(0, path, O_CREAT | O_WRONLY, 0777);
+        int imfs_fd = imfs_open(0, path, O_CREAT | O_WRONLY, 0755);
         fprintf(fp, "[load_file] created file: %s\n", path);
 
         size_t size;
@@ -698,7 +698,7 @@ dump_file(char *path, char *actual_path)
 		return;
 	}
 
-        int fd = open(actual_path, O_CREAT | O_WRONLY | O_TRUNC, 0777);
+        int fd = open(actual_path, O_CREAT | O_WRONLY | O_TRUNC, 0755);
         
 	size_t nread;
         char buf[1024];

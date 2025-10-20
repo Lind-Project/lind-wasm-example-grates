@@ -1,6 +1,6 @@
 ## In Memory File System 
 
-The In Memory File System (IMFS) provides a self-contained implementation of a POSIX-like FS backed by memory. It serves as a backbone that can later be integrated as a grate to sandbox any FS calls made by a cage. IMFS exposts POSIX-like APIs and maintains its own inode and file descriptor tables to provide an end-to-end FS interface.
+The In Memory File System (IMFS) provides a self-contained implementation of a POSIX-like FS backed by memory. It serves as a backbone that can later be integrated as a grate to sandbox any FS calls made by a cage. IMFS exposes POSIX-like APIs and maintains its own inode and file descriptor tables to provide an end-to-end FS interface.
 
 New implementations to IMFS are usually tested in a sandboxed manner on Linux natively, before being tested in `lind-3i` with a grate function wrapping the new functionality.
 
@@ -14,9 +14,9 @@ open(const char* pathname, int flags, mode_t mode)
 imfs_open(int cageid, const char* pathname, int flags, mode_t mode)
 ```
 
-The behaviours of these APIs closely match those of their corresponding Linux system calls. They follow the semantics described in man pages including types, return valies, and error codes. This allows IMFS to be a drop-in replacement for a conventional filesystem. 
+The behaviours of these APIs closely match those of their corresponding Linux system calls. They follow the semantics described in man pages including types, return values, and error codes. This allows easy integration of IMFS into a grate, and allows for easy testing on native environments. 
 
-As mentioned earlier, it is possible to run IMFS natively, and it requires the `cageid` parameter to be stubbed as an integer constant between `[0, 128)` 
+When running this module on Linux, the `cageid` parameter should be stubbed as a constant between `[0,128)`, like so:
 
 ```
 #define CAGEID 0
@@ -34,7 +34,9 @@ In addition to POSIX APIs, IMFS also provides helper functions for moving files 
 
 - `preloads(char *preload_files)` Copy files from host to IMFS, `preload_files` being a `:` separated list of filenames. 
 
-These utility functions are typically called at the beginning and the end of a grate's lifecycle. `load_file` and `preloads` are used to stage files into memory, and `dump_file` is used to persist results back to the host system.
+These utility functions are called before executing any child cages, and after they exit. The IMFS grate is responsible for calling these to stage files into memory (`load_file`, `preloads`) and to persist results back (`dump_file`).
+
+In the accompanying example grate, the grate reads the environment variables `"PRELOADS"` to determine which files are meant to be staged.
 
 ## Implementation
 
@@ -50,7 +52,7 @@ The structure of the node is specialized according to its type:
 
 ### File Descriptors
 
-Each cage is associated with its own array of `FileDesc` objects that represent a file descriptor. The file descriptors used by these FS calls return indices into this array. 
+Each cage has its own array of `FileDesc` objects that represent a file descriptor. The file descriptors used by these FS calls are indices into this array. 
 
 File descriptor allocation begins at index 3. The management of standard descriptors (`stdin`, `stdout`, `stderr`) are delegated to the enclosing grate.
 
@@ -88,7 +90,7 @@ The grate implementation currently provides syscall wrappers for the following F
 
 ## Testing 
 
-POSIX compliance is validate through `pjdfstest`, a widely adopted test suite for file systems for both BSD and Linux file systems. The tests are executed natively on Linux, which required modifications to `pjdfstest` in order to support a persisten test runner capabla of maintaining FS state. 
+POSIX compliance is validated through `pjdfstest`, a widely adopted test suite for file systems for both BSD and Linux file systems. The tests are executed natively on Linux, which required modifications to `pjdfstest` in order to support a persistent test runner capable of maintaining FS state in memory. 
 
 `pdjfstest` provides a comprehensive list of assertions each designed to verify a specific FS property. This approach allows for easier detection of edge-cases. 
 
@@ -104,7 +106,7 @@ Check out the documentation [here](https://github.com/stupendoussuperpowers/lind
 ## Future Work
 
 - Currently only a handful of the most common logical branches are supported for most syscalls. For example, not all flags are supported for `open`. 
-- Access control is not implemented, by default all nodes are created with mode `0777` allowing for any user or group to access them. 
+- Access control is not implemented, by default all nodes are created with mode `0755` allowing for any user or group to access them. 
 - `mmap` is yet to be implemented. 
 - Performance testing for reading and writing. 
 - Integrating FD table management with `fdtables` crate.
