@@ -1,0 +1,68 @@
+/*
+This is an auto-generated file. Do not modify.
+*/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <register_handler.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+
+#include <sys/stat.h>
+#include <sys/utsname.h>
+
+#include <lind_syscall_num.h>
+#include "magic.h"
+
+extern int grate_syscalls[];
+extern size_t grate_syscalls_len;
+
+void register_handlers(int cageid, int grateid) {
+	int ret;
+	for(int i=0; i < grate_syscalls_len; i++) {
+		ret = register_handler(cageid, grate_syscalls[i], grateid, grateid);
+		printf("Registered: %d\n", grate_syscalls[i]);
+	}
+}
+
+int main(int argc, char *argv[]) {
+	if (argc < 2) {
+		fprintf(stderr, "Usage: %s <cage_file>\n", argv[0]);
+		exit(EXIT_FAILURE);
+	}
+	
+	int grateid = getpid();
+	printf("grateid: %d\n", grateid);
+	
+	pid_t pid = fork();
+	if (pid < 0) {
+		perror("fork failed");
+		exit(EXIT_FAILURE);
+	} else if (pid == 0) {
+		int cageid = getpid();
+		printf("cageid: %d\n", cageid);
+		register_handlers(cageid, grateid);
+
+		sleep(3);
+		printf("Execing %s\n", argv[1]);
+		if (execv(argv[1], &argv[1]) == -1) {
+			printf("Execv failed\n");
+			exit(EXIT_FAILURE);
+		}
+	} else {
+		grate_init();
+	}
+
+	int status;
+    	while (wait(&status) > 0) {
+        	printf("[Grate | geteuid] terminated, status: %d\n", status);
+    		grate_destroy();
+    	}
+
+    	return 0;
+}
+
+
+/* Auto-generated from grate definition file */
+
