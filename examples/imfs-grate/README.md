@@ -1,5 +1,7 @@
 ## In Memory File System 
 
+[Upstream Repository](https://github.com/stupendoussuperpowers/imfs)
+
 The In Memory File System (IMFS) provides a self-contained implementation of a POSIX-like FS backed by memory. It serves as a backbone that can later be integrated as a grate to sandbox any FS calls made by a cage. IMFS exposes POSIX-like APIs and maintains its own inode and file descriptor tables to provide an end-to-end FS interface.
 
 New implementations to IMFS are usually tested in a sandboxed manner on Linux natively, before being tested in `lind-3i` with a grate function wrapping the new functionality.
@@ -63,6 +65,11 @@ Descriptors are allocated using `imfs_open` or `imfs_openat`. Each file descript
 - Open flags
 
 ## Building
+
+Build Requirements:
+
+- `make`
+- Python3 for tests
 
 ### Native Build
 

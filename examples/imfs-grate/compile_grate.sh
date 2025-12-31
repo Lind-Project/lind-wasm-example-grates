@@ -21,10 +21,10 @@ if [[ ! -f build.conf ]]; then
 fi
 source build.conf
 
-CLANG=/home/lind/lind-wasm/clang+llvm-18.1.8-x86_64-linux-gnu-ubuntu-18.04/bin/clang
-SYSROOT=/home/lind/lind-wasm/src/glibc/sysroot
-WASM_OPT=/home/lind/lind-wasm/tools/binaryen/bin/wasm-opt
-WASMTIME=/home/lind/lind-wasm/src/wasmtime/target/release/wasmtime
+CLANG="${CLANG:-/home/lind/lind-wasm/clang+llvm-18.1.8-x86_64-linux-gnu-ubuntu-18.04/bin/clang}"
+SYSROOT="${SYSROOT:-/home/lind/lind-wasm/src/glibc/sysroot}"
+WASM_OPT="${WASM_OPT:-/home/lind/lind-wasm/tools/binaryen/bin/wasm-opt}"
+WASMTIME="${WASMTIME:-/home/lind/lind-wasm/src/wasmtime/target/release/wasmtime}"
 
 SRC_DIR="src"
 mkdir -p output
@@ -46,6 +46,7 @@ echo "[build] $OUT (max-mem=$MAX_MEMORY)"
   -g -O0 -o "$OUT.wasm"
 
 "$WASM_OPT" \
+  --asyncify \
   --epoch-injection \
   --debuginfo \
   $EXTRA_WASM_OPT \
