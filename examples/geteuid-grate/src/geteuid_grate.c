@@ -1,4 +1,5 @@
 #include <errno.h>
+// lind_syscall.h provides functions needed for cage interactions: register_handler, copy_data_between_cage, and make_threei_call
 #include <lind_syscall.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,6 +8,19 @@
 #include <unistd.h>
 
 // Dispatcher function
+//
+// Entry point into a grate when a child cage invokes a registered
+// syscall. This function is used to invoke the appropriate handler,
+// and value returned is the passed down to the calling cage.
+//
+// Args:
+// 	fn_ptr_uint	Address of the registered syscall handler within the
+// 			grate's address space.
+// 	cageid		Identifier of the calling cage.
+// 	arg[1-6]	Syscall arguments. Numeric types are passed by value, pointers
+// 			are passed as addresses in the originating cage's address space.
+// 	arg[1-6]cage	Cage IDs corresponding to each argument, indicating which cage's address
+// 			space the argument belongs to.
 int pass_fptr_to_wt(uint64_t fn_ptr_uint, uint64_t cageid, uint64_t arg1,
                     uint64_t arg1cage, uint64_t arg2, uint64_t arg2cage,
                     uint64_t arg3, uint64_t arg3cage, uint64_t arg4,

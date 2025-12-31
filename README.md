@@ -4,7 +4,10 @@ This reposistory contains a collection of example grate implementations that can
 
 Grates provide custom syscall wrappers for Lind cages. Each example grate here demonstrates how to override one or more syscalls with a custom implementation.
 
-For more details on Lind and grates, refer to the official [documentation.](https://lind-project.github.io/lind-wasm/)
+For more details, refer to the documentation here:
+
+- [Lind-Wasm documentation](https://lind-project.github.io/lind-wasm/)
+- [3i](https://github.com/Lind-Project/lind-wasm/blob/main/src/threei/README.md)
 
 ## Repository Structure
 
@@ -97,6 +100,8 @@ This also allows multiple grates to be interposed. For example:
 ## Compiling a Grate
 
 Grates are compiled similarly to standard Lind programs, with the additional requirement that the WASM module exports the `pass_fptr_to_wt` function.
+
+[`lind_compile`](https://github.com/Lind-Project/lind-wasm/blob/main/scripts/lind_compile) script compiles `.c` programs to `.wasm` binaries for lind.
 
 Example of a compile script: [`examples/geteuid-grate/compile_grate.sh`](./examples/geteuid-grate/compile_grate.sh)
 
