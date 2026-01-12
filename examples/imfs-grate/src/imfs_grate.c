@@ -32,8 +32,10 @@ int pass_fptr_to_wt(uint64_t fn_ptr_uint, uint64_t cageid, uint64_t arg1,
 		  arg4cage, arg5, arg5cage, arg6, arg6cage);
 }
 
+// Stores list of files on host that need to be copied in before cage execution.
 const char *preload_files;
 
+// This is a util function to enable logging syscall invocations along with inputs and return value.
 static inline void sys_log_args(const char *name, uint64_t arg1, uint64_t arg2,
 				uint64_t arg3, uint64_t arg4, uint64_t arg5,
 				uint64_t arg6, int ret) {
@@ -64,11 +66,19 @@ static inline void sys_log_args(const char *name, uint64_t arg1, uint64_t arg2,
 #define SYS_LOG(name, ret)                                                     \
 	sys_log_args((name), arg1, arg2, arg3, arg4, arg5, arg6, (ret))
 
+/*
+ * These functions are the wrappers for FS related syscalls.
+ *
+ * IMFS registers open, close, read, write, and fcntl syscalls.
+*/
+
 int open_grate(uint64_t cageid, uint64_t arg1, uint64_t arg1cage, uint64_t arg2,
 	       uint64_t arg2cage, uint64_t arg3, uint64_t arg3cage,
 	       uint64_t arg4, uint64_t arg4cage, uint64_t arg5,
 	       uint64_t arg5cage, uint64_t arg6, uint64_t arg6cage) {
 	int thiscage = getpid();
+
+	// Copying the char* pathname into the grate's memory.
 	char *pathname = malloc(256);
 
 	if (pathname == NULL) {
@@ -76,9 +86,28 @@ int open_grate(uint64_t cageid, uint64_t arg1, uint64_t arg1cage, uint64_t arg2,
 		exit(EXIT_FAILURE);
 	}
 
+	// This is an API provided by `lind_syscall.h` which is used to copy buffers
+	// from one cage's memory to another's.
+	//
+	// This is useful for syscall wrappers where arguments passed by reference
+	// must be copied into the grate before the operation and copied back to the cage
+	// afterward.
+	//
+	// Syntax:
+	//
+	// copy_data_between_cages(
+	// 	thiscage,	ID of the cage initiating the call.
+	// 	srcaddr,	Virtual address in srccage where the data starts.
+	// 	srccage,	Cage that owns the source data.
+	// 	destaddr,	Destination virtual address in destcage.
+	// 	destcage,	Cage that will receive the copied data.
+	// 	len,		Number of bytes to copy for memcpy mode.
+	// 	copytype,	Type of copy: 0 = raw (memcpy), 1 = bounded string (strncpy).
+	// );
 	copy_data_between_cages(thiscage, arg1cage, arg1, arg1cage,
 				(uint64_t)pathname, thiscage, 256, 1);
 
+	// Call imfs_open() from the IMFS library
 	int ifd = imfs_open(cageid, pathname, arg2, arg3);
 
 	SYS_LOG("OPEN", ifd);
@@ -125,6 +154,8 @@ off_t lseek_grate(uint64_t cageid, uint64_t arg1, uint64_t arg1cage,
 	return ret;
 }
 
+// Read: Copy memory from grate to cage.
+// Write: Copy memory from cage to grate.
 int read_grate(uint64_t cageid, uint64_t arg1, uint64_t arg1cage, uint64_t arg2,
 	       uint64_t arg2cage, uint64_t arg3, uint64_t arg3cage,
 	       uint64_t arg4, uint64_t arg4cage, uint64_t arg5,
@@ -144,7 +175,6 @@ int read_grate(uint64_t cageid, uint64_t arg1, uint64_t arg1cage, uint64_t arg2,
 	}
 
 	ret = imfs_read(cageid, arg1, buf, count);
-
 	// Sometimes read() is called with a NULL buffer, do not call cp_data in
 	// that case.
 	if (arg2 != 0) {
@@ -186,10 +216,6 @@ int write_grate(uint64_t cageid, uint64_t arg1, uint64_t arg1cage,
 		return write(arg1, buffer, count);
 	}
 
-	// Often allocation for one contiguos block of memory for a file's
-	// content fails due to memory fragmentation for larger files.
-	// imfs_new_write stores file's content into smaller chunks connected
-	// through a linked list.
 	ret = imfs_write(cageid, arg1, buffer, count);
 	free(buffer);
 
