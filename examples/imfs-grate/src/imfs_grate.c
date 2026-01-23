@@ -126,6 +126,29 @@ int fcntl_grate(uint64_t cageid, uint64_t arg1, uint64_t arg1cage,
 	return ret;
 }
 
+int unlink_grate(uint64_t cageid, uint64_t arg1, uint64_t arg1cage,
+		uint64_t arg2, uint64_t arg2cage, uint64_t arg3,
+		uint64_t arg3cage, uint64_t arg4, uint64_t arg4cage,
+		uint64_t arg5, uint64_t arg5cage, uint64_t arg6,
+		uint64_t arg6cage) {
+	int thiscage = getpid();
+
+	char *pathname = malloc(256);
+
+	if (pathname == NULL) {
+		perror("malloc failed");
+		exit(EXIT_FAILURE);
+	}
+
+	copy_data_between_cages(thiscage, arg1cage, arg1, arg1cage,
+				(uint64_t)pathname, thiscage, 256, 1);
+
+	int ret = imfs_unlink(cageid, pathname);
+
+	SYS_LOG("UNLINK", ret);
+	return ret;
+}
+
 int close_grate(uint64_t cageid, uint64_t arg1, uint64_t arg1cage,
 		uint64_t arg2, uint64_t arg2cage, uint64_t arg3,
 		uint64_t arg3cage, uint64_t arg4, uint64_t arg4cage,
@@ -202,7 +225,7 @@ int write_grate(uint64_t cageid, uint64_t arg1, uint64_t arg1cage,
 	int count = arg3;
 	int ret = 1604;
 
-	char *buffer = malloc(256);
+	char *buffer = malloc(count);
 
 	if (buffer == NULL) {
 		perror("malloc failed.");
@@ -272,6 +295,10 @@ int main(int argc, char *argv[]) {
 		// FCNTL
 		fn_ptr_addr = (uint64_t)(uintptr_t)&fcntl_grate;
 		ret = register_handler(cageid, 72, 1, grateid, fn_ptr_addr);
+
+		// UNLINK
+		fn_ptr_addr = (uint64_t)(uintptr_t)&unlink_grate;
+		ret = register_handler(cageid, 87, 1, grateid, fn_ptr_addr);
 
 		if (execv(argv[1], &argv[1]) == -1) {
 			perror("execv failed");
