@@ -182,6 +182,7 @@ static Node *imfs_create_node(const char *name, NodeType type, mode_t mode) {
 	}
 
 	g_nodes[node_index].in_use = 0;
+	g_nodes[node_index].doomed = 0;
 	g_nodes[node_index].type = type;
 	g_nodes[node_index].total_size = 0;
 	g_nodes[node_index].d_count = 0;
@@ -323,6 +324,9 @@ static int add_child(Node *parent, Node *node) {
 
 	str_ncopy(parent->d_children[parent->d_count].name, node->name,
 		  MAX_NODE_NAME);
+	int length = str_len(node->name);
+	parent->d_children[parent->d_count].name[length] = '\0';
+
 	parent->d_count = new_count;
 	node->parent_idx = parent->index;
 
@@ -470,6 +474,12 @@ static ssize_t __imfs_pipe_read(int cage_id, int fd, void *buf, size_t count,
 static ssize_t imfs_new_read(int cage_id, int fd, void *buf, size_t count,
 			     int pread, off_t offset) {
 	FileDesc *fdesc = get_filedesc(cage_id, fd);
+
+	if ((fdesc->flags & O_ACCMODE) == O_WRONLY) {
+		errno = EBADF;
+		return -1;
+	}
+
 	Node *node = fdesc->node;
 	off_t use_offset = pread ? offset : fdesc->offset;
 
@@ -538,8 +548,13 @@ static ssize_t imfs_new_write(int cage_id, int fd, const void *buf,
 			      size_t count, int pread, off_t offset) {
 	FileDesc *fdesc = get_filedesc(cage_id, fd);
 
+	if ((fdesc->flags & O_ACCMODE) == O_RDONLY) {
+		errno = EBADF;
+		return -1;
+	}
+
 	Node *node = fdesc->node;
-	off_t use_offset = pread ? offset : fdesc->offset;
+	off_t use_offset = pread ? offset : (fdesc->flags & O_APPEND ? node->total_size : fdesc->offset);
 
 	size_t written = 0;
 
@@ -573,6 +588,11 @@ static ssize_t imfs_new_write(int cage_id, int fd, const void *buf,
 		if (to_copy > space)
 			to_copy = space;
 
+		// Zero-fill any hole before writing
+		if (local_offset > c->used) {
+			memset(c->data + c->used, 0, local_offset - c->used);
+		}
+
 		mem_cpy(c->data + local_offset, buf + written, to_copy);
 
 		if (local_offset + to_copy > c->used)
@@ -583,7 +603,8 @@ static ssize_t imfs_new_write(int cage_id, int fd, const void *buf,
 		c = c->next;
 	}
 
-	node->total_size = offset + written;
+	if(use_offset + written > node->total_size)
+		node->total_size = use_offset + written;
 
 	if (!pread)
 		fdesc->offset += written;
@@ -886,20 +907,20 @@ int imfs_openat(int cage_id, int dirfd, const char *path, int flags,
 
 		switch (O_ACCMODE & flags) {
 			case O_RDONLY:
-				if (!(node->mode & S_IROTH)) {
+				if (!(node->mode & S_IRUSR)) {
 					errno = EACCES;
 					return -EACCES;
 				}
 				break;
 			case O_RDWR:
-				if (!(node->mode & S_IWOTH) ||
-				    !(node->mode & S_IROTH)) {
+				if (!(node->mode & S_IWUSR) ||
+				    !(node->mode & S_IRUSR)) {
 					errno = EACCES;
 					return -EACCES;
 				}
 				break;
 			case O_WRONLY:
-				if (!(node->mode & S_IWOTH)) {
+				if (!(node->mode & S_IWUSR)) {
 					errno = EACCES;
 					return -EACCES;
 				}
@@ -1232,7 +1253,7 @@ off_t imfs_lseek(int cage_id, int fd, off_t offset, int whence) {
 			ret += offset;
 			break;
 		case SEEK_END:
-			ret = fdesc->node->total_size;
+			ret = fdesc->node->total_size + offset;
 			break;
 #ifdef _GNU_SOURCE
 		case SEEK_HOLE:
