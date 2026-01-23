@@ -13,7 +13,7 @@
 
 #define FAIL(msg)                                                              \
 	do {                                                                   \
-		fprintf(stderr, "FAIL: %s - %s\n", __func__, msg);             \
+		printf("FAIL: %s - %s\n", __func__, msg);                      \
 		failures++;                                                    \
 		return 1;                                                      \
 	} while (0)
