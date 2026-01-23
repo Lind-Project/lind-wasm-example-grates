@@ -16,7 +16,7 @@
 #define MAX_NODE_NAME 65
 #define MAX_NODE_SIZE 4096
 #define MAX_FDS 1024
-#define MAX_NODES 10
+#define MAX_NODES 20 
 #define MAX_DEPTH 10
 #define MAX_PROCS 128
 
