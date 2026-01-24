@@ -259,6 +259,10 @@ int main(int argc, char *argv[]) {
 
 	imfs_init();
 
+	// Load files into memory before execution
+	preload_files = getenv("PRELOADS");
+	preloads(preload_files);
+
 	pid_t pid = fork();
 	if (pid < 0) {
 		perror("fork failed");
@@ -267,10 +271,6 @@ int main(int argc, char *argv[]) {
 		int cageid = getpid();
 		int ret;
 		uint64_t fn_ptr_addr;
-
-		// Sleeping allows for parent proc to preload
-		// files into memory.
-		sleep(3);
 
 		// OPEN
 		fn_ptr_addr = (uint64_t)(uintptr_t)&open_grate;
@@ -304,13 +304,6 @@ int main(int argc, char *argv[]) {
 			perror("execv failed");
 			exit(EXIT_FAILURE);
 		}
-	} else {
-		// Files are loaded into memory AFTER fork has been
-		// called. This is because fork/clone fails if these
-		// files are loaded into memory pre fork. Likely due to
-		// memory limitations.
-		preload_files = getenv("PRELOADS");
-		preloads(preload_files);
 	}
 
 	int status;
