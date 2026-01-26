@@ -15,7 +15,7 @@
 
 // Global state for the IMFS
 struct IMFState {
-	Node nodes[1024];
+	Node nodes[MAX_NODES];
 	int next_node;
 	int free_list[MAX_NODES];
 	int free_list_size;
@@ -201,6 +201,17 @@ static Node *imfs_create_node(const char *name, NodeType type, mode_t mode) {
 	str_ncopy(g_nodes[node_index].name, name, MAX_NODE_NAME);
 	int length = str_len(name);
 	g_nodes[node_index].name[length] = '\0';
+
+	/* If directory, allocate initial children array */
+	if (type == M_DIR) {
+		g_nodes[node_index].d_capacity = MAX_NODES;
+		g_nodes[node_index].d_children = calloc(g_nodes[node_index].d_capacity, sizeof(DirEnt));
+		if (!g_nodes[node_index].d_children) {
+			errno = ENOMEM;
+			return NULL;
+		}
+		g_nodes[node_index].d_count = 0;
+	}
 	return &g_nodes[node_index];
 }
 
@@ -317,6 +328,16 @@ static Node *imfs_find_node(int cage_id, int dirfd, const char *path) {
 static int add_child(Node *parent, Node *node) {
 	if (!parent || !node || parent->type != M_DIR)
 		return -1;
+
+	/* grow children array if needed */
+	if (parent->d_count >= parent->d_capacity) {
+		size_t newcap = parent->d_capacity ? parent->d_capacity * 2 : MAX_NODES;
+		DirEnt *n = realloc(parent->d_children, newcap * sizeof(DirEnt));
+		if (!n)
+			return -1;
+		parent->d_children = n;
+		parent->d_capacity = newcap;
+	}
 
 	size_t new_count = parent->d_count + 1;
 
@@ -436,6 +457,12 @@ static int imfs_remove_dir(Node *node) {
 
 	if (!node->in_use) {
 		g_free_list[++g_free_list_size] = node->index;
+		/* free dynamic children storage if allocated */
+		if (node->d_children) {
+			free(node->d_children);
+			node->d_children = NULL;
+			node->d_capacity = 0;
+		}
 		node->type = M_NON;
 	}
 
@@ -775,14 +802,16 @@ void imfs_init(void) {
 
 	for (int i = 0; i < MAX_NODES; i++) {
 		g_nodes[i] = (Node){
-		    .type = M_NON,
-		    .index = i,
-		    .in_use = 0,
-		    .d_count = 0,
-		    .total_size = 0,
-		    .info = NULL,
-		    .mode = 0,
+			.type = M_NON,
+			.index = i,
+			.in_use = 0,
+			.d_count = 0,
+			.total_size = 0,
+			.mode = 0,
 		};
+		/* ensure dir children pointer is NULL and capacity zero */
+		g_nodes[i].d_children = NULL;
+		g_nodes[i].d_capacity = 0;
 	}
 
 	for (int i = 0; i < MAX_PROCS; i++) {
@@ -951,6 +980,12 @@ int imfs_close(int cage_id, int fd) {
 	fdesc->node->in_use--;
 
 	if (fdesc->node->doomed) {
+		/* if it's a directory, free its children buffer */
+		if (fdesc->node->type == M_DIR && fdesc->node->d_children) {
+			free(fdesc->node->d_children);
+			fdesc->node->d_children = NULL;
+			fdesc->node->d_capacity = 0;
+		}
 		fdesc->node->type = M_NON;
 		g_free_list[++g_free_list_size] = fdesc->node->index;
 	}
@@ -1395,3 +1430,4 @@ int imfs_pathconf(int cage_id, const char *pathname, int name) {
 }
 
 int imfs_fpathconf(int cage_id, int fd, int name) { return PC_CONSTS[name]; }
+

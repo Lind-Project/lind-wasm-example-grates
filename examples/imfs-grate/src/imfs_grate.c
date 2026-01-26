@@ -257,6 +257,7 @@ int main(int argc, char *argv[]) {
 
 	int grateid = getpid();
 
+	// Initialize imfs data structures.
 	imfs_init();
 
 	// Load files into memory before execution

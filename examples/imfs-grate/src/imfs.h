@@ -16,7 +16,7 @@
 #define MAX_NODE_NAME 65
 #define MAX_NODE_SIZE 4096
 #define MAX_FDS 1024
-#define MAX_NODES 20 
+#define MAX_NODES 1024 
 #define MAX_DEPTH 10
 #define MAX_PROCS 128
 
@@ -56,6 +56,7 @@ typedef enum {
 
 #define d_children info.dir.children
 #define d_count info.dir.count
+#define d_capacity info.dir.capacity
 #define l_link info.lnk.link
 #define r_data info.reg.data
 #define r_head info.reg.head
@@ -102,9 +103,9 @@ typedef struct Node {
 
 		// M_DIR
 		struct {
-			struct DirEnt
-			    children[MAX_NODES]; /* Directory contents. */
+			struct DirEnt *children; /* Directory contents (dynamically allocated). */
 			size_t count; /* len(children) including . and .. */
+			size_t capacity; /* allocated capacity for children */
 		} dir;
 
 		// M_PIP
