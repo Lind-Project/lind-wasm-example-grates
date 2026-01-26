@@ -1,20 +1,28 @@
 // Rust port of the geteuid grate example from examples/geteuid-grate
 //
+// A grate is a process that intercepts and handles system calls for child
+// processes called "cages".
+//
+// This example demonstrates how to create a grate
+// that intercepts the geteuid() syscall and returns a hardcoded value instead
+// of the real effective user ID.
+//
 // Key Rust-specific changes from the C version:
 // - Uses extern "C" blocks to declare C functions that will be linked at runtime
 // - Requires unsafe blocks for FFI calls and pointer operations
 // - Uses #[unsafe(no_mangle)] to export the dispatcher function to C
 // - Leverages Rust's ownership system for string handling before FFI conversion
 
-use core::ffi::{c_int, c_char};
+use core::ffi::{c_char, c_int};
 use libc::{EXIT_FAILURE, perror, pid_t};
 use std::ffi::CString;
 use std::{env, ptr};
 
 // External C functions that will be linked at runtime by the Lind sysroot
-// 
-// Since `register_handler` and `copy_data_between_cages` are defined in C, 
-// they require an unsafe extern "C" block. 
+//
+// These functions are provided by the Lind runtime for:
+// - register_handler: Intercepting syscalls from cages
+// - geteuid/getpid/fork/execv/waitpid: Standard system calls available in Lind's sysroot
 unsafe extern "C" {
     // Register a syscall handler for a specific cage
     // This function is provided by the Lind runtime for intercepting syscalls
@@ -34,11 +42,22 @@ unsafe extern "C" {
     pub fn waitpid(pid: pid_t, status: *mut c_int, options: c_int) -> pid_t;
 }
 
-// Dispatcher function - must be exported with no_mangle for C interop
+// Dispatcher function
 //
-// This is the entry point called by the Lind runtime when an intercepted
-// syscall occurs. The #[unsafe(no_mangle)] attribute prevents Rust from
-// mangling the function name, making it callable from C code.
+// Entry point into a grate when a child cage invokes a registered
+// syscall. This function is used to invoke the appropriate handler,
+// and the value returned is passed down to the calling cage.
+//
+// Args:
+// 	fn_ptr_uint	Address of the registered syscall handler within the
+// 			grate's address space.
+// 	cageid		Identifier of the calling cage.
+// 	arg[1-6]	Syscall arguments. Numeric types are passed by value, pointers
+// 			are passed as addresses in the originating cage's address space.
+// 	arg[1-6]cage	Cage IDs corresponding to each argument, indicating which cage's address
+// 			space the argument belongs to.
+//
+// This function must be exported with #[unsafe(no_mangle)] for C interop
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pass_fptr_to_wt(
@@ -66,7 +85,19 @@ pub unsafe extern "C" fn pass_fptr_to_wt(
         // Cast the u64 function pointer back to a callable function
         // This uses transmute to convert between pointer types, which is unsafe
         let fn_ptr: extern "C" fn(
-            u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64,
+            u64,
+            u64,
+            u64,
+            u64,
+            u64,
+            u64,
+            u64,
+            u64,
+            u64,
+            u64,
+            u64,
+            u64,
+            u64,
         ) -> i32 = core::mem::transmute(fn_ptr_uint as usize);
 
         // Call the handler function with all arguments passed through
@@ -79,12 +110,15 @@ pub unsafe extern "C" fn pass_fptr_to_wt(
 
 // The actual geteuid syscall handler
 //
-// This function replaces the real geteuid syscall.
+// This function replaces the real geteuid syscall. When a cage calls geteuid(),
+// this handler is invoked instead and returns a hardcoded value (4321).
+// In a real implementation, this could perform custom logic like checking
+// permissions or returning different values based on cage context.
 //
 // The signature matches what the dispatcher expects to call.
 extern "C" fn geteuid_grate(
-    _cageid: u64,   
-    _arg1: u64,     
+    cageid: u64,
+    _arg1: u64,
     _arg1cage: u64,
     _arg2: u64,
     _arg2cage: u64,
@@ -97,10 +131,26 @@ extern "C" fn geteuid_grate(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    4321  
+    println!("[grate] In geteuid_grate handler for cage: {}", cageid);
+
+    // Return a hardcoded geteuid value
+    4321
 }
 
-// Main function - wrapped in unsafe block due to FFI and pointer operations
+// Main function - implements the standard grate process lifecycle
+//
+// The main function will always be similar in all grates. It performs the
+// following steps:
+// 1. Validates command line arguments (needs at least the cage program to execute)
+// 2. Gets its own process ID as the grate identifier
+// 3. Forks to create a child process that becomes the cage
+// 4. In the child (cage): registers syscall handlers and execs the target program
+// 5. In the parent (grate): waits for the child to complete
+//
+// Because cages are unaware of grates, the grate instance manages the exec
+// logic. It forks and execs exactly once to execute the child binary provided
+// as argv[1], passing argv[1..] as that program's command-line arguments.
+// Any further process management is handled by the executed program.
 //
 // The entire main function is unsafe because it performs:
 // - FFI calls to C functions
@@ -109,6 +159,12 @@ extern "C" fn geteuid_grate(
 
 fn main() {
     let argv: Vec<String> = env::args().collect();
+
+    // Should be at least two inputs (at least one grate file and one cage file)
+    if argv.len() < 2 {
+        eprintln!("Usage: {} <cage_file>", argv[0]);
+        std::process::exit(libc::EXIT_FAILURE);
+    }
 
     unsafe {
         // Get the grate's process ID (used as grate identifier)
@@ -126,14 +182,23 @@ fn main() {
 
             // Register the geteuid handler for this cage
             // syscall_nr = 107 (geteuid), handle_flag = 1 (register)
+            // Syntax of register_handler:
+            //   register_handler(
+            //     cageid,        - Cage ID to be intercepted
+            //     syscall_nr,    - Syscall number to be intercepted (107 = geteuid)
+            //     handle_flag,   - 0 for deregister, non-0 for register
+            //     grateid,       - Grate ID to redirect call to
+            //     fn_ptr_addr    - Handler function pointer
+            //   )
             let fn_ptr_addr = geteuid_grate as *const () as usize as u64;
+            println!(
+                "[grate] Registering geteuid handler for cage {} in grate {} with fn ptr addr: {}",
+                cageid, grateid, fn_ptr_addr
+            );
             let ret = register_handler(cageid, 107, 1, grateid as u64, fn_ptr_addr);
 
             if ret != 0 {
-                eprintln!(
-                    "[grate] failed to register syscall {} (ret={})",
-                    107, ret
-                );
+                eprintln!("[grate] failed to register syscall {} (ret={})", 107, ret);
                 libc::_exit(EXIT_FAILURE);
             }
 
@@ -148,7 +213,7 @@ fn main() {
             let mut c_argv: Vec<*mut i8> =
                 cstrings.iter_mut().map(|s| s.as_ptr() as *mut i8).collect();
 
-            c_argv.push(ptr::null_mut());  // Null terminate the argument array
+            c_argv.push(ptr::null_mut()); // Null terminate the argument array
 
             // Execute the target program (argv[1]) with the remaining arguments
             let path = CString::new(argv[1].as_str()).unwrap();
