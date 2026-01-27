@@ -13,7 +13,7 @@
 // - Uses #[unsafe(no_mangle)] to export the dispatcher function to C
 // - Leverages Rust's ownership system for string handling before FFI conversion
 
-use core::ffi::{c_char, c_int};
+use core::ffi::{c_char, c_int, c_void};
 use libc::{EXIT_FAILURE, perror, pid_t};
 use std::ffi::CString;
 use std::{env, ptr};
@@ -40,6 +40,7 @@ unsafe extern "C" {
     pub fn fork() -> pid_t;
     pub fn execv(prog: *const c_char, argv: *const *mut c_char) -> c_int;
     pub fn waitpid(pid: pid_t, status: *mut c_int, options: c_int) -> pid_t;
+    pub fn pipe(fds: *mut c_int) -> c_int;
 }
 
 // Dispatcher function
@@ -141,11 +142,11 @@ extern "C" fn geteuid_grate(
 //
 // The main function will always be similar in all grates. It performs the
 // following steps:
-// 1. Validates command line arguments (needs at least the cage program to execute)
-// 2. Gets its own process ID as the grate identifier
-// 3. Forks to create a child process that becomes the cage
-// 4. In the child (cage): registers syscall handlers and execs the target program
-// 5. In the parent (grate): waits for the child to complete
+// 1. Validate command line arguments (needs as least the cage program to execute)
+// 2. Fork to create the child cage which executes the input binary.
+// 3. In the cage: Wait for grate to complete registrations, then exec the cage binary.
+// 4. In the grate: Register handlers for the cage, send a ready signal to the cage, wait for cage
+//    to exit
 //
 // Because cages are unaware of grates, the grate instance manages the exec
 // logic. It forks and execs exactly once to execute the child binary provided
@@ -165,42 +166,42 @@ fn main() {
         eprintln!("Usage: {} <cage_file>", argv[0]);
         std::process::exit(libc::EXIT_FAILURE);
     }
-
     unsafe {
         // Get the grate's process ID (used as grate identifier)
         let grateid: pid_t = getpid();
 
+        // In this model, we register handlers in the grate rather than the cage.
+        //
+        // This requires us to coordinate the grate and cage lifecycles so that the cage is aware
+        // of when it's okay to proceed with exec-ing the cage binary.
+        //
+        // We use pipes to achieve this. The child cage listens for the ready signal from the
+        // parent grate that is sent after the handler registration process is complete.
+        let mut fds = [0; 2];
+        if pipe(fds.as_mut_ptr()) != 0 {
+            perror(b"pipe failed\0".as_ptr() as *const _);
+        }
+
+        let read_fd = fds[0];
+        let write_fd = fds[1];
+
         // Fork to create a child process that will become the cage
-        let pid: pid_t = fork();
-        if pid < 0 {
+        let cageid: pid_t = fork();
+        if cageid < 0 {
             perror(b"fork failed\0".as_ptr() as *const _);
             libc::_exit(EXIT_FAILURE);
-        } else if pid == 0 {
+        } else if cageid == 0 {
             // Child process - this becomes the cage
 
-            let cageid = getpid() as u64;
+            // Before we exec the child cage, we need to wait for the parent grate to
+            // finish the required setup process. In this example, the setup process
+            // involves registering a handler for the geteuid syscall.
+            libc::close(write_fd);
 
-            // Register the geteuid handler for this cage
-            // syscall_nr = 107 (geteuid), handle_flag = 1 (register)
-            // Syntax of register_handler:
-            //   register_handler(
-            //     cageid,        - Cage ID to be intercepted
-            //     syscall_nr,    - Syscall number to be intercepted (107 = geteuid)
-            //     handle_flag,   - 0 for deregister, non-0 for register
-            //     grateid,       - Grate ID to redirect call to
-            //     fn_ptr_addr    - Handler function pointer
-            //   )
-            let fn_ptr_addr = geteuid_grate as *const () as usize as u64;
-            println!(
-                "[grate] Registering geteuid handler for cage {} in grate {} with fn ptr addr: {}",
-                cageid, grateid, fn_ptr_addr
-            );
-            let ret = register_handler(cageid, 107, 1, grateid as u64, fn_ptr_addr);
+            let mut buf: u8 = 0;
+            libc::read(read_fd, &mut buf as *mut u8 as *mut c_void, 1);
 
-            if ret != 0 {
-                eprintln!("[grate] failed to register syscall {} (ret={})", 107, ret);
-                libc::_exit(EXIT_FAILURE);
-            }
+            libc::close(read_fd);
 
             // Prepare arguments for execv - convert Rust String to C-compatible format
             // This involves creating owned CString objects to ensure null-termination
@@ -221,10 +222,40 @@ fn main() {
 
             perror(b"execv failed\0".as_ptr() as *const _);
             libc::_exit(EXIT_FAILURE);
-        } else {
-            // Parent process - wait for the child to complete
-            waitpid(pid, ptr::null_mut(), 0);
-            libc::_exit(0);
         }
+        // Parent process - Register handlers for the cage, wait for it to exit.
+
+        libc::close(read_fd);
+
+        // Register the geteuid handler for this cage
+        // syscall_nr = 107 (geteuid), handle_flag = 1 (register)
+        // Syntax of register_handler:
+        //   register_handler(
+        //     cageid,        - Cage ID to be intercepted
+        //     syscall_nr,    - Syscall number to be intercepted (107 = geteuid)
+        //     handle_flag,   - 0 for deregister, non-0 for register
+        //     grateid,       - Grate ID to redirect call to
+        //     fn_ptr_addr    - Handler function pointer
+        //   )
+        let fn_ptr_addr = geteuid_grate as *const () as usize as u64;
+        println!(
+            "[grate] Registering geteuid handler for cage {} in grate {} with fn ptr addr: {}",
+            cageid, grateid, fn_ptr_addr
+        );
+        let ret = register_handler(cageid as u64, 107, 1, grateid as u64, fn_ptr_addr);
+
+        if ret != 0 {
+            eprintln!("[grate] failed to register syscall {} (ret={})", 107, ret);
+            libc::_exit(EXIT_FAILURE);
+        }
+
+        // Signal to the child cage that it can proceed with executing the program.
+        let signal: u8 = 1;
+        libc::write(write_fd, &signal as *const u8 as *const c_void, 1);
+
+        libc::close(write_fd);
+
+        waitpid(cageid, ptr::null_mut(), 0);
+        libc::_exit(0);
     }
 }
