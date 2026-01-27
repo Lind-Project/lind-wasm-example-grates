@@ -8,6 +8,8 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <semaphore.h>
+#include <sys/mman.h>
 
 #include "imfs.h"
 
@@ -255,6 +257,16 @@ int main(int argc, char *argv[]) {
 		exit(EXIT_FAILURE);
 	}
 
+	// Create a semaphore to synchronize the grate and cage lifecycles.
+	//
+	// In this model, we call register_handler on the desired syscalls from the
+	// grate rather than the newly forked child process.
+	//
+	// We use an unnamed semaphore to ensure that the cage only calls exec once the
+	// grate has completed the necessary setup.
+	sem_t *sem = mmap(NULL, sizeof(*sem), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
+	sem_init(sem, 1, 0);
+
 	int grateid = getpid();
 
 	// Initialize imfs data structures.
@@ -264,48 +276,52 @@ int main(int argc, char *argv[]) {
 	preload_files = getenv("PRELOADS");
 	preloads(preload_files);
 
-	pid_t pid = fork();
-	if (pid < 0) {
+	pid_t cageid = fork();
+	if (cageid < 0) {
 		perror("fork failed");
 		exit(EXIT_FAILURE);
-	} else if (pid == 0) {
-		int cageid = getpid();
-		int ret;
-		uint64_t fn_ptr_addr;
-
-		// OPEN
-		fn_ptr_addr = (uint64_t)(uintptr_t)&open_grate;
-		ret = register_handler(cageid, 2, 1, grateid, fn_ptr_addr);
-
-		// LSEEK
-		fn_ptr_addr = (uint64_t)(uintptr_t)&lseek_grate;
-		ret = register_handler(cageid, 8, 1, grateid, fn_ptr_addr);
-
-		// READ
-		fn_ptr_addr = (uint64_t)(uintptr_t)&read_grate;
-		ret = register_handler(cageid, 0, 1, grateid, fn_ptr_addr);
-
-		// WRITE
-		fn_ptr_addr = (uint64_t)(uintptr_t)&write_grate;
-		ret = register_handler(cageid, 1, 1, grateid, fn_ptr_addr);
-
-		// CLOSE
-		fn_ptr_addr = (uint64_t)(uintptr_t)&close_grate;
-		ret = register_handler(cageid, 3, 1, grateid, fn_ptr_addr);
-
-		// FCNTL
-		fn_ptr_addr = (uint64_t)(uintptr_t)&fcntl_grate;
-		ret = register_handler(cageid, 72, 1, grateid, fn_ptr_addr);
-
-		// UNLINK
-		fn_ptr_addr = (uint64_t)(uintptr_t)&unlink_grate;
-		ret = register_handler(cageid, 87, 1, grateid, fn_ptr_addr);
+	} else if (cageid == 0) {
+		// Wait for grate to complete setup actions.
+		sem_wait(sem);
 
 		if (execv(argv[1], &argv[1]) == -1) {
 			perror("execv failed");
 			exit(EXIT_FAILURE);
 		}
 	}
+	int ret;
+	uint64_t fn_ptr_addr;
+
+	// OPEN
+	fn_ptr_addr = (uint64_t)(uintptr_t)&open_grate;
+	ret = register_handler(cageid, 2, 1, grateid, fn_ptr_addr);
+
+	// LSEEK
+	fn_ptr_addr = (uint64_t)(uintptr_t)&lseek_grate;
+	ret = register_handler(cageid, 8, 1, grateid, fn_ptr_addr);
+
+	// READ
+	fn_ptr_addr = (uint64_t)(uintptr_t)&read_grate;
+	ret = register_handler(cageid, 0, 1, grateid, fn_ptr_addr);
+
+	// WRITE
+	fn_ptr_addr = (uint64_t)(uintptr_t)&write_grate;
+	ret = register_handler(cageid, 1, 1, grateid, fn_ptr_addr);
+
+	// CLOSE
+	fn_ptr_addr = (uint64_t)(uintptr_t)&close_grate;
+	ret = register_handler(cageid, 3, 1, grateid, fn_ptr_addr);
+
+	// FCNTL
+	fn_ptr_addr = (uint64_t)(uintptr_t)&fcntl_grate;
+	ret = register_handler(cageid, 72, 1, grateid, fn_ptr_addr);
+
+	// UNLINK
+	fn_ptr_addr = (uint64_t)(uintptr_t)&unlink_grate;
+	ret = register_handler(cageid, 87, 1, grateid, fn_ptr_addr);
+
+	// Notify cage that it can proceed with execution.
+	sem_post(sem);
 
 	int status;
 	int w;
@@ -318,6 +334,10 @@ int main(int argc, char *argv[]) {
 			perror("[Grate] [Wait]");
 		}
 	}
+
+	// Clean up the semaphore once the cage has exited.
+	sem_destroy(sem);
+	munmap(sem, sizeof(*sem));
 
 	return 0;
 }
