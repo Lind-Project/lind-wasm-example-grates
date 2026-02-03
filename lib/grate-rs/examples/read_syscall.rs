@@ -1,3 +1,11 @@
+//! Minimal example showing how to by-pass the read syscall with a custom implemention.
+//! 
+//! Highlights (grate-rs APIs used):
+//! - `GrateBuilder`: configure and run a grate-managed cage
+//! - `.register(syscall_num, handler)`: map a syscall number to a handler
+//! - `getcageid()`: obtain the current cage id from inside a handler.
+//! - `copy_data_between_cages(...)`: copy memory between cages.
+
 use grate_rs::{GrateBuilder, copy_data_between_cages, getcageid};
 use std::cmp::min;
 
@@ -48,16 +56,15 @@ extern "C" fn read_syscall(
 }
 
 fn main() {
-    println!("[grate_init] Run any init stuff here, such as imfs_init() or preloads()");
+    println!("[grate_init] Run all required initializations before calling builder.run(), such as imfs_init() or preloads()");
 
     let builder = GrateBuilder::new()
-        .register(0, read_syscall)
-        .cage_init(|| println!("[cage_init] Code to run post-fork but pre-exec"));
+        .register(0, read_syscall);
 
     match builder.run() {
         Ok(status) => {
             println!(
-                "[grate_teardown] Cage exited with: {status}. Run teardown functions such as dump_file()"
+                "[grate_teardown] Cage exited with: {status}. Safe to run teardown functions such as dump_file()"
             );
         }
         Err(e) => {

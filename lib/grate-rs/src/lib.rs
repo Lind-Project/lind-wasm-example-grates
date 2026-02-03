@@ -189,7 +189,7 @@ pub fn make_threei_call(
     arg6: u64,
     arg6cageid: u64,
     translate_errno: c_int,
-) -> Result<(), GrateError> {
+) -> Result<i32, GrateError> {
     let ret = unsafe {
         make_syscall_impl(
             callnumber,
@@ -214,7 +214,7 @@ pub fn make_threei_call(
 
     match ret {
         std::i32::MIN..=-1 => Err(GrateError::MakeSyscallError(ret)),
-        _ => Ok(()),
+        _ => Ok(ret),
     }
 }
 
