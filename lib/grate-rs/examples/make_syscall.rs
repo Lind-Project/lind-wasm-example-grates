@@ -45,7 +45,9 @@ extern "C" fn geteuid_syscall(
 fn main() {
     let builder = GrateBuilder::new().register(107, geteuid_syscall);
 
-    match builder.run() {
+    let argv = std::env::args().skip(1).collect::<Vec<_>>();
+
+    match builder.run(argv) {
         Ok(status) => {
             println!("[grate_teardown] Cage exited with: {status}.");
         }
