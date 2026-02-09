@@ -492,7 +492,7 @@ static ssize_t __imfs_pipe_read(int cage_id, int fd, void *buf, size_t count,
 	};
 
 	int to_read = _pipe->offset;
-	mem_cpy(buf, _pipe->data, to_read);
+	memcpy(buf, _pipe->data, to_read);
 	_pipe->offset = 0;
 
 	return to_read;
@@ -532,7 +532,7 @@ static ssize_t imfs_new_read(int cage_id, int fd, void *buf, size_t count,
 			to_copy = available;
 		}
 
-		mem_cpy(buf + read, c->data + local_offset, to_copy);
+		memcpy(buf + read, c->data + local_offset, to_copy);
 
 		read += to_copy;
 		local_offset = 0;
@@ -564,7 +564,7 @@ static ssize_t __imfs_pipe_write(int cage_id, int fd, const void *buf,
 				 size_t count, int pread, off_t offset) {
 	Pipe *_pipe = get_pipe(cage_id, fd);
 
-	mem_cpy(_pipe->data, buf, count);
+	memcpy(_pipe->data, buf, count);
 	_pipe->offset += count;
 	LOG("[pipe] offset=%zd\n", count);
 
@@ -620,7 +620,7 @@ static ssize_t imfs_new_write(int cage_id, int fd, const void *buf,
 			memset(c->data + c->used, 0, local_offset - c->used);
 		}
 
-		mem_cpy(c->data + local_offset, buf + written, to_copy);
+		memcpy(c->data + local_offset, buf + written, to_copy);
 
 		if (local_offset + to_copy > c->used)
 			c->used = local_offset + to_copy;
@@ -922,7 +922,7 @@ int imfs_openat(int cage_id, int dirfd, const char *path, int flags,
 		}
 	} else {
 		// File Exists
-		if (/*flags & O_EXCL ||*/ flags & O_CREAT) {
+		if (flags & O_EXCL && flags & O_CREAT) {
 			errno = EEXIST;
 			return -EEXIST;
 		}
