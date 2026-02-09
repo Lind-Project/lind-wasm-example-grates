@@ -3,5 +3,9 @@ name = "grate-rs"
 version = "0.1.0"
 edition = "2024"
 
+[[example]]
+name = "strace_grate"
+path = "examples/strace/strace_grate.rs"
+
 [dependencies]
 libc = "0.2"
