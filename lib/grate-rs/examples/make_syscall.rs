@@ -22,7 +22,6 @@ extern "C" fn geteuid_syscall(
 ) -> i32 {
     let ret = grate_rs::make_threei_call(
         107,      // Syscall number for geteuid
-        0,        // Syscall Name, leave NULL
         cageid,   // This cageid is used to look up grate handlers.
         arg1cage, // This cageid is used to make rawposix calls.
         // Pass down syscall arguments

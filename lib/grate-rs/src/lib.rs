@@ -174,7 +174,6 @@ pub fn copy_data_between_cages(
 /// Use threei to make a syscall.
 pub fn make_threei_call(
     callnumber: c_uint,
-    callname: u64,
     self_cageid: u64,
     target_cageid: u64,
     arg1: u64,
@@ -194,7 +193,7 @@ pub fn make_threei_call(
     let ret = unsafe {
         make_syscall_impl(
             callnumber,
-            callname,
+            0,
             self_cageid,
             target_cageid,
             arg1,
