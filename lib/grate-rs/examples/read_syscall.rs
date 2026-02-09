@@ -1,5 +1,5 @@
 //! Minimal example showing how to by-pass the read syscall with a custom implemention.
-//! 
+//!
 //! Highlights (grate-rs APIs used):
 //! - `GrateBuilder`: configure and run a grate-managed cage
 //! - `.register(syscall_num, handler)`: map a syscall number to a handler
@@ -56,12 +56,15 @@ extern "C" fn read_syscall(
 }
 
 fn main() {
-    println!("[grate_init] Run all required initializations before calling builder.run(), such as imfs_init() or preloads()");
+    println!(
+        "[grate_init] Run all required initializations before calling builder.run(), such as imfs_init() or preloads()"
+    );
 
-    let builder = GrateBuilder::new()
-        .register(0, read_syscall);
+    let builder = GrateBuilder::new().register(0, read_syscall);
 
-    match builder.run() {
+    let argv = std::env::args().skip(1).collect::<Vec<_>>();
+
+    match builder.run(argv) {
         Ok(status) => {
             println!(
                 "[grate_teardown] Cage exited with: {status}. Safe to run teardown functions such as dump_file()"

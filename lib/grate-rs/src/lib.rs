@@ -1,7 +1,7 @@
 use core::ffi::{c_char, c_int};
 use libc::{close, pid_t, read, write};
 use std::ffi::{CString, c_uint, c_void};
-use std::{env, ptr};
+use std::ptr;
 
 const ELINDAPIABORTED: u64 = 0xE001_0001;
 
@@ -164,8 +164,9 @@ pub fn copy_data_between_cages(
         )
     };
 
-    match ret {
-        std::i32::MIN..=-1 => Err(GrateError::CopyDataError(ELINDAPIABORTED as i32)),
+    // 3i::copy_data_between_cages returns ELINDAPIABORTED for every error.
+    match ret as u64 {
+        ELINDAPIABORTED => Err(GrateError::CopyDataError(ELINDAPIABORTED as i32)),
         _ => Ok(()),
     }
 }
@@ -292,15 +293,20 @@ impl GrateBuilder {
     /// Build and run the grate.
     ///
     /// This spawns a child cage process and registers handlers in the parent grate process.
-    ///
+    /// ### Inputs
+    ///     arg_vector: Vec<String>     // char* argv[] that is passed down to exec.
+    ///                                 // arg_vector[0] must be the cage binary to run.
     /// ### Returns
-    ///     Err(GrateError) // On failure.
-    ///     Ok(ExitStatus) // Cage exit status.
-    pub fn run(mut self) -> Result<i32, GrateError> {
-        let argv: Vec<String> = env::args().collect();
-        if argv.len() < 2 {
-            eprintln!("Usage: {} <program> [args...]", argv[0]);
-            std::process::exit(1);
+    ///     Err(GrateError)             // On failure.
+    ///     Ok(ExitStatus)              // Cage exit status.
+    pub fn run(mut self, arg_vector: Vec<String>) -> Result<i32, GrateError> {
+        let argv = arg_vector;
+
+        // Return early if no cage binary is provided.
+        if argv.len() < 1 {
+            return Err(GrateError::CoordinationError(format!(
+                "No cage binary provided."
+            )));
         }
 
         let handlers = std::mem::take(&mut self.handlers);
@@ -326,7 +332,7 @@ impl GrateBuilder {
 
                 let _ = call_sys!(close(read_fd))?;
 
-                let mut cstrings: Vec<CString> = argv[1..]
+                let mut cstrings: Vec<CString> = argv[0..]
                     .iter()
                     .map(|s| CString::new(s.as_str()).unwrap())
                     .collect();
@@ -336,7 +342,7 @@ impl GrateBuilder {
 
                 c_argv.push(ptr::null_mut());
 
-                let path = CString::new(argv[1].as_str()).unwrap();
+                let path = CString::new(argv[0].as_str()).unwrap();
 
                 let _ = call_sys!(execv(path.as_ptr(), c_argv.as_ptr()))?;
                 Err(GrateError::CoordinationError(format!(
