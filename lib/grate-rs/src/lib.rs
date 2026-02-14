@@ -1,3 +1,5 @@
+pub mod constants;
+
 use core::ffi::{c_char, c_int};
 use libc::{close, pid_t, read, write};
 use std::ffi::{CString, c_uint, c_void};
