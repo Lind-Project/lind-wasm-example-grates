@@ -1,7 +1,11 @@
+pub mod constants;
+
 use core::ffi::{c_char, c_int};
 use libc::{close, pid_t, read, write};
 use std::ffi::{CString, c_uint, c_void};
 use std::ptr;
+
+use std::io::Write;
 
 const ELINDAPIABORTED: u64 = 0xE001_0001;
 
@@ -14,22 +18,29 @@ const ELINDAPIABORTED: u64 = 0xE001_0001;
 ///     Err(GrateError::CoordinationError) // if the function returns < 0
 ///     Ok(ret) // otherwise
 macro_rules! call_sys {
-    ($fn:ident ( $($arg:expr),* $(,)? )) => {{
+    ($fn:ident ( $($arg:expr),* $(,)?)) => {{
         let ret = unsafe { $fn($($arg),*) };
 
         if ret < 0 {
             let err = std::io::Error::last_os_error();
-            Err(GrateError::CoordinationError(
+            println!("{:#?}", Err::<(), _>(GrateError::CoordinationError(
                 format!(
                     "{} failed: {}",
                     stringify!($fn),
                     err,
                 )
-            ))
-        } else {
-            Ok(ret)
+            )));
+            clean_exit(0);
         }
-    }}
+        ret
+    }};
+}
+
+fn clean_exit(status: i32) -> ! {
+    std::io::stdout().flush().unwrap();
+    std::io::stderr().flush().unwrap();
+
+    std::process::exit(status);
 }
 
 /// Error types that can occur during grate execution.
@@ -110,7 +121,7 @@ unsafe extern "C" {
     fn getpid_impl() -> pid_t;
 
     fn fork() -> pid_t;
-    fn execv(prog: *const c_char, argv: *const *mut c_char) -> c_int;
+    fn execv(prog: *const c_char, argv: *const *const c_char) -> c_int;
     fn waitpid(pid: pid_t, status: *mut c_int, options: c_int) -> pid_t;
     fn pipe(fds: *mut c_int) -> c_int;
 }
@@ -271,9 +282,12 @@ pub unsafe extern "C" fn pass_fptr_to_wt(
     }
 }
 
+pub type GrateTeardownCallback = Box<dyn Fn(Result<i32, GrateError>)>;
+
 /// A builder for creating grates with customizable lifecycle hooks
 pub struct GrateBuilder {
     handlers: Vec<(u64, SyscallHandler)>,
+    teardown: Option<GrateTeardownCallback>,
 }
 
 impl GrateBuilder {
@@ -281,6 +295,7 @@ impl GrateBuilder {
     pub fn new() -> Self {
         Self {
             handlers: Vec::new(),
+            teardown: None,
         }
     }
 
@@ -288,6 +303,28 @@ impl GrateBuilder {
     pub fn register(mut self, syscall_nr: u64, handler: SyscallHandler) -> Self {
         self.handlers.push((syscall_nr, handler));
         self
+    }
+
+    /// Register a teardown callback function. Run after cage exits.
+    pub fn teardown<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(Result<i32, GrateError>) + 'static,
+    {
+        self.teardown = Some(Box::new(callback));
+        self
+    }
+
+    /// Run a GrateTeardownCallback with the Result from `run`
+    fn run_teardown(callback: Option<GrateTeardownCallback>, result: Result<i32, GrateError>) -> ! {
+        match callback {
+            Some(f) => {
+                f(result);
+                clean_exit(0);
+            }
+            None => {
+                clean_exit(0);
+            }
+        }
     }
 
     /// Build and run the grate.
@@ -299,55 +336,57 @@ impl GrateBuilder {
     /// ### Returns
     ///     Err(GrateError)             // On failure.
     ///     Ok(ExitStatus)              // Cage exit status.
-    pub fn run(mut self, arg_vector: Vec<String>) -> Result<i32, GrateError> {
+    pub fn run(mut self, arg_vector: Vec<String>) {
         let argv = arg_vector;
+        let teardown = self.teardown.take();
 
         // Return early if no cage binary is provided.
         if argv.len() < 1 {
-            return Err(GrateError::CoordinationError(format!(
-                "No cage binary provided."
-            )));
+            GrateBuilder::run_teardown(
+                teardown,
+                Err(GrateError::CoordinationError(format!(
+                    "No cage binary provided."
+                ))),
+            );
         }
-
-        let handlers = std::mem::take(&mut self.handlers);
-        drop(self);
 
         let grateid = getcageid();
 
         // Use pipes to synchronize grate-cage lifecycles.
         let mut fds = [0; 2];
-        let _ = call_sys!(pipe(fds.as_mut_ptr()))?;
+        let _ = call_sys!(pipe(fds.as_mut_ptr()));
 
         let read_fd = fds[0];
         let write_fd = fds[1];
 
-        match call_sys!(fork())? {
+        let cstrings: Vec<CString> = argv[0..]
+            .iter()
+            .map(|s| CString::new(s.as_str()).unwrap())
+            .collect();
+
+        let mut c_argv: Vec<*const c_char> = cstrings.iter().map(|s| s.as_ptr()).collect();
+
+        c_argv.push(ptr::null_mut());
+
+        let path = c_argv[0];
+
+        match call_sys!(fork()) {
             0 => {
                 // Child process - will become the cage.
-                let _ = call_sys!(close(write_fd))?;
+                let _ = call_sys!(close(write_fd));
 
                 // Wait for a ready signal from the grate before setting up and executing the cage.
                 let mut buf: u8 = 0;
-                let _ = call_sys!(read(read_fd, &mut buf as *mut u8 as *mut c_void, 1))?;
+                let _ = call_sys!(read(read_fd, &mut buf as *mut u8 as *mut c_void, 1));
 
-                let _ = call_sys!(close(read_fd))?;
-
-                let mut cstrings: Vec<CString> = argv[0..]
-                    .iter()
-                    .map(|s| CString::new(s.as_str()).unwrap())
-                    .collect();
-
-                let mut c_argv: Vec<*mut i8> =
-                    cstrings.iter_mut().map(|s| s.as_ptr() as *mut i8).collect();
-
-                c_argv.push(ptr::null_mut());
-
-                let path = CString::new(argv[0].as_str()).unwrap();
-
-                let _ = call_sys!(execv(path.as_ptr(), c_argv.as_ptr()))?;
-                Err(GrateError::CoordinationError(format!(
-                    "execv failed: child returned post exec"
-                )))
+                let _ = call_sys!(close(read_fd));
+                let _ = call_sys!(execv(path, c_argv.as_ptr()));
+                GrateBuilder::run_teardown(
+                    teardown,
+                    Err(GrateError::CoordinationError(format!(
+                        "execv failed: child returned post exec"
+                    ))),
+                );
             }
             cageid => {
                 // Parent process - the grate handler.
@@ -355,25 +394,25 @@ impl GrateBuilder {
                 let _ = call_sys!(close(read_fd));
 
                 // Register handlers with 3i.
-                for (syscall_nr, handler) in &handlers {
+                for (syscall_nr, handler) in &self.handlers {
                     match register_handler(cageid as u64, *syscall_nr, 1, grateid as u64, *handler)
                     {
                         Ok(_) => {}
-                        Err(ret) => return Err(ret),
+                        Err(ret) => GrateBuilder::run_teardown(teardown, Err(ret)),
                     };
                 }
 
                 // Signal the cage process that handler registration is complete.
                 let signal: u8 = 1;
-                let _ = call_sys!(write(write_fd, &signal as *const u8 as *const c_void, 1))?;
+                let _ = call_sys!(write(write_fd, &signal as *const u8 as *const c_void, 1));
 
-                let _ = call_sys!(close(write_fd))?;
+                let _ = call_sys!(close(write_fd));
 
                 // Wait for the cage process to exit and retrieve its status code.
                 let mut status: i32 = 0;
-                let _ = call_sys!(waitpid(cageid, &mut status as *mut i32 as *mut c_int, 0))?;
+                let _ = call_sys!(waitpid(cageid, &mut status as *mut i32 as *mut c_int, 0));
 
-                return Ok(status);
+                GrateBuilder::run_teardown(teardown, Ok(status));
             }
         }
     }

@@ -3,7 +3,8 @@
 //! Here, the geteuid calls are redirected to the grate for logging purposes.
 //!
 //! The syscall wrapper here uses make_threei_call to call geteuid() as the cage and logs the return value.
-use grate_rs::GrateBuilder;
+use grate_rs::constants::SYS_GETEUID;
+use grate_rs::{GrateBuilder, GrateError};
 
 extern "C" fn geteuid_syscall(
     cageid: u64,
@@ -43,17 +44,13 @@ extern "C" fn geteuid_syscall(
 }
 
 fn main() {
-    let builder = GrateBuilder::new().register(107, geteuid_syscall);
+    let builder = GrateBuilder::new()
+        .register(SYS_GETEUID, geteuid_syscall)
+        .teardown(|result: Result<i32, GrateError>| {
+            println!("Result: {:#?}", result);
+        });
 
     let argv = std::env::args().skip(1).collect::<Vec<_>>();
 
-    match builder.run(argv) {
-        Ok(status) => {
-            println!("[grate_teardown] Cage exited with: {status}.");
-        }
-        Err(e) => {
-            eprintln!("[grate_error] Failed to run grate: {:?}", e);
-            std::process::exit(1);
-        }
-    }
+    builder.run(argv);
 }
