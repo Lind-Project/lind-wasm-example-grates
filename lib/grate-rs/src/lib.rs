@@ -76,13 +76,8 @@ pub type SyscallHandler = extern "C" fn(
 unsafe extern "C" {
     /// External function bindings. We use `link_name` to map Rust names to their sysroot equivalents.
     #[link_name = "register_handler"]
-    fn register_handler_impl(
-        cageid: u64,
-        syscall_nr: u64,
-        handle_flag: u64,
-        grateid: u64,
-        fn_ptr_addr: u64,
-    ) -> c_int;
+    fn register_handler_impl(cageid: u64, syscall_nr: u64, grateid: u64, fn_ptr_addr: u64)
+    -> c_int;
 
     #[link_name = "copy_data_between_cages"]
     fn cp_data_impl(
@@ -136,21 +131,12 @@ unsafe extern "C" {
 pub fn register_handler(
     cageid: u64,
     syscall_nr: u64,
-    register_flag: u64,
     grateid: u64,
     handler: SyscallHandler,
 ) -> Result<(), GrateError> {
     let fn_ptr_addr = handler as *const () as usize as u64;
 
-    let ret = unsafe {
-        register_handler_impl(
-            cageid,
-            syscall_nr,
-            register_flag,
-            grateid as u64,
-            fn_ptr_addr,
-        )
-    };
+    let ret = unsafe { register_handler_impl(cageid, syscall_nr, grateid as u64, fn_ptr_addr) };
 
     match ret {
         0 => Ok(()),
@@ -395,8 +381,7 @@ impl GrateBuilder {
 
                 // Register handlers with 3i.
                 for (syscall_nr, handler) in &self.handlers {
-                    match register_handler(cageid as u64, *syscall_nr, 1, grateid as u64, *handler)
-                    {
+                    match register_handler(cageid as u64, *syscall_nr, grateid as u64, *handler) {
                         Ok(_) => {}
                         Err(ret) => GrateBuilder::run_teardown(teardown, Err(ret)),
                     };
