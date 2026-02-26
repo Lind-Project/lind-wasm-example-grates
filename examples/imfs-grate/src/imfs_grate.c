@@ -432,13 +432,11 @@ int main(int argc, char *argv[]) {
 
 	int status;
 	int w;
+
 	while (1) {
 		w = wait(&status);
 		if (w > 0) {
-			printf("[Grate] terminated, status: %d\n", status);
 			break;
-		} else if (w < 0) {
-			perror("[Grate] [Wait]");
 		}
 	}
 

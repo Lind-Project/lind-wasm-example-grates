@@ -10,6 +10,12 @@
 
 #define GETEUID_SYSCALL 107
 
+#ifdef DEBUG
+#define LOG(...) printf(__VA_ARGS__)
+#else
+#define LOG(...) ((void)0)
+#endif
+
 // Dispatcher function
 //
 // Entry point into a grate when a child cage invokes a registered
@@ -33,14 +39,14 @@ int pass_fptr_to_wt(uint64_t fn_ptr_uint, uint64_t grateid, uint64_t arg1,
 		    uint64_t arg4cage, uint64_t arg5, uint64_t arg5cage,
 		    uint64_t arg6, uint64_t arg6cage) {
 	if (fn_ptr_uint == 0) {
-		fprintf(stderr, "[Grate|geteuid] Invalid function ptr\n");
+		LOG("[Grate|geteuid] Invalid function ptr\n");
 		return -1;
 	}
 
 	int cage_id = arg1cage;
 
-	printf("[Grate|geteuid] Handling function ptr: %llu from cage: %d\n",
-	       fn_ptr_uint, cage_id);
+	LOG("[Grate|geteuid] Handling function ptr: %llu from cage: %d\n",
+	    fn_ptr_uint, cage_id);
 
 	int (*fn)(int) = (int (*)(int))(uintptr_t)fn_ptr_uint;
 
@@ -51,8 +57,8 @@ int pass_fptr_to_wt(uint64_t fn_ptr_uint, uint64_t grateid, uint64_t arg1,
 int geteuid_grate(int);
 
 int geteuid_grate(int cageid) {
-	printf("[Grate|geteuid] In geteuid_grate %d handler for cage: %d\n",
-	       getpid(), cageid);
+	LOG("[Grate|geteuid] In geteuid_grate %d handler for cage: %d\n",
+	    getpid(), cageid);
 	return 10;
 }
 
@@ -61,7 +67,7 @@ int main(int argc, char *argv[]) {
 	// Should be at least two inputs (at least one grate file and one cage
 	// file)
 	if (argc < 2) {
-		fprintf(stderr, "Usage: %s <cage_file>\n", argv[0]);
+		LOG("Usage: %s <cage_file>\n", argv[0]);
 		exit(EXIT_FAILURE);
 	}
 
@@ -93,10 +99,10 @@ int main(int argc, char *argv[]) {
 		//     pointer if registering
 		//   )
 		uint64_t fn_ptr_addr = (uint64_t)(uintptr_t)&geteuid_grate;
-		printf("[Grate|geteuid] Registering geteuid handler for cage "
-		       "%d in "
-		       "grate %d with fn ptr addr: %llu\n",
-		       cageid, grateid, fn_ptr_addr);
+		LOG("[Grate|geteuid] Registering geteuid handler for cage "
+		    "%d in "
+		    "grate %d with fn ptr addr: %llu\n",
+		    cageid, grateid, fn_ptr_addr);
 		int ret = register_handler(cageid, GETEUID_SYSCALL, grateid,
 					   fn_ptr_addr);
 
@@ -108,7 +114,7 @@ int main(int argc, char *argv[]) {
 
 	int status;
 	while (wait(&status) > 0) {
-		printf("[Grate|geteuid] terminated, status: %d\n", status);
+		LOG("[Grate|geteuid] terminated, status: %d\n", status);
 	}
 
 	return 0;
