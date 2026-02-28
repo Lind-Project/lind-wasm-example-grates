@@ -159,6 +159,8 @@ int unlink_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
 	int ret = imfs_unlink(cageid, pathname);
 
 	SYS_LOG("UNLINK", ret);
+
+	free(pathname);
 	return ret;
 }
 
@@ -295,7 +297,9 @@ int write_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
 				(uint64_t)buffer, thiscage, count, 0);
 
 	if (arg1 < 3) {
-		return write(arg1, buffer, count);
+		ret = write(arg1, buffer, count);
+		free(buffer);
+		return ret;
 	}
 
 	ret = imfs_write(cageid, arg1, buffer, count);
@@ -328,7 +332,9 @@ int pwrite_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
 				(uint64_t)buffer, thiscage, count, 0);
 
 	if (arg1 < 3) {
-		return write(arg1, buffer, count);
+		ret = write(arg1, buffer, count);
+		free(buffer);
+		return ret;
 	}
 
 	ret = imfs_pwrite(cageid, arg1, buffer, count, arg4);
@@ -397,15 +403,9 @@ int main(int argc, char *argv[]) {
 	fn_ptr_addr = (uint64_t)(uintptr_t)&read_grate;
 	ret = register_handler(cageid, 0, grateid, fn_ptr_addr);
 
-	fn_ptr_addr = (uint64_t)(uintptr_t)&pread_grate;
-	ret = register_handler(cageid, 17, grateid, fn_ptr_addr);
-
 	// WRITE
 	fn_ptr_addr = (uint64_t)(uintptr_t)&write_grate;
 	ret = register_handler(cageid, 1, grateid, fn_ptr_addr);
-
-	fn_ptr_addr = (uint64_t)(uintptr_t)&pwrite_grate;
-	ret = register_handler(cageid, 18, grateid, fn_ptr_addr);
 
 	// CLOSE
 	fn_ptr_addr = (uint64_t)(uintptr_t)&close_grate;
