@@ -1,3 +1,5 @@
+#ifndef IMFS_H
+#define IMFS_H
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -32,18 +34,7 @@ typedef struct Pipe Pipe;
 typedef struct Chunk Chunk;
 
 // Used for pathconf(3)
-static int PC_CONSTS[] = {
-    0,
-    10,
-    10,
-    10,
-    MAX_NODE_NAME - 1,	      // _PC_NAME_MAX
-    MAX_DEPTH *MAX_NODE_NAME, // _PC_PATH_MAX
-    10,
-    10,
-    10,
-    10,
-};
+extern const int PC_CONSTS[];
 
 typedef enum {
 	M_REG = S_IFREG,
@@ -214,3 +205,5 @@ void load_file(char *);
 void dump_file(char *, char *);
 
 void imfs_init();
+
+#endif /* IMFS_H */

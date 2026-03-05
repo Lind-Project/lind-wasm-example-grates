@@ -13,6 +13,19 @@
 
 #include "imfs.h"
 
+const int PC_CONSTS[] = {
+    0,
+    10,
+    10,
+    10,
+    MAX_NODE_NAME - 1,	      // _PC_NAME_MAX
+    MAX_DEPTH *MAX_NODE_NAME, // _PC_PATH_MAX
+    10,
+    10,
+    10,
+    10,
+};
+
 // Global state for the IMFS
 struct IMFState {
 	Node nodes[MAX_NODES];
@@ -140,14 +153,28 @@ static void mem_cpy(void *dst, const void *src, size_t n) {
 // realloc over and over for preloaded files.
 static char *read_full_file(char *path, size_t *out_size) {
 	FILE *fp = fopen(path, "rb");
+	if (!fp) {
+		return NULL;
+	}
 
-	fseek(fp, 0, SEEK_END);
+	if (fseek(fp, 0, SEEK_END) != 0) {
+		fclose(fp);
+		return NULL;
+	}
 	long size = ftell(fp);
+	if (size < 0) {
+		fclose(fp);
+		return NULL;
+	}
 	rewind(fp);
 
-	char *buf = malloc(size);
+	char *buf = malloc((size_t)size);
+	if (!buf) {
+		fclose(fp);
+		return NULL;
+	}
 
-	size_t read = fread(buf, 1, size, fp);
+	(void)fread(buf, 1, (size_t)size, fp);
 	fclose(fp);
 	*out_size = (size_t)size;
 
@@ -205,7 +232,8 @@ static Node *imfs_create_node(const char *name, NodeType type, mode_t mode) {
 	/* If directory, allocate initial children array */
 	if (type == M_DIR) {
 		g_nodes[node_index].d_capacity = MAX_NODES;
-		g_nodes[node_index].d_children = calloc(g_nodes[node_index].d_capacity, sizeof(DirEnt));
+		g_nodes[node_index].d_children =
+		    calloc(g_nodes[node_index].d_capacity, sizeof(DirEnt));
 		if (!g_nodes[node_index].d_children) {
 			errno = ENOMEM;
 			return NULL;
@@ -331,8 +359,10 @@ static int add_child(Node *parent, Node *node) {
 
 	/* grow children array if needed */
 	if (parent->d_count >= parent->d_capacity) {
-		size_t newcap = parent->d_capacity ? parent->d_capacity * 2 : MAX_NODES;
-		DirEnt *n = realloc(parent->d_children, newcap * sizeof(DirEnt));
+		size_t newcap =
+		    parent->d_capacity ? parent->d_capacity * 2 : MAX_NODES;
+		DirEnt *n =
+		    realloc(parent->d_children, newcap * sizeof(DirEnt));
 		if (!n)
 			return -1;
 		parent->d_children = n;
@@ -400,7 +430,7 @@ allocate:
 
 static int remove_child(Node *node) {
 	size_t total_nodes = g_nodes[node->parent_idx].d_count;
-	int remove_idx;
+	int remove_idx = -1;
 
 	for (int i = 0; i < total_nodes; i++) {
 		if (str_compare(g_nodes[node->parent_idx].d_children[i].name,
@@ -408,6 +438,10 @@ static int remove_child(Node *node) {
 			remove_idx = i;
 			break;
 		}
+	}
+	if (remove_idx < 0) {
+		errno = ENOENT;
+		return -1;
 	}
 
 	for (int i = remove_idx; i < total_nodes - 1; i++) {
@@ -581,7 +615,9 @@ static ssize_t imfs_new_write(int cage_id, int fd, const void *buf,
 	}
 
 	Node *node = fdesc->node;
-	off_t use_offset = pread ? offset : (fdesc->flags & O_APPEND ? node->total_size : fdesc->offset);
+	off_t use_offset = pread ? offset
+				 : (fdesc->flags & O_APPEND ? node->total_size
+							    : fdesc->offset);
 
 	size_t written = 0;
 
@@ -630,7 +666,7 @@ static ssize_t imfs_new_write(int cage_id, int fd, const void *buf,
 		c = c->next;
 	}
 
-	if(use_offset + written > node->total_size)
+	if (use_offset + written > node->total_size)
 		node->total_size = use_offset + written;
 
 	if (!pread)
@@ -646,7 +682,7 @@ static ssize_t __imfs_writev(int cage_id, int fd, const struct iovec *iov,
 	int ret, fin = 0;
 	for (int i = 0; i < count; i++) {
 		ret = imfs_new_write(cage_id, fd, iov[i].iov_base,
-				     iov[i].iov_len, pread, count);
+				     iov[i].iov_len, pread, offset);
 		if (ret == -1)
 			return ret;
 		else
@@ -691,6 +727,9 @@ static int __imfs_stat(int cage_id, Node *node, struct stat *statbuf) {
 
 void load_file(char *path) {
 	FILE *fp = fopen("preloads.log", "a");
+	if (!fp) {
+		return;
+	}
 
 	fprintf(fp, "\n[load_file] loading=%s\n", path);
 
@@ -711,11 +750,16 @@ void load_file(char *path) {
 
 	size_t size;
 	char *data = read_full_file(path, &size);
+	if (!data) {
+		fclose(fp);
+		return;
+	}
 
 	imfs_write(0, imfs_fd, data, size);
 	free(data);
 
 	imfs_close(0, imfs_fd);
+	fclose(fp);
 }
 
 void dump_file(char *path, char *actual_path) {
@@ -802,12 +846,12 @@ void imfs_init(void) {
 
 	for (int i = 0; i < MAX_NODES; i++) {
 		g_nodes[i] = (Node){
-			.type = M_NON,
-			.index = i,
-			.in_use = 0,
-			.d_count = 0,
-			.total_size = 0,
-			.mode = 0,
+		    .type = M_NON,
+		    .index = i,
+		    .in_use = 0,
+		    .d_count = 0,
+		    .total_size = 0,
+		    .mode = 0,
 		};
 		/* ensure dir children pointer is NULL and capacity zero */
 		g_nodes[i].d_children = NULL;
@@ -854,7 +898,8 @@ int imfs_fcntl(int cage_id, int fd, int op, int arg) {
 		return -1;
 	}
 
-	switch (fd) {
+	// Switch on `op`, only F_GETFL implemented so far.
+	switch (op) {
 		case F_GETFL:
 			return fdesc->flags;
 		default:
@@ -1292,13 +1337,16 @@ off_t imfs_lseek(int cage_id, int fd, off_t offset, int whence) {
 			break;
 #ifdef _GNU_SOURCE
 		case SEEK_HOLE:
-			while (*(char *)(fdesc->node + ret)) {
-				ret++;
+			if (ret >= fdesc->node->total_size) {
+				ret = fdesc->node->total_size;
+				break;
 			}
-			break;
+			errno = ENXIO;
+			return -1;
 		case SEEK_DATA:
-			while (!*(char *)(fdesc->node + ret)) {
-				ret++;
+			if (ret >= fdesc->node->total_size) {
+				errno = ENXIO;
+				return -1;
 			}
 			break;
 #endif
@@ -1343,9 +1391,23 @@ int imfs_fstat(int cage_id, int fd, struct stat *statbuf) {
 }
 
 I_DIR *imfs_opendir(int cage_id, const char *name) {
-	I_DIR *dirstream = NULL;
+	I_DIR *dirstream = malloc(sizeof(I_DIR));
+	if (!dirstream) {
+		return NULL;
+	}
+
 	int fd = imfs_open(cage_id, name, O_DIRECTORY, 0);
-	Node *node = get_filedesc(cage_id, fd)->node;
+	if (fd < 0) {
+		free(dirstream);
+		return NULL;
+	}
+
+	FileDesc *fdesc = get_filedesc(cage_id, fd);
+	if (!fdesc || !fdesc->node) {
+		free(dirstream);
+		return NULL;
+	}
+	Node *node = fdesc->node;
 
 	*dirstream = (I_DIR){
 	    .fd = fd,
@@ -1360,10 +1422,14 @@ I_DIR *imfs_opendir(int cage_id, const char *name) {
 
 struct dirent *imfs_readdir(int cage_id, I_DIR *dirstream) {
 	struct dirent *ret = malloc(sizeof(struct dirent));
+	if (!ret) {
+		return NULL;
+	}
 
 	Node *dirnode = dirstream->node;
 
 	if (dirstream->offset >= dirnode->d_count) {
+		free(ret);
 		return NULL;
 	}
 
@@ -1383,7 +1449,7 @@ struct dirent *imfs_readdir(int cage_id, I_DIR *dirstream) {
 	};
 
 	str_ncopy(ret->d_name, nextentry.name, namelen);
-	ret->d_name[namelen + 1] = '\0';
+	ret->d_name[namelen] = '\0';
 
 	return ret;
 }
@@ -1430,4 +1496,3 @@ int imfs_pathconf(int cage_id, const char *pathname, int name) {
 }
 
 int imfs_fpathconf(int cage_id, int fd, int name) { return PC_CONSTS[name]; }
-
