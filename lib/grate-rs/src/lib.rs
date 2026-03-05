@@ -1,3 +1,9 @@
+//! Public API for `grate-rs`.
+//!
+//! This module contains the safe, user-facing grate APIs:
+//! - syscall registration and 3i wrappers
+//! - grate dispatch entrypoint (`pass_fptr_to_wt`)
+//! - the `GrateBuilder` lifecycle helpers
 pub mod constants;
 mod ffi;
 
@@ -43,11 +49,8 @@ pub type SyscallHandler = extern "C" fn(
     arg6cage: u64,
 ) -> i32;
 
-// Wrap register_handler, copy_data_between_cages, and getpid to be more Rust-native.
-//
-// This allows us to use these functions without needing a myriad of unsafe blocks.
-//
-// Also sticks to the familiar syntax of Result<V, E> return types for these.
+// Wrap raw FFI calls in Rust-friendly signatures to keep unsafe usage localized
+// and expose idiomatic `Result`-based APIs to crate users.
 
 /// Register Handler for a syscall for a source cage to the the target grate.
 pub fn register_handler(
@@ -238,23 +241,13 @@ impl GrateBuilder {
     /// Build and run the grate.
     ///
     /// This spawns a child cage process and registers handlers in the parent grate process.
+    /// Raw process/memory synchronization primitives are provided by the internal `ffi` module.
     /// ### Inputs
     ///     arg_vector: Vec<String>     // char* argv[] that is passed down to exec.
     ///                                 // arg_vector[0] must be the cage binary to run.
-    /// ### Returns
-    ///     Err(GrateError)             // On failure.
-    ///     Ok(ExitStatus)              // Cage exit status.
-    pub fn run(mut self, arg_vector: Vec<String>) {
-        #[cfg(target_pointer_width = "64")]
-        {
-            println!("compiled with 64-bit sem_t");
-        };
-
-        #[cfg(target_pointer_width = "32")]
-        {
-            println!("compiled with 32-bit sem_t");
-        };
-
+    /// ### Behavior
+    /// This function is terminal, which run the grate's teardown function upon exit.
+    pub fn run(mut self, arg_vector: Vec<String>) -> ! {
         let argv = arg_vector;
         let teardown = self.teardown.take();
 

@@ -1,3 +1,9 @@
+//! Internal libc/Lind FFI and ABI shim layer.
+//!
+//! This module contains:
+//! - constants used for low-level memory/process primitives
+//! - target-specific ABI type shims (for Lind compatibility)
+//! - raw `extern "C"` bindings used by the safe APIs in `lib.rs`
 use core::ffi::{c_char, c_int};
 use libc::{pid_t, size_t};
 use std::ffi::{c_uint, c_void};
@@ -7,7 +13,6 @@ pub(crate) const PROT_READ: i32 = 0x1; // pages may be read
 pub(crate) const PROT_WRITE: i32 = 0x2; // pages may be written
 
 pub(crate) const MAP_SHARED: i32 = 0x01; // share mapping with other processes
-pub(crate) const MAP_PRIVATE: i32 = 0x02; // Private Mapping
 pub(crate) const MAP_ANON: i32 = 0x20; // mapping is not backed by a file (same as MAP_ANONYMOUS)
 pub(crate) const MAP_FAILED: *mut core::ffi::c_void = (-1isize) as *mut core::ffi::c_void;
 
@@ -16,19 +21,20 @@ pub(crate) const MAP_FAILED: *mut core::ffi::c_void = (-1isize) as *mut core::ff
 type off_t = i32;
 
 #[allow(non_camel_case_types)]
+// We use 32-bit pointer width, which requires sem_t to be defined as an array of length 16.
 #[repr(C)]
 pub(crate) struct sem_t {
     __size: [c_char; 16],
 }
 
-/// Wrapper macro for calling libc functions/syscalls with error handling.
+/// Wrapper macro for calling low-level libc/Lind functions with uniform error handling.
 ///
 /// ### Usage:
-///     let result: Result<i32, GrateError> = call_sys!(function_name(..args..));
+/// `let result: i32 = call_sys!(function_name(..args..));`
 ///
 /// ### Returns:
-///     Err(GrateError::CoordinationError) // if the function returns < 0
-///     Ok(ret) // otherwise
+/// - returns the raw syscall result when non-negative
+/// - on error (`ret < 0`), prints a coordination error and exits the process
 #[macro_export]
 macro_rules! call_sys {
     ($fn:ident ( $($arg:expr),* $(,)?)) => {{
@@ -43,12 +49,16 @@ macro_rules! call_sys {
                     err,
                 )
             )));
-            $crate::ffi::clean_exit(0);
+            $crate::ffi::clean_exit(-1);
         }
         ret
     }};
 }
 
+/// Flush stdio streams and terminate the process.
+///
+/// This helper is shared by both the public library logic (`lib.rs`) and
+/// internal FFI error paths (`call_sys!`).
 pub fn clean_exit(status: i32) -> ! {
     std::io::stdout().flush().unwrap();
     std::io::stderr().flush().unwrap();
@@ -56,8 +66,10 @@ pub fn clean_exit(status: i32) -> ! {
     std::process::exit(status);
 }
 
-// External function bindings. We use `link_name` to map Rust names to their sysroot equivalents.
+// External function bindings. `link_name` is used where Rust symbol names differ
+// from Lind sysroot symbols.
 unsafe extern "C" {
+    // Lind threei-specific functions.
     #[link_name = "register_handler"]
     pub(crate) fn register_handler_impl(
         cageid: u64,
@@ -99,13 +111,16 @@ unsafe extern "C" {
         translate_errno: c_int,
     ) -> c_int;
 
+    // Helper to get the current cage ID.
     #[link_name = "getpid"]
     pub(crate) fn getpid_impl() -> pid_t;
 
+    // Multiprocessing.
     pub(crate) fn fork() -> pid_t;
     pub(crate) fn execv(prog: *const c_char, argv: *const *const c_char) -> c_int;
     pub(crate) fn waitpid(pid: pid_t, status: *mut c_int, options: c_int) -> pid_t;
 
+    // Memory management.
     pub(crate) fn mmap(
         addr: *mut c_void,
         len: size_t,
@@ -116,6 +131,7 @@ unsafe extern "C" {
     ) -> *mut c_void;
     pub(crate) fn munmap(addr: *mut c_void, len: size_t) -> c_int;
 
+    // POSIX semaphores.
     pub(crate) fn sem_init(sem: *mut sem_t, pshared: c_int, value: c_uint) -> c_int;
     pub(crate) fn sem_destroy(sem: *mut sem_t) -> c_int;
     pub(crate) fn sem_post(sem: *mut sem_t) -> c_int;
