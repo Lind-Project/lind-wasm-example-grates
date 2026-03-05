@@ -273,11 +273,6 @@ impl GrateBuilder {
         c_argv.push(ptr::null_mut());
 
         let path = c_argv[0];
-        /*
-            sem_t *sem = mmap(NULL, sizeof(*sem), PROT_READ | PROT_WRITE,
-                                MAP_SHARED | MAP_ANON, -1, 0);
-            sem_init(sem, 1, 0);
-        */
 
         let sem: &mut sem_t = unsafe {
             let ptr = mmap(
@@ -308,7 +303,6 @@ impl GrateBuilder {
 
         match call_sys!(fork()) {
             0 => {
-                // sem_wait(sem);
                 call_sys!(sem_wait(sem));
 
                 let _ = call_sys!(execv(path, c_argv.as_ptr()));
@@ -330,15 +324,11 @@ impl GrateBuilder {
                     };
                 }
 
-                // sem_post(sem);
                 call_sys!(sem_post(sem));
 
                 // Wait for the cage process to exit and retrieve its status code.
                 let mut status: i32 = 0;
                 let _ = call_sys!(waitpid(cageid, &mut status as *mut i32 as *mut c_int, 0));
-
-                // sem_destroy(sem);
-                // munmap(sem, sizeof(*sem));
 
                 call_sys!(sem_destroy(sem));
                 call_sys!(munmap(sem as *mut sem_t as *mut c_void, size_of::<sem_t>()));
