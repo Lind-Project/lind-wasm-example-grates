@@ -27,34 +27,6 @@ pub(crate) struct sem_t {
     __size: [c_char; 16],
 }
 
-/// Wrapper macro for calling low-level libc/Lind functions with uniform error handling.
-///
-/// ### Usage:
-/// `let result: i32 = call_sys!(function_name(..args..));`
-///
-/// ### Returns:
-/// - returns the raw syscall result when non-negative
-/// - on error (`ret < 0`), prints a coordination error and exits the process
-#[macro_export]
-macro_rules! call_sys {
-    ($fn:ident ( $($arg:expr),* $(,)?)) => {{
-        let ret = unsafe { $fn($($arg),*) };
-
-        if ret < 0 {
-            let err = std::io::Error::last_os_error();
-            println!("{:#?}", Err::<(), _>(GrateError::CoordinationError(
-                format!(
-                    "{} failed: {}",
-                    stringify!($fn),
-                    err,
-                )
-            )));
-            $crate::ffi::clean_exit(-1);
-        }
-        ret
-    }};
-}
-
 /// Flush stdio streams and terminate the process.
 ///
 /// This helper is shared by both the public library logic (`lib.rs`) and

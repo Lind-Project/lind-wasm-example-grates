@@ -49,6 +49,60 @@ pub type SyscallHandler = extern "C" fn(
     arg6cage: u64,
 ) -> i32;
 
+/// Wrapper macro for calling low-level libc/Lind functions with uniform error handling.
+///
+/// ### Usage:
+/// `let result: i32 = call_sys!(teardown, function_name(..args..));`
+///
+/// ### Returns:
+/// - returns the raw syscall result when non-negative
+/// - on error (`ret < 0`), prints a coordination error and exits the process
+macro_rules! call_sys {
+    ($teardown:expr, $fn:ident ( $($arg:expr),* $(,)?)) => {{
+        let ret = unsafe { $fn($($arg),*) };
+
+        if ret < 0 {
+            let errno = std::io::Error::last_os_error()
+                        .raw_os_error()
+                        .unwrap_or(-1);
+
+            println!("{} failed: {}", stringify!($fn), errno);
+
+            GrateBuilder::run_teardown($teardown, Err(GrateError::CoordinationError(format!(
+                            "{} failed: {}", stringify!($fn), errno)
+                        )));
+        }
+        ret
+    }};
+}
+
+macro_rules! call_sys_child {
+    ($state:expr, $fn:ident ( $($arg:expr),* $(,)?)) => {{
+        let ret = unsafe { $fn($($arg),*) };
+
+        if ret < 0 {
+            let errno = std::io::Error::last_os_error()
+                        .raw_os_error()
+                        .unwrap_or(-1);
+
+            // Set launch state to failed with errno.
+            (*$state).errno = errno;
+            (*$state).launch_failed = 1;
+
+            println!("{} failed: {}", stringify!($fn), errno);
+
+            $crate::ffi::clean_exit(-ret);
+        }
+        ret
+    }};
+}
+
+#[repr(C)]
+struct LaunchState {
+    launch_failed: i32,
+    errno: i32,
+}
+
 // Wrap raw FFI calls in Rust-friendly signatures to keep unsafe usage localized
 // and expose idiomatic `Result`-based APIs to crate users.
 
@@ -299,19 +353,39 @@ impl GrateBuilder {
             &mut *(ptr as *mut sem_t)
         };
 
-        call_sys!(sem_init(sem, 1, 0));
+        let state: &mut LaunchState = unsafe {
+            let ptr = mmap(
+                std::ptr::null_mut(),
+                std::mem::size_of::<LaunchState>(),
+                PROT_READ | PROT_WRITE,
+                MAP_SHARED | MAP_ANON,
+                -1,
+                0,
+            );
 
-        match call_sys!(fork()) {
-            0 => {
-                call_sys!(sem_wait(sem));
-
-                let _ = call_sys!(execv(path, c_argv.as_ptr()));
-                GrateBuilder::run_teardown(
-                    teardown,
-                    Err(GrateError::CoordinationError(format!(
-                        "execv failed: child returned post exec"
-                    ))),
+            if ptr == MAP_FAILED {
+                let err = std::io::Error::last_os_error();
+                println!(
+                    "{:#?}",
+                    Err::<(), _>(GrateError::CoordinationError(format!(
+                        "mmap failed: {}",
+                        err
+                    )))
                 );
+                clean_exit(0);
+            }
+
+            &mut *(ptr as *mut LaunchState)
+        };
+
+        call_sys!(teardown, sem_init(sem, 1, 0));
+
+        match call_sys!(teardown, fork()) {
+            0 => {
+                call_sys_child!(state, sem_wait(sem));
+
+                call_sys_child!(state, execv(path, c_argv.as_ptr()));
+                loop {}
             }
             cageid => {
                 // Parent process - the grate handler.
@@ -324,16 +398,35 @@ impl GrateBuilder {
                     };
                 }
 
-                call_sys!(sem_post(sem));
+                call_sys!(teardown, sem_post(sem));
 
                 // Wait for the cage process to exit and retrieve its status code.
                 let mut status: i32 = 0;
-                let _ = call_sys!(waitpid(cageid, &mut status as *mut i32 as *mut c_int, 0));
+                let _ = call_sys!(
+                    teardown,
+                    waitpid(cageid, &mut status as *mut i32 as *mut c_int, 0)
+                );
 
-                call_sys!(sem_destroy(sem));
-                call_sys!(munmap(sem as *mut sem_t as *mut c_void, size_of::<sem_t>()));
+                call_sys!(teardown, sem_destroy(sem));
+                call_sys!(
+                    teardown,
+                    munmap(sem as *mut sem_t as *mut c_void, size_of::<sem_t>())
+                );
 
-                GrateBuilder::run_teardown(teardown, Ok(status));
+                let launch_failed = (*state).launch_failed;
+
+                let result = if launch_failed != 0 {
+                    let errno = (*state).errno;
+
+                    Err(GrateError::CoordinationError(format!(
+                        "Failed to launch grate with OS Error {}",
+                        errno
+                    )))
+                } else {
+                    Ok(status)
+                };
+
+                GrateBuilder::run_teardown(teardown, result);
             }
         }
     }
