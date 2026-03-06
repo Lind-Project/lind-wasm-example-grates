@@ -49,14 +49,17 @@ pub type SyscallHandler = extern "C" fn(
     arg6cage: u64,
 ) -> i32;
 
-/// Wrapper macro for calling low-level libc/Lind functions with uniform error handling.
+/// Wrapper macro for calling libc/sysroot functions with uniform error handling, in the parent
+/// grate.
 ///
 /// ### Usage:
-/// `let result: i32 = call_sys!(teardown, function_name(..args..));`
+/// `let result: i32 = call_sys!(teardown, function_name(..args..));
 ///
 /// ### Returns:
 /// - returns the raw syscall result when non-negative
-/// - on error (`ret < 0`), prints a coordination error and exits the process
+///
+/// ### Errors:
+/// - If syscall returns `< 0` value, print the error, run teardown function, exit with -1.
 macro_rules! call_sys {
     ($teardown:expr, $fn:ident ( $($arg:expr),* $(,)?)) => {{
         let ret = unsafe { $fn($($arg),*) };
@@ -76,6 +79,18 @@ macro_rules! call_sys {
     }};
 }
 
+/// Wrapper macro for calling libc/sysroot functions for the child cage.
+///
+/// ### Usage
+/// `let result: i32 = call_sys_child!(state, function(..args..));
+///
+/// ### Returns
+/// - Syscall return value if non-negative.
+///
+/// ### Errors
+/// - On error (`< 0`), set the `state` struct's errno and failed, exit with -1.
+/// - `state` is a shared LaunchState struct which inform the parent grate that the cage exited
+/// without launching the binary through `execv`.
 macro_rules! call_sys_child {
     ($state:expr, $fn:ident ( $($arg:expr),* $(,)?)) => {{
         let ret = unsafe { $fn($($arg),*) };
@@ -97,9 +112,13 @@ macro_rules! call_sys_child {
     }};
 }
 
+/// Struct to coordinate lifecycle state between cage and grate.
 #[repr(C)]
 struct LaunchState {
+    /// If non-0, indicates to the grate that the cage process exited before successfully calling
+    /// `execv`
     launch_failed: i32,
+    /// In case of a failed launch, sets the OS error that caused it.
     errno: i32,
 }
 
@@ -280,6 +299,8 @@ impl GrateBuilder {
     }
 
     /// Run a GrateTeardownCallback with the Result from `run`
+    /// - This is a terminal function.
+    /// - Must always be called from the parent grate.
     fn run_teardown(callback: Option<GrateTeardownCallback>, result: Result<i32, GrateError>) -> ! {
         match callback {
             Some(f) => {
@@ -317,6 +338,7 @@ impl GrateBuilder {
 
         let grateid = getcageid();
 
+        // Prepare the argv[0], and argv[0..] args for execv.
         let cstrings: Vec<CString> = argv[0..]
             .iter()
             .map(|s| CString::new(s.as_str()).unwrap())
@@ -328,6 +350,8 @@ impl GrateBuilder {
 
         let path = c_argv[0];
 
+        // Set up a shared semaphore to ensure child cage waits until all handler registrations are
+        // complete before launching.
         let sem: &mut sem_t = unsafe {
             let ptr = mmap(
                 std::ptr::null_mut(),
@@ -353,6 +377,9 @@ impl GrateBuilder {
             &mut *(ptr as *mut sem_t)
         };
 
+        call_sys!(teardown, sem_init(sem, 1, 0));
+
+        // Set up the shared LaunchState to coordinate errnos in case of a failed cage launch
         let state: &mut LaunchState = unsafe {
             let ptr = mmap(
                 std::ptr::null_mut(),
@@ -378,17 +405,19 @@ impl GrateBuilder {
             &mut *(ptr as *mut LaunchState)
         };
 
-        call_sys!(teardown, sem_init(sem, 1, 0));
-
         match call_sys!(teardown, fork()) {
             0 => {
+                // Child Cage
+
+                // Wait until parent indicates it's ready.
                 call_sys_child!(state, sem_wait(sem));
 
+                // Launch the child binary.
                 call_sys_child!(state, execv(path, c_argv.as_ptr()));
                 loop {}
             }
             cageid => {
-                // Parent process - the grate handler.
+                // Parent cage - grate handler.
 
                 // Register handlers with 3i.
                 for (syscall_nr, handler) in &self.handlers {
@@ -398,6 +427,7 @@ impl GrateBuilder {
                     };
                 }
 
+                // Indicate to the child that it can begin execution.
                 call_sys!(teardown, sem_post(sem));
 
                 // Wait for the cage process to exit and retrieve its status code.
@@ -407,25 +437,30 @@ impl GrateBuilder {
                     waitpid(cageid, &mut status as *mut i32 as *mut c_int, 0)
                 );
 
+                // Clean up semaphores.
                 call_sys!(teardown, sem_destroy(sem));
                 call_sys!(
                     teardown,
                     munmap(sem as *mut sem_t as *mut c_void, size_of::<sem_t>())
                 );
 
+                // Check whether the cage launched successfully.
                 let launch_failed = (*state).launch_failed;
 
                 let result = if launch_failed != 0 {
                     let errno = (*state).errno;
 
+                    // In case the cage binary was never run, return an Err.
                     Err(GrateError::CoordinationError(format!(
                         "Failed to launch grate with OS Error {}",
                         errno
                     )))
                 } else {
+                    // If a cage was launched, return an Ok() with it's status code.
                     Ok(status)
                 };
 
+                // Run the teardown function and exit.
                 GrateBuilder::run_teardown(teardown, result);
             }
         }
