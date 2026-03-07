@@ -101,8 +101,8 @@ macro_rules! call_sys_child {
                         .unwrap_or(-1);
 
             // Set launch state to failed with errno.
-            (*$state).errno = errno;
-            (*$state).launch_failed = 1;
+            $state.errno = errno;
+            $state.launch_failed = 1;
 
             println!("{} failed: {}", stringify!($fn), errno);
 
@@ -445,10 +445,10 @@ impl GrateBuilder {
                 );
 
                 // Check whether the cage launched successfully.
-                let launch_failed = (*state).launch_failed;
+                let launch_failed = state.launch_failed;
 
                 let result = if launch_failed != 0 {
-                    let errno = (*state).errno;
+                    let errno = state.errno;
 
                     // In case the cage binary was never run, return an Err.
                     Err(GrateError::CoordinationError(format!(
