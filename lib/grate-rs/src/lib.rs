@@ -387,7 +387,8 @@ impl GrateBuilder {
 
                 // Launch the child binary.
                 call_sys_child!(state, execv(path, c_argv.as_ptr()));
-                loop {}
+                // Only launched when execv returns with a success.
+                clean_exit(-1);
             }
             cageid => {
                 // Parent cage - grate handler.
