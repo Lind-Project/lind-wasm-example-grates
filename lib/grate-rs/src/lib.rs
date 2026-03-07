@@ -122,6 +122,26 @@ struct LaunchState {
     errno: i32,
 }
 
+pub unsafe fn mmap_shared<T>() -> &'static mut T {
+    let ptr = mmap(
+        std::ptr::null_mut(),
+        std::mem::size_of::<T>(),
+        PROT_READ | PROT_WRITE,
+        MAP_SHARED | MAP_ANON,
+        -1,
+        0,
+    );
+
+    if ptr == MAP_FAILED {
+        let err = std::io::Error::last_os_error();
+        println!("mmap failed: {}", err);
+
+        clean_exit(0);
+    }
+
+    &mut *(ptr as *mut T)
+}
+
 // Wrap raw FFI calls in Rust-friendly signatures to keep unsafe usage localized
 // and expose idiomatic `Result`-based APIs to crate users.
 
@@ -352,58 +372,11 @@ impl GrateBuilder {
 
         // Set up a shared semaphore to ensure child cage waits until all handler registrations are
         // complete before launching.
-        let sem: &mut sem_t = unsafe {
-            let ptr = mmap(
-                std::ptr::null_mut(),
-                std::mem::size_of::<sem_t>(),
-                PROT_READ | PROT_WRITE,
-                MAP_SHARED | MAP_ANON,
-                -1,
-                0,
-            );
-
-            if ptr == MAP_FAILED {
-                let err = std::io::Error::last_os_error();
-                println!(
-                    "{:#?}",
-                    Err::<(), _>(GrateError::CoordinationError(format!(
-                        "mmap failed: {}",
-                        err
-                    )))
-                );
-                clean_exit(0);
-            }
-
-            &mut *(ptr as *mut sem_t)
-        };
-
+        let sem: &mut sem_t = unsafe { mmap_shared::<sem_t>() };
         call_sys!(teardown, sem_init(sem, 1, 0));
 
         // Set up the shared LaunchState to coordinate errnos in case of a failed cage launch
-        let state: &mut LaunchState = unsafe {
-            let ptr = mmap(
-                std::ptr::null_mut(),
-                std::mem::size_of::<LaunchState>(),
-                PROT_READ | PROT_WRITE,
-                MAP_SHARED | MAP_ANON,
-                -1,
-                0,
-            );
-
-            if ptr == MAP_FAILED {
-                let err = std::io::Error::last_os_error();
-                println!(
-                    "{:#?}",
-                    Err::<(), _>(GrateError::CoordinationError(format!(
-                        "mmap failed: {}",
-                        err
-                    )))
-                );
-                clean_exit(0);
-            }
-
-            &mut *(ptr as *mut LaunchState)
-        };
+        let state: &mut LaunchState = unsafe { mmap_shared::<LaunchState>() };
 
         match call_sys!(teardown, fork()) {
             0 => {
@@ -459,6 +432,15 @@ impl GrateBuilder {
                     // If a cage was launched, return an Ok() with it's status code.
                     Ok(status)
                 };
+
+                // Clean up LaunchState
+                call_sys!(
+                    teardown,
+                    munmap(
+                        state as *mut LaunchState as *mut c_void,
+                        size_of::<LaunchState>()
+                    )
+                );
 
                 // Run the teardown function and exit.
                 GrateBuilder::run_teardown(teardown, result);
