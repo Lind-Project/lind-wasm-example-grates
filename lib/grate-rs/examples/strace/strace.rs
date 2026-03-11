@@ -58,8 +58,33 @@ macro_rules! define_syscall_handler {
             arg5: u64, arg5cage: u64,
             arg6: u64, arg6cage: u64
         ) -> i32 {
+            let mut _args = Vec::new();
+            let _all_vals = [
+                (arg1, arg1cage),
+                (arg2, arg2cage),
+                (arg3, arg3cage),
+                (arg4, arg4cage),
+                (arg5, arg5cage),
+                (arg6, arg6cage),
+            ];
+            
+            // compile-time argument processing
+            let mut _arg_index = 0;     // prefixed to supress warning
+            $(
+                let (val, cage) = _all_vals[_arg_index];
+                let arg = match stringify!($arg_type) {
+                    "Int" => Arg::Int(val),
+                    "CString" => Arg::CString { addr: val, cage },
+                    _ => unreachable!(),
+                };
+                _args.push(arg);
+                _arg_index += 1;
+            )*
+
+            let parsed: Vec<String> = _args.into_iter().map(parse_arg).collect();
+
             let ret = match make_threei_call(
-                $num,
+                $num as u32,
                 cageid,
                 arg1cage,
                 arg1, arg1cage,
@@ -74,30 +99,6 @@ macro_rules! define_syscall_handler {
                 Err(_) => -1
             };
 
-            let mut args = Vec::new();
-            let all_vals = [
-                (arg1, arg1cage),
-                (arg2, arg2cage),
-                (arg3, arg3cage),
-                (arg4, arg4cage),
-                (arg5, arg5cage),
-                (arg6, arg6cage),
-            ];
-            
-            // compile-time argument processing
-            let mut _arg_index = 0;     // prefixed to supress warning
-            $(
-                let (val, cage) = all_vals[_arg_index];
-                let arg = match stringify!($arg_type) {
-                    "Int" => Arg::Int(val),
-                    "CString" => Arg::CString { addr: val, cage },
-                    _ => unreachable!(),
-                };
-                args.push(arg);
-                _arg_index += 1;
-            )*
-
-            let parsed: Vec<String> = args.into_iter().map(parse_arg).collect();
             
             // printing syscall name, args and ret value
             println!(
