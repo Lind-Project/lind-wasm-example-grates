@@ -75,7 +75,7 @@ extern syscall_handler_t syscall_handler_table[MAX_SYSCALLS];
                                                                                 \
         /* forward interposed syscall */                                        \
         int ret = make_threei_call(num, 0,                                      \
-                                   thiscage, thiscage,                          \
+                                   thiscage, arg1cage,                          \
                                    arg1, arg1cage, arg2, arg2cage,              \
                                    arg3, arg3cage, arg4, arg4cage,              \
                                    arg5, arg5cage, arg6, arg6cage, 0);          \
