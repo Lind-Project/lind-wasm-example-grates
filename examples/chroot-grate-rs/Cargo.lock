@@ -7,6 +7,7 @@ name = "chroot-grate-rs"
 version = "0.1.0"
 dependencies = [
  "grate-rs",
+ "libc",
 ]
 
 [[package]]
