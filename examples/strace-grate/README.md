@@ -1,4 +1,3 @@
-:Q
 ## strace-grate
 
 strace-grate is a lightweight utility for tracing system calls. It outputs detailed system call traces along with passed arguments (print paths, associated file descriptors, etc) and their return values.
@@ -38,9 +37,9 @@ or use the `compile_grate.sh` script to build strace grate.
 
 ### Interposing
 
-Lind's `threei` subsystem enables syscall interposition. Each syscall is implemented using the `DEFINE_HANDLER` macro, which generates a dedicated handler function for that syscall.
+Lind's [threei](https://github.com/Lind-Project/lind-wasm/tree/main/src/threei) subsystem enables syscall interposition. Each syscall is implemented using the `DEFINE_HANDLER` macro, which generates a dedicated handler function for that syscall.
 
-Every handler maintains a log_buffer used to record relevant execution details. When syscalls pass arguments of type string (e.g., pointers to paths or filenames), the handler invokes the `copy_data_between_cages()` helper from threei to safely dereference the value. This allows the system to resolve and log meaningful data such as file paths.
+Every handler maintains a `log_buffer` used to record relevant execution details. When syscalls pass arguments of type string (e.g., pointers to paths or filenames), the handler invokes the `copy_data_between_cages()` helper from threei to safely dereference the value. This allows the system to resolve and log meaningful data such as file paths.
 
 After preprocessing arguments, the handler forwards the syscall to the target cage (i.e., the application running under strace-grate) using `make_threei_call()`. Once the syscall completes, the handler logs the return value and writes the contents of `log_buffer` to `stderr`.
 
