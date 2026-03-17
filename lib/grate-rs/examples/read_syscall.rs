@@ -1,12 +1,12 @@
 //! Minimal example showing how to by-pass the read syscall with a custom implemention.
-//! 
+//!
 //! Highlights (grate-rs APIs used):
 //! - `GrateBuilder`: configure and run a grate-managed cage
 //! - `.register(syscall_num, handler)`: map a syscall number to a handler
 //! - `getcageid()`: obtain the current cage id from inside a handler.
 //! - `copy_data_between_cages(...)`: copy memory between cages.
 
-use grate_rs::{GrateBuilder, copy_data_between_cages, getcageid};
+use grate_rs::{GrateBuilder, GrateError, constants::SYS_READ, copy_data_between_cages, getcageid};
 use std::cmp::min;
 
 fn imfs_read(_cageid: u64, _fd: u64, buf: &mut [u8], count: usize) -> i32 {
@@ -56,20 +56,17 @@ extern "C" fn read_syscall(
 }
 
 fn main() {
-    println!("[grate_init] Run all required initializations before calling builder.run(), such as imfs_init() or preloads()");
+    println!(
+        "[grate_init] Run all required initializations before calling builder.run(), such as imfs_init() or preloads()"
+    );
 
     let builder = GrateBuilder::new()
-        .register(0, read_syscall);
+        .register(SYS_READ, read_syscall)
+        .teardown(|result: Result<i32, GrateError>| {
+            println!("Result: {:#?}", result);
+        });
 
-    match builder.run() {
-        Ok(status) => {
-            println!(
-                "[grate_teardown] Cage exited with: {status}. Safe to run teardown functions such as dump_file()"
-            );
-        }
-        Err(e) => {
-            eprintln!("[grate_error] Failed to run grate: {:?}", e);
-            std::process::exit(1);
-        }
-    }
+    let argv = std::env::args().skip(1).collect::<Vec<_>>();
+
+    builder.run(argv);
 }
