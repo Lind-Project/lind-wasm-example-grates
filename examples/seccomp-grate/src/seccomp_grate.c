@@ -9,7 +9,7 @@
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <cage_binary> [args...]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <seccomp-config.ini> <cage_binary> [args...]\n", argv[0]);
         exit(EXIT_FAILURE);
     }
     
@@ -17,7 +17,8 @@ int main(int argc, char *argv[]) {
     //
     // this ensures that all the initalization is done by the grate.
     sem_t *sem = mmap(NULL, sizeof(*sem), PROT_READ | PROT_WRITE,
-		      MAP_SHARED | MAP_ANON, -1, 0);
+		     MAP_SHARED | MAP_ANON, -1, 0);
+    sem_init(sem, 1, 0);
 
     int grateid = getpid();
     pid_t cageid = fork();
@@ -29,11 +30,14 @@ int main(int argc, char *argv[]) {
 	// wait for grate to register handlers
         sem_wait(sem);
 	
-	if (execv(argv[1], &argv[1]) == -1) {
+	if (execv(argv[2], &argv[2]) == -1) {
             perror("execv failed");
             exit(EXIT_FAILURE);
         }
     }
+
+    // parse the INI file provided via the first command-line argument
+    parse_config(argv[1]);
 
     // loop to register syscall handlers
     for (int i = 0; i < MAX_SYSCALLS; i++) {
@@ -49,13 +53,8 @@ int main(int argc, char *argv[]) {
     int status;
     int w;
     
-    while (1) {
-	w = wait(&status);
-	if (w > 0) {
-	    break;
-	}
-    }
-    
+    wait(&status);
+
     sem_destroy(sem);
     munmap(sem, sizeof(*sem));
     
