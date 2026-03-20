@@ -1,5 +1,5 @@
-#ifndef STRACE_H
-#define STRACE_H
+#ifndef SECCOMP_H
+#define SECCOMP_H
 
 #include <stdint.h>
 #include <stdio.h>
@@ -45,18 +45,7 @@ int name##_grate(                                                             \
     uint64_t arg3, uint64_t arg3cage, uint64_t arg4, uint64_t arg4cage,       \
     uint64_t arg5, uint64_t arg5cage, uint64_t arg6, uint64_t arg6cage)       \
 {                                                                             \
-    /* Check the runtime configuration for this specific syscall */           \
-    if (syscall_mode[num] == BL) {                                            \
-        return -EPERM;                                                        \
-    }                                                                         \
-                                                                              \
-    int thiscage = getpid();                                                  \
-    return make_threei_call(                                                  \
-        num, 0,                                                               \
-        thiscage, arg1cage,                                                   \
-        arg1, arg1cage, arg2, arg2cage,                                       \
-        arg3, arg3cage, arg4, arg4cage,                                       \
-        arg5, arg5cage, arg6, arg6cage, 0);                                   \
+    return -EPERM;                                                            \
 }
 
 // function to parse INI config file

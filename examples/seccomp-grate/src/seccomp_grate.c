@@ -8,7 +8,7 @@
 #include "seccomp.h"
 
 int main(int argc, char *argv[]) {
-    if (argc < 2) {
+    if (argc < 3) {
         fprintf(stderr, "Usage: %s <seccomp-config.ini> <cage_binary> [args...]\n", argv[0]);
         exit(EXIT_FAILURE);
     }
@@ -39,9 +39,9 @@ int main(int argc, char *argv[]) {
     // parse the INI file provided via the first command-line argument
     parse_config(argv[1]);
 
-    // loop to register syscall handlers
+    // loop to register blacklisted syscall handlers
     for (int i = 0; i < MAX_SYSCALLS; i++) {
-        if (syscall_handler_table[i] != NULL) {
+        if (syscall_handler_table[i] != NULL && syscall_mode[i] == BL) {
             uint64_t fn_ptr = (uint64_t)(uintptr_t)syscall_handler_table[i];
                 register_handler(cageid, i, grateid,  fn_ptr);
 	}
