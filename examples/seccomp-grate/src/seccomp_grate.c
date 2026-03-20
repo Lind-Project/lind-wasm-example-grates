@@ -38,12 +38,14 @@ int main(int argc, char *argv[]) {
 
     // parse the INI file provided via the first command-line argument
     parse_config(argv[1]);
+    
+    // get the memory address of blacklist_handler
+    uint64_t fn_ptr = (uint64_t)(uintptr_t)&blacklist_handler;
 
     // loop to register blacklisted syscall handlers
     for (int i = 0; i < MAX_SYSCALLS; i++) {
-        if (syscall_handler_table[i] != NULL && syscall_mode[i] == BL) {
-            uint64_t fn_ptr = (uint64_t)(uintptr_t)syscall_handler_table[i];
-                register_handler(cageid, i, grateid,  fn_ptr);
+        if (syscall_mode[i] == BL) {
+            register_handler(cageid, i, grateid, fn_ptr);
 	}
     }
     

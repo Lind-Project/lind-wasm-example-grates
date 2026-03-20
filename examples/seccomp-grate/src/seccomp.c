@@ -7,15 +7,21 @@
 
 syscall_handler_t syscall_handler_table[MAX_SYSCALLS] = {0};
 
-int syscall_mode[MAX_SYSCALLS] = {0};
+// default every syscall to blacklist for safety
+int syscall_mode[MAX_SYSCALLS] = {BL};
 
-// generate one handler per syscall at compile time
-#define X(name, num) DEFINE_HANDLER(name, num)
-SYSCALL_LIST
-#undef X
+// blacklisted syscall handler
+int blacklist_handler(
+    uint64_t cageid,
+    uint64_t arg1, uint64_t arg1cage, uint64_t arg2, uint64_t arg2cage,
+    uint64_t arg3, uint64_t arg3cage, uint64_t arg4, uint64_t arg4cage,
+    uint64_t arg5, uint64_t arg5cage, uint64_t arg6, uint64_t arg6cage) 
+{
+    return -EPERM;
+}
 
 static const syscall_entry_t syscall_map[] = {
-#define X(name, num) { "SYS_" #name, num, name##_grate },
+#define X(name, num) { "SYS_" #name, num },
     SYSCALL_LIST
 #undef X
 };
@@ -32,13 +38,14 @@ void parse_config(const char *filename) {
 
     char line[256];
     int current_mode = -1;
+    int default_mode = BL; // safety fallback
 
-    // default mode set to BL (safety fallback)
-    int default_mode = BL;
+    // array to track which syscalls were explicitly set in the INI
+    int explicitly_set[MAX_SYSCALLS] = {0}; 
 
     while (fgets(line, sizeof(line), fp)) {
-	// strip newline
-        line[strcspn(line, "\r\n")] = 0;
+        // strip newline
+	line[strcspn(line, "\r\n")] = 0; // strip newline
 
         if (line[0] == '\0' || line[0] == ';' || line[0] == '#') continue;
 
@@ -46,7 +53,6 @@ void parse_config(const char *filename) {
         if (strcmp(line, "[blacklist]") == 0) { current_mode = BL; continue; }
         if (strcmp(line, "[default]") == 0)   { current_mode = 2;  continue; }
 
-	// default
         if (current_mode == 2) {
             if (strcmp(line, "whitelist") == 0) default_mode = WL;
             else if (strcmp(line, "blacklist") == 0) default_mode = BL;
@@ -60,7 +66,7 @@ void parse_config(const char *filename) {
             if (strcmp(line, syscall_map[i].name) == 0) {
                 int sys_num = syscall_map[i].num;
                 syscall_mode[sys_num] = current_mode;
-                syscall_handler_table[sys_num] = syscall_map[i].handler;
+                explicitly_set[sys_num] = 1;
                 break;
             }
         }
@@ -68,12 +74,9 @@ void parse_config(const char *filename) {
     fclose(fp);
 
     // backfill unconfigured syscalls with the default rule
-    for (size_t i = 0; i < NUM_SYSCALLS; i++) {
-        int sys_num = syscall_map[i].num;
-        // if not explicitly set in the INI file
-        if (syscall_handler_table[sys_num] == NULL) {
-            syscall_mode[sys_num] = default_mode;
-            syscall_handler_table[sys_num] = syscall_map[i].handler;
+    for (int i = 0; i < MAX_SYSCALLS; i++) {
+        if (!explicitly_set[i]) {
+            syscall_mode[i] = default_mode;
         }
     }
 }
