@@ -1,12 +1,14 @@
 ## seccomp-grate
 
-seccomp-grate is a high-performance system call filtering layer that utilizes a dynamic runtime configuration to enforce security policies, securely blocking unauthorized actions perfomed in a cage.
+seccomp-grate is a high-performance system call filtering layer that utilizes a dynamic runtime configuration file to enforce security policies, securely blocking unauthorized actions.
+
+seccomp-grate enables filtering of incoming system calls. It allow users to define a config file with whitelist or blacklist system calls
 
 ## Implementation
 
 ### Configuration Parsing
 
-At startup, the grate process parses an INI configuration file to map system call numbers. It populates a global state array `syscall_mode`, marking each call as either Whitelist (WL) or Blacklist (BL), and applies a configurable `[default]` policy to any unlisted calls.
+At startup, the grate parses and validates provided configuration file. It builds a global state array `syscall_mode` that maps every system call to a Whitelist (WL) or Blacklist (BL) state, applying defined [default] rule to any operations not explicitly listed.
 
 ### Handler Registration
 
@@ -14,11 +16,11 @@ seccomp-grate performs selective registration. It iterates through the state arr
 
 ### Interception
 
-If the cage attempts a blacklisted syscall, grate traps the operation and routes it to the `blacklist_handler()`. This handler immediately returns `-EPERM` (Operation not permitted) to securely block the unauthorized action.
+If the cage attempts a blacklisted syscall, grate traps the operation and routes it to the `blacklist_handler()`. This handler immediately returns -EPERM (Operation not permitted) to securely block the unauthorized action.
 
 ## Policy Configuration:
 
-The seccomp-grate uses a standard INI configuration file to define its security boundaries. The parser evaluates this file at startup to build the interception rules before the target binary is allowed to execute.
+The seccomp-grate uses a configuration file to define its security boundaries. The parser evaluates this file at startup to build the interception rules before the target binary is allowed to execute.
 
 ### Sections
 
@@ -28,7 +30,7 @@ The seccomp-grate uses a standard INI configuration file to define its security 
 
 ### Syntax Rules
 
-* System calls must be listed one per line using their standard `SYS_` prefix (e.g., SYS_read). Supported syscalls are listed [here](https://github.com/Lind-Project/lind-wasm/blob/main/src/rawposix/src/syscall_table.rs).
+* System calls must be listed one per line using their standard `SYS_` prefix (e.g., SYS_read). Supported syscalls are listed (here)[https://github.com/Lind-Project/lind-wasm/blob/main/src/rawposix/src/syscall_table.rs].
 * Empty lines and comments (lines beginning with # or ;) are ignored by the parser.
 
 ### Example Configuration
@@ -74,22 +76,25 @@ or use the `compile_grate.sh` script to build seccomp grate. Compile script copi
 
 ## Testing
 
-To verify the grate functioning, you can use the provided `tests/seccomp_mkdir_test.c` test alongside `src/seccomp-config.ini`. This configuration sets an "Allow by Default" policy. It explicitly blocks `SYS_rmdir` while allowing `SYS_mkdir` to pass:
+To verify the grate's functionality, you can execute the provided `tests/seccomp_chmod_test.c` test along side `src/seccomp.conf`. This configuration uses an "Allow by Default" policy that explicitly blocks `SYS_chmod` while permitting all other necessary system calls to execute natively:
 
 ```
 [default]
 whitelist
 
 [whitelist]
-SYS_mkdir
+SYS_open
+SYS_openat
+SYS_close
+SYS_unlink
 
 [blacklist]
-SYS_rmdir
+SYS_chmod
 ```
 
 ## Example Usage:
 
-`lind_run seccomp_grate.cwasm seccomp-config.ini app.cwasm`
+`lind_run seccomp_grate.cwasm seccomp.conf app.cwasm`
 
 ## Future Work
 
