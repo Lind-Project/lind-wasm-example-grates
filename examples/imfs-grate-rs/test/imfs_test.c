@@ -8,6 +8,8 @@
  *
  * Each test prints PASS/FAIL. Exit code 0 if all tests pass, 1 otherwise.
  */
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -295,15 +297,81 @@ static void test_stdout_passthrough(void) {
     if (nw > 0) tests_passed++;
 }
 
+static void test_fork(void) {
+    printf("\n[test_fork]\n");
+    
+    int fd = open("fork-test", O_CREAT | O_RDWR, 0666);
+
+    int pid = fork();
+    char buffer[10] = "hello";
+
+    if (pid == 0) {
+    	ssize_t r = write(fd, buffer, 6);
+        CHECK("Fork copies file descriptors", fcntl(fd, F_GETFD) != -1);	
+
+	exit(0);
+    } else {
+    	wait(NULL);
+    }
+
+    close(fd);
+    unlink("fork-test");
+}
+
+static void test_wrong_write(void) {
+    printf("\n[test_wrong_write]\n");
+
+    int fd = open(".", O_WRONLY | O_DIRECTORY);   // try opening directory for write
+    printf("fd=%d errno=%d\n", fd, errno);
+
+    int ret = write(fd, "x", 1);    // try writing
+    printf("write ret=%d errno=%d\n", ret, errno);
+
+    close(fd);
+}
+
+static void test_link_rw(void) {
+    printf("\n[test_link_rw]\n");
+
+    int fd = open("file1", O_CREAT | O_WRONLY, 0666);
+    char buf[10] = "hello";
+    
+    int ret = write(fd, buf, 6);
+    close(fd);
+
+    link("file1", "file2");
+    
+    fd = open("file2", O_RDONLY, 0666);
+    
+    char read_buf[10];
+    ret = read(fd, read_buf, 6);
+    close(fd);
+
+    CHECK("Read linked file.", strcmp(buf, read_buf) == 0);
+    
+    fd = open("file2", O_WRONLY);
+    memcpy(buf, "newstring", 10);
+    write(fd, buf, 10);
+    close(fd);
+
+    fd = open("file1", O_RDONLY);
+    read(fd, read_buf, 10);
+    close(fd);
+
+    CHECK("Write linked file.", strcmp(buf, read_buf) == 0);
+
+    unlink("file1");
+    unlink("file2");
+}
+
 /* ── Main ──────────────────────────────────────────────────────────────── */
 
 int main(void) {
     printf("=== imfs grate test ===\n");
 
-    test_basic_rw();
     test_open_nocreat();
+    test_basic_rw();
     test_append();
-    test_lseek();
     test_pread_pwrite();
     test_mkdir();
     test_unlink();
@@ -311,7 +379,11 @@ int main(void) {
     test_large_write();
     test_read_eof();
     test_stdout_passthrough();
-
+    test_fork();
+    test_wrong_write();
+    test_link_rw();
+    test_lseek();
+    
     printf("\n=== results: %d/%d passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
 }

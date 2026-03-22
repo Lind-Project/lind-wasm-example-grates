@@ -101,7 +101,7 @@ impl ImfsState {
 
     /// Allocate a new node. Reuses slots from the free list if available,
     /// otherwise appends to the nodes Vec. Returns the node's index.
-    pub fn create_node(&mut self, name: &str, node_type: NodeType, mode: u32) -> usize {
+    fn create_node(&mut self, name: &str, node_type: NodeType, mode: u32) -> usize {
         if let Some(free_idx) = self.node_free_list.pop() {
             self.nodes[free_idx] = Node::new(free_idx, name, node_type, mode);
             free_idx
@@ -113,7 +113,7 @@ impl ImfsState {
     }
 
     /// Add a child node to a directory. Updates the child's parent_idx.
-    pub fn add_child(&mut self, parent_idx: usize, child_idx: usize) {
+    fn add_child(&mut self, parent_idx: usize, child_idx: usize) {
         let child_name = self.nodes[child_idx].name.clone();
         self.nodes[parent_idx].children_mut().push(DirEntry {
             name: child_name,
@@ -123,10 +123,12 @@ impl ImfsState {
     }
 
     /// Remove a child from its parent directory's children list.
-    pub fn remove_child(&mut self, node_idx: usize) {
+    fn remove_child(&mut self, node_idx: usize) {
         let parent_idx = self.nodes[node_idx].parent_idx;
         let name = self.nodes[node_idx].name.clone();
-        self.nodes[parent_idx].children_mut().retain(|e| e.name != name);
+        self.nodes[parent_idx]
+            .children_mut()
+            .retain(|e| e.name != name);
     }
 
     /// Mark a node slot as free and return it to the free list for reuse.
@@ -160,7 +162,7 @@ impl ImfsState {
     /// Walk the node tree to find the node at the given absolute path.
     /// Returns None if any component doesn't exist or isn't a directory.
     /// Follows symlinks (Lnk nodes) during traversal.
-    pub fn find_node(&self, path: &str) -> Option<usize> {
+    fn find_node(&self, path: &str) -> Option<usize> {
         if path == "/" {
             return Some(self.root_idx);
         }
@@ -239,256 +241,6 @@ impl ImfsState {
     }
 
     // =====================================================================
-    //  Filesystem operations
-    //
-    //  These use fdtables directly:
-    //    - underfd  = node index
-    //    - perfdinfo = open flags
-    //    - offsets HashMap for per-fd read/write position
-    // =====================================================================
-
-    /// open: create or open a file. Returns the fd allocated by fdtables.
-    pub fn open(&mut self, cage_id: u64, path: &str, flags: i32, mode: u32) -> i32 {
-        let node_idx = if let Some(idx) = self.find_node(path) {
-            if (flags & O_EXCL) != 0 && (flags & O_CREAT) != 0 {
-                return -17; // EEXIST
-            }
-            if self.nodes[idx].node_type == NodeType::Dir && (flags & O_DIRECTORY) == 0 {
-                return -21; // EISDIR
-            }
-
-            // Check permissions.
-            let m = self.nodes[idx].mode;
-            match flags & O_ACCMODE {
-                O_RDONLY if m & S_IRUSR == 0 => return -13,
-                O_WRONLY if m & S_IWUSR == 0 => return -13,
-                O_RDWR if m & S_IRUSR == 0 || m & S_IWUSR == 0 => return -13,
-                _ => {}
-            }
-            idx
-        } else {
-            if (flags & O_CREAT) == 0 {
-                return -2; // ENOENT
-            }
-            let (parent_idx, filename) = match self.find_parent_and_name(path) {
-                Some(p) => p,
-                None => return -20, // ENOTDIR
-            };
-            if filename.len() >= MAX_NODE_NAME {
-                return -36; // ENAMETOOLONG
-            }
-            let new_idx = self.create_node(&filename, NodeType::Reg, mode);
-            self.add_child(parent_idx, new_idx);
-            new_idx
-        };
-
-        self.nodes[node_idx].in_use += 1;
-
-        // Allocate fd via fdtables. underfd = node index, perfdinfo = flags.
-        match fdtables::get_unused_virtual_fd(
-            cage_id,
-            IMFS_FDKIND,
-            node_idx as u64,    // underfd: which node
-            false,
-            flags as u64,       // perfdinfo: open flags
-        ) {
-            Ok(vfd) => {
-                // Track the offset for this fd.
-                self.offsets.insert((cage_id, vfd), 0);
-                vfd as i32
-            }
-            Err(_) => {
-                self.nodes[node_idx].in_use -= 1;
-                -24 // EMFILE
-            }
-        }
-    }
-
-    /// close: close an fd via fdtables and clean up the offset.
-    pub fn close(&mut self, cage_id: u64, fd: u64) -> i32 {
-        // Look up the node before closing so we can decrement in_use.
-        if let Ok(entry) = fdtables::translate_virtual_fd(cage_id, fd) {
-            let node_idx = entry.underfd as usize;
-            if node_idx < self.nodes.len() {
-                self.nodes[node_idx].in_use = self.nodes[node_idx].in_use.saturating_sub(1);
-
-                if self.nodes[node_idx].doomed && self.nodes[node_idx].in_use == 0 {
-                    self.reclaim_node(node_idx);
-                }
-            }
-        }
-
-        // Remove our offset tracking.
-        self.offsets.remove(&(cage_id, fd));
-
-        // Close in fdtables.
-        match fdtables::close_virtualfd(cage_id, fd) {
-            Ok(_) => 0,
-            Err(_) => -9, // EBADF
-        }
-    }
-
-    /// read: read from a file at the current offset.
-    pub fn read(&mut self, cage_id: u64, fd: u64, buf: &mut [u8]) -> i32 {
-        // Look up fd in fdtables — get node index and flags.
-        let entry = match fdtables::translate_virtual_fd(cage_id, fd) {
-            Ok(e) => e,
-            Err(_) => return -9,
-        };
-        let node_idx = entry.underfd as usize;
-        let flags = entry.perfdinfo as i32;
-
-        if (flags & O_ACCMODE) == O_WRONLY {
-            return -9;
-        }
-
-        // Get the current offset from our tracking.
-        let offset = self.offsets.get(&(cage_id, fd)).copied().unwrap_or(0);
-
-        let n = self.read_from_node(node_idx, offset as usize, buf);
-
-        // Advance the offset.
-        self.offsets.insert((cage_id, fd), offset + n as i64);
-
-        n as i32
-    }
-
-    /// pread: read at a specific offset without changing the fd offset.
-    pub fn pread(&mut self, cage_id: u64, fd: u64, buf: &mut [u8], offset: i64) -> i32 {
-        let entry = match fdtables::translate_virtual_fd(cage_id, fd) {
-            Ok(e) => e,
-            Err(_) => return -9,
-        };
-        let node_idx = entry.underfd as usize;
-        let flags = entry.perfdinfo as i32;
-
-        if (flags & O_ACCMODE) == O_WRONLY {
-            return -9;
-        }
-
-        self.read_from_node(node_idx, offset as usize, buf) as i32
-    }
-
-    /// write: write to a file at the current offset.
-    pub fn write(&mut self, cage_id: u64, fd: u64, buf: &[u8]) -> i32 {
-        let entry = match fdtables::translate_virtual_fd(cage_id, fd) {
-            Ok(e) => e,
-            Err(_) => return -9,
-        };
-        let node_idx = entry.underfd as usize;
-        let flags = entry.perfdinfo as i32;
-
-        if (flags & O_ACCMODE) == O_RDONLY {
-            return -9;
-        }
-
-        let offset = if (flags & O_APPEND) != 0 {
-            self.nodes[node_idx].total_size as i64
-        } else {
-            self.offsets.get(&(cage_id, fd)).copied().unwrap_or(0)
-        };
-
-        let n = self.write_to_node(node_idx, offset as usize, buf);
-        self.offsets.insert((cage_id, fd), offset + n as i64);
-
-        n as i32
-    }
-
-    /// pwrite: write at a specific offset without changing the fd offset.
-    pub fn pwrite(&mut self, cage_id: u64, fd: u64, buf: &[u8], offset: i64) -> i32 {
-        let entry = match fdtables::translate_virtual_fd(cage_id, fd) {
-            Ok(e) => e,
-            Err(_) => return -9,
-        };
-        let node_idx = entry.underfd as usize;
-        let flags = entry.perfdinfo as i32;
-
-        if (flags & O_ACCMODE) == O_RDONLY {
-            return -9;
-        }
-
-        self.write_to_node(node_idx, offset as usize, buf) as i32
-    }
-
-    /// lseek: reposition the fd offset.
-    pub fn lseek(&mut self, cage_id: u64, fd: u64, offset: i64, whence: i32) -> i32 {
-        let entry = match fdtables::translate_virtual_fd(cage_id, fd) {
-            Ok(e) => e,
-            Err(_) => return -9,
-        };
-        let node_idx = entry.underfd as usize;
-        let current = self.offsets.get(&(cage_id, fd)).copied().unwrap_or(0);
-
-        let new_offset = match whence {
-            SEEK_SET => offset,
-            SEEK_CUR => current + offset,
-            SEEK_END => self.nodes[node_idx].total_size as i64 + offset,
-            _ => return -22,
-        };
-
-        self.offsets.insert((cage_id, fd), new_offset);
-        new_offset as i32
-    }
-
-    /// fcntl: only F_GETFL implemented — returns flags from fdtables perfdinfo.
-    pub fn fcntl(&self, cage_id: u64, fd: u64, op: i32, _arg: i32) -> i32 {
-        match op {
-            F_GETFL => match fdtables::translate_virtual_fd(cage_id, fd) {
-                Ok(entry) => entry.perfdinfo as i32,
-                Err(_) => -9,
-            },
-            _ => -1,
-        }
-    }
-
-    /// unlink: remove a file or directory.
-    pub fn unlink(&mut self, path: &str) -> i32 {
-        let node_idx = match self.find_node(path) {
-            Some(idx) => idx,
-            None => return -2,
-        };
-
-        self.remove_child(node_idx);
-        self.nodes[node_idx].doomed = true;
-
-        if self.nodes[node_idx].in_use == 0 {
-            self.reclaim_node(node_idx);
-        }
-
-        0
-    }
-
-    /// mkdir: create a directory.
-    pub fn mkdir(&mut self, path: &str, mode: u32) -> i32 {
-        if self.find_node(path).is_some() {
-            return -17; // EEXIST
-        }
-
-        let (parent_idx, dirname) = match self.find_parent_and_name(path) {
-            Some(p) => p,
-            None => return -22,
-        };
-
-        if dirname == "." || dirname == ".." {
-            return -22;
-        }
-
-        let dir_idx = self.create_node(&dirname, NodeType::Dir, mode);
-        self.add_child(parent_idx, dir_idx);
-
-        // Add . and ..
-        let dot_idx = self.create_node(".", NodeType::Lnk, 0);
-        self.nodes[dot_idx].info = NodeInfo::Lnk { target: dir_idx };
-        self.add_child(dir_idx, dot_idx);
-
-        let dotdot_idx = self.create_node("..", NodeType::Lnk, 0);
-        self.nodes[dotdot_idx].info = NodeInfo::Lnk { target: parent_idx };
-        self.add_child(dir_idx, dotdot_idx);
-
-        0
-    }
-
-    // =====================================================================
     //  Internal chunk read/write
     // =====================================================================
 
@@ -560,11 +312,7 @@ impl ImfsState {
                 break;
             }
             local_offset -= CHUNK_SIZE;
-            let next = self.chunks[ci].next;
-            if next.is_none() {
-                break;
-            }
-            chunk_idx = next;
+            chunk_idx = self.chunks[ci].next;
         }
 
         let mut written = 0;
@@ -617,5 +365,347 @@ impl ImfsState {
         }
 
         written
+    }
+
+    // Helper function to get the node_idx and flag for a give cageid and fd.
+    //
+    // In case the node_idx points to a Lnk, it follows the link until we hit a real Node.
+    // This immediately adds support for reading symlinked files.
+    fn get_node_and_flags(&mut self, cage_id: u64, fd: u64) -> Result<(usize, i32), i32> {
+        let entry = match fdtables::translate_virtual_fd(cage_id, fd) {
+            Ok(e) => e,
+            Err(_) => return Err(-9),
+        };
+
+        let node_idx = entry.underfd as usize;
+        let flags = entry.perfdinfo as i32;
+
+        let mut idx = node_idx;
+
+        // If the node is a Link, follow until we hit an actual Node.
+        // Streamlines process of reading/writing symlink'd files.
+        while let NodeInfo::Lnk { target } = &self.nodes[idx].info {
+            idx = *target;
+        }
+
+        return Ok((idx as usize, flags));
+    }
+
+    // =====================================================================
+    //  Public Filesystem operations
+    //
+    //  These use fdtables directly:
+    //    - underfd  = node index
+    //    - perfdinfo = open flags
+    //    - offsets HashMap for per-fd read/write position
+    // =====================================================================
+
+    /// open: create or open a file. Returns the fd allocated by fdtables.
+    pub fn open(&mut self, cage_id: u64, path: &str, flags: i32, mode: u32) -> i32 {
+        let node_idx = if let Some(idx) = self.find_node(path) {
+            if (flags & O_EXCL) != 0 && (flags & O_CREAT) != 0 {
+                return -17; // EEXIST
+            }
+            if self.nodes[idx].node_type == NodeType::Dir && (flags & O_DIRECTORY) == 0 {
+                return -21; // EISDIR
+            }
+
+            // Check permissions.
+            let m = self.nodes[idx].mode;
+            match flags & O_ACCMODE {
+                O_RDONLY if m & S_IRUSR == 0 => return -13,
+                O_WRONLY if m & S_IWUSR == 0 => return -13,
+                O_RDWR if m & S_IRUSR == 0 || m & S_IWUSR == 0 => return -13,
+                _ => {}
+            }
+            idx
+        } else {
+            if (flags & O_CREAT) == 0 {
+                return -2; // ENOENT
+            }
+            let (parent_idx, filename) = match self.find_parent_and_name(path) {
+                Some(p) => p,
+                None => return -20, // ENOTDIR
+            };
+            if filename.len() >= MAX_NODE_NAME {
+                return -36; // ENAMETOOLONG
+            }
+            let new_idx = self.create_node(&filename, NodeType::Reg, mode);
+            self.add_child(parent_idx, new_idx);
+            new_idx
+        };
+
+        self.nodes[node_idx].in_use += 1;
+
+        // Allocate fd via fdtables. underfd = node index, perfdinfo = flags.
+        match fdtables::get_unused_virtual_fd(
+            cage_id,
+            IMFS_FDKIND,
+            node_idx as u64, // underfd: which node
+            false,
+            flags as u64, // perfdinfo: open flags
+        ) {
+            Ok(vfd) => {
+                // Track the offset for this fd.
+                self.offsets.insert((cage_id, vfd), 0);
+                vfd as i32
+            }
+            Err(_) => {
+                self.nodes[node_idx].in_use -= 1;
+                -24 // EMFILE
+            }
+        }
+    }
+
+    /// close: close an fd via fdtables and clean up the offset.
+    pub fn close(&mut self, cage_id: u64, fd: u64) -> i32 {
+        // Look up the node before closing so we can decrement in_use.
+        if let Ok(entry) = fdtables::translate_virtual_fd(cage_id, fd) {
+            let node_idx = entry.underfd as usize;
+            if node_idx < self.nodes.len() {
+                self.nodes[node_idx].in_use = self.nodes[node_idx].in_use.saturating_sub(1);
+
+                if self.nodes[node_idx].doomed && self.nodes[node_idx].in_use == 0 {
+                    self.reclaim_node(node_idx);
+                }
+            }
+        }
+
+        // Remove our offset tracking.
+        self.offsets.remove(&(cage_id, fd));
+
+        // Close in fdtables.
+        match fdtables::close_virtualfd(cage_id, fd) {
+            Ok(_) => 0,
+            Err(_) => -9, // EBADF
+        }
+    }
+
+    /// read: read from a file at the current offset.
+    pub fn read(&mut self, cage_id: u64, fd: u64, buf: &mut [u8]) -> i32 {
+        // Look up fd in fdtables — get node index and flags.
+        let (node_idx, flags) = match self.get_node_and_flags(cage_id, fd) {
+            Ok((n, f)) => (n, f),
+            Err(e) => return e,
+        };
+
+        // Return EBADF for reads on non regular files.
+        // TODO: Implement pipe reads.
+        match &self.nodes[node_idx].info {
+            NodeInfo::Reg { head: _, tail: _ } => {}
+            _ => return -9,
+        };
+
+        if (flags & O_ACCMODE) == O_WRONLY {
+            return -9;
+        }
+
+        // Get the current offset from our tracking.
+        let offset = self.offsets.get(&(cage_id, fd)).copied().unwrap_or(0);
+
+        let n = self.read_from_node(node_idx, offset as usize, buf);
+
+        // Advance the offset.
+        self.offsets.insert((cage_id, fd), offset + n as i64);
+
+        n as i32
+    }
+
+    /// pread: read at a specific offset without changing the fd offset.
+    pub fn pread(&mut self, cage_id: u64, fd: u64, buf: &mut [u8], offset: i64) -> i32 {
+        // Look up fd in fdtables — get node index and flags.
+        let (node_idx, flags) = match self.get_node_and_flags(cage_id, fd) {
+            Ok((n, f)) => (n, f),
+            Err(e) => return e,
+        };
+
+        // Return EBADF for reads on non regular files.
+        // TODO: Implement pipe reads.
+        match &self.nodes[node_idx].info {
+            NodeInfo::Reg { head: _, tail: _ } => {}
+            _ => return -9,
+        };
+
+        if (flags & O_ACCMODE) == O_WRONLY {
+            return -9;
+        }
+
+        self.read_from_node(node_idx, offset as usize, buf) as i32
+    }
+
+    /// write: write to a file at the current offset.
+    pub fn write(&mut self, cage_id: u64, fd: u64, buf: &[u8]) -> i32 {
+        let (node_idx, flags) = match self.get_node_and_flags(cage_id, fd) {
+            Ok((n, f)) => (n, f),
+            Err(e) => return e,
+        };
+
+        // Return EBADF for writes on non regular files.
+        // TODO: Implement pipe reads.
+        match &self.nodes[node_idx].info {
+            NodeInfo::Reg { head: _, tail: _ } => {}
+            _ => return -9,
+        };
+
+        if (flags & O_ACCMODE) == O_RDONLY {
+            return -9;
+        }
+
+        let offset = if (flags & O_APPEND) != 0 {
+            self.nodes[node_idx].total_size as i64
+        } else {
+            self.offsets.get(&(cage_id, fd)).copied().unwrap_or(0)
+        };
+
+        let n = self.write_to_node(node_idx, offset as usize, buf);
+
+        self.offsets.insert((cage_id, fd), offset + n as i64);
+
+        n as i32
+    }
+
+    /// pwrite: write at a specific offset without changing the fd offset.
+    pub fn pwrite(&mut self, cage_id: u64, fd: u64, buf: &[u8], offset: i64) -> i32 {
+        // Look up fd in fdtables — get node index and flags.
+        let (node_idx, flags) = match self.get_node_and_flags(cage_id, fd) {
+            Ok((n, f)) => (n, f),
+            Err(e) => return e,
+        };
+
+        // Return EBADF for writes on non regular files.
+        // TODO: Implement pipe reads.
+        match &self.nodes[node_idx].info {
+            NodeInfo::Reg { head: _, tail: _ } => {}
+            _ => return -9,
+        };
+
+        if (flags & O_ACCMODE) == O_RDONLY {
+            return -9;
+        }
+
+        self.write_to_node(node_idx, offset as usize, buf) as i32
+    }
+
+    /// lseek: reposition the fd offset.
+    pub fn lseek(&mut self, cage_id: u64, fd: u64, offset: i64, whence: i32) -> i32 {
+        let (node_idx, _) = match self.get_node_and_flags(cage_id, fd) {
+            Ok((n, _)) => (n, ..),
+            Err(e) => return e,
+        };
+
+        // Only valid for regular files,
+        match &self.nodes[node_idx].info {
+            NodeInfo::Reg { .. } => {}
+            NodeInfo::Pip { .. } => return -29, // EISPIPE
+            NodeInfo::Dir { .. } => return offset as i32, // On directory lseeks, we return offset
+            // immediately.
+            _ => return -9, // EBADF on Free/Lnk (will never be hit)
+        };
+
+        let current = self.offsets.get(&(cage_id, fd)).copied().unwrap_or(0);
+
+        let new_offset = match whence {
+            SEEK_SET => offset,
+            SEEK_CUR => current + offset,
+            SEEK_END => self.nodes[node_idx].total_size as i64 + offset,
+            _ => return -22,
+        };
+
+        self.offsets.insert((cage_id, fd), new_offset);
+        new_offset as i32
+    }
+
+    /// fcntl: only F_GETFL implemented — returns flags from fdtables perfdinfo.
+    pub fn fcntl(&self, cage_id: u64, fd: u64, op: i32, _arg: i32) -> i32 {
+        match op {
+            F_GETFL => match fdtables::translate_virtual_fd(cage_id, fd) {
+                Ok(entry) => entry.perfdinfo as i32,
+                Err(_) => -9,
+            },
+            _ => -1,
+        }
+    }
+
+    /// unlink: remove a file or directory.
+    pub fn unlink(&mut self, path: &str) -> i32 {
+        let node_idx = match self.find_node(path) {
+            Some(idx) => idx,
+            None => return -2,
+        };
+
+        self.remove_child(node_idx);
+        self.nodes[node_idx].doomed = true;
+
+        if self.nodes[node_idx].in_use == 0 {
+            self.reclaim_node(node_idx);
+        }
+
+        0
+    }
+
+    /// link: (int cage_id, const char *oldpath, const char *newpath) {
+    pub fn link(&mut self, oldpath: &str, newpath: &str) -> i32 {
+        // Ensure old path exists.
+        let old_idx = match self.find_node(oldpath) {
+            Some(idx) => idx,
+            None => return -9,
+        };
+
+        // Ensure newpath does not exist.
+        match self.find_node(newpath) {
+            Some(_) => return -9,
+            None => {}
+        };
+
+        // open(O_CREAT) behaviour.
+        let (parent_idx, filename) = match self.find_parent_and_name(newpath) {
+            Some(p) => p,
+            None => return -20, // ENOTDIR
+        };
+
+        if filename.len() >= MAX_NODE_NAME {
+            return -36; // ENAMETOOLONG
+        }
+
+        let mode = &self.nodes[old_idx].mode;
+
+        // Create new Lnk, update target.
+        let new_idx = self.create_node(&filename, NodeType::Lnk, *mode);
+        self.add_child(parent_idx, new_idx);
+        if let NodeInfo::Lnk { target } = &mut self.nodes[new_idx].info {
+            *target = old_idx;
+        }
+
+        0
+    }
+
+    /// mkdir: create a directory.
+    pub fn mkdir(&mut self, path: &str, mode: u32) -> i32 {
+        if self.find_node(path).is_some() {
+            return -17; // EEXIST
+        }
+
+        let (parent_idx, dirname) = match self.find_parent_and_name(path) {
+            Some(p) => p,
+            None => return -22,
+        };
+
+        if dirname == "." || dirname == ".." {
+            return -22;
+        }
+
+        let dir_idx = self.create_node(&dirname, NodeType::Dir, mode);
+        self.add_child(parent_idx, dir_idx);
+
+        // Add . and ..
+        let dot_idx = self.create_node(".", NodeType::Lnk, 0);
+        self.nodes[dot_idx].info = NodeInfo::Lnk { target: dir_idx };
+        self.add_child(dir_idx, dot_idx);
+
+        let dotdot_idx = self.create_node("..", NodeType::Lnk, 0);
+        self.nodes[dotdot_idx].info = NodeInfo::Lnk { target: parent_idx };
+        self.add_child(dir_idx, dotdot_idx);
+
+        0
     }
 }

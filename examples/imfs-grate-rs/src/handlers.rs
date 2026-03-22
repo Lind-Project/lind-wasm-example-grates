@@ -5,8 +5,8 @@
 //! using copy_data_between_cages. Handlers that deal with buffers (read/write)
 //! copy data to/from the cage similarly.
 
-use grate_rs::{copy_data_between_cages, getcageid, make_threei_call};
 use grate_rs::constants::*;
+use grate_rs::{copy_data_between_cages, getcageid, make_threei_call};
 
 use crate::imfs;
 
@@ -19,10 +19,14 @@ fn copy_path_from_cage(path_ptr: u64, path_cage: u64) -> Option<String> {
 
     // copytype=1 means strncpy (stops at null terminator).
     match copy_data_between_cages(
-        this_cage, path_cage,
-        path_ptr, path_cage,
-        buf.as_mut_ptr() as u64, this_cage,
-        MAX_PATH_LEN as u64, 1,
+        this_cage,
+        path_cage,
+        path_ptr,
+        path_cage,
+        buf.as_mut_ptr() as u64,
+        this_cage,
+        MAX_PATH_LEN as u64,
+        1,
     ) {
         Ok(_) => {}
         Err(_) => return None,
@@ -41,12 +45,18 @@ fn copy_path_from_cage(path_ptr: u64, path_cage: u64) -> Option<String> {
 
 pub extern "C" fn open_handler(
     _cageid: u64,
-    arg1: u64, arg1cage: u64,
-    arg2: u64, _arg2cage: u64,
-    arg3: u64, _arg3cage: u64,
-    _arg4: u64, _arg4cage: u64,
-    _arg5: u64, _arg5cage: u64,
-    _arg6: u64, _arg6cage: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    _arg2cage: u64,
+    arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
 ) -> i32 {
     let cage_id = arg1cage;
 
@@ -70,12 +80,18 @@ pub extern "C" fn open_handler(
 
 pub extern "C" fn close_handler(
     _cageid: u64,
-    arg1: u64, arg1cage: u64,
-    _arg2: u64, _arg2cage: u64,
-    _arg3: u64, _arg3cage: u64,
-    _arg4: u64, _arg4cage: u64,
-    _arg5: u64, _arg5cage: u64,
-    _arg6: u64, _arg6cage: u64,
+    arg1: u64,
+    arg1cage: u64,
+    _arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
 ) -> i32 {
     imfs::with_imfs(|state| state.close(arg1cage, arg1))
 }
@@ -90,12 +106,18 @@ pub extern "C" fn close_handler(
 
 pub extern "C" fn read_handler(
     _cageid: u64,
-    arg1: u64, arg1cage: u64,
-    arg2: u64, arg2cage: u64,
-    arg3: u64, _arg3cage: u64,
-    _arg4: u64, _arg4cage: u64,
-    _arg5: u64, _arg5cage: u64,
-    _arg6: u64, _arg6cage: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
 ) -> i32 {
     let cage_id = arg1cage;
     let fd = arg1;
@@ -110,10 +132,14 @@ pub extern "C" fn read_handler(
     // Copy result to the cage's buffer (if buf ptr is non-null and read succeeded).
     if ret > 0 && arg2 != 0 {
         let _ = copy_data_between_cages(
-            this_cage, arg2cage,
-            buf.as_ptr() as u64, this_cage,
-            arg2, arg2cage,
-            count as u64, 0, // copytype=0 means raw memcpy
+            this_cage,
+            arg2cage,
+            buf.as_ptr() as u64,
+            this_cage,
+            arg2,
+            arg2cage,
+            count as u64,
+            0, // copytype=0 means raw memcpy
         );
     }
 
@@ -130,12 +156,18 @@ pub extern "C" fn read_handler(
 
 pub extern "C" fn write_handler(
     _cageid: u64,
-    arg1: u64, arg1cage: u64,
-    arg2: u64, arg2cage: u64,
-    arg3: u64, _arg3cage: u64,
-    _arg4: u64, _arg4cage: u64,
-    _arg5: u64, _arg5cage: u64,
-    _arg6: u64, _arg6cage: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
 ) -> i32 {
     let cage_id = arg1cage;
     let fd = arg1;
@@ -146,10 +178,14 @@ pub extern "C" fn write_handler(
     let mut buf = vec![0u8; count];
 
     let _ = copy_data_between_cages(
-        this_cage, arg2cage,
-        arg2, arg2cage,
-        buf.as_mut_ptr() as u64, this_cage,
-        count as u64, 0,
+        this_cage,
+        arg2cage,
+        arg2,
+        arg2cage,
+        buf.as_mut_ptr() as u64,
+        this_cage,
+        count as u64,
+        0,
     );
 
     // Special case: fd 0/1/2 (stdin/stdout/stderr) pass through to real write.
@@ -173,12 +209,18 @@ pub extern "C" fn write_handler(
 
 pub extern "C" fn lseek_handler(
     _cageid: u64,
-    arg1: u64, arg1cage: u64,
-    arg2: u64, _arg2cage: u64,
-    arg3: u64, _arg3cage: u64,
-    _arg4: u64, _arg4cage: u64,
-    _arg5: u64, _arg5cage: u64,
-    _arg6: u64, _arg6cage: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    _arg2cage: u64,
+    arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
 ) -> i32 {
     let offset = arg2 as i64;
     let whence = arg3 as i32;
@@ -195,12 +237,18 @@ pub extern "C" fn lseek_handler(
 
 pub extern "C" fn fcntl_handler(
     _cageid: u64,
-    arg1: u64, arg1cage: u64,
-    arg2: u64, _arg2cage: u64,
-    arg3: u64, _arg3cage: u64,
-    _arg4: u64, _arg4cage: u64,
-    _arg5: u64, _arg5cage: u64,
-    _arg6: u64, _arg6cage: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    _arg2cage: u64,
+    arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
 ) -> i32 {
     let op = arg2 as i32;
     let arg = arg3 as i32;
@@ -216,12 +264,18 @@ pub extern "C" fn fcntl_handler(
 
 pub extern "C" fn unlink_handler(
     _cageid: u64,
-    arg1: u64, arg1cage: u64,
-    _arg2: u64, _arg2cage: u64,
-    _arg3: u64, _arg3cage: u64,
-    _arg4: u64, _arg4cage: u64,
-    _arg5: u64, _arg5cage: u64,
-    _arg6: u64, _arg6cage: u64,
+    arg1: u64,
+    arg1cage: u64,
+    _arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
 ) -> i32 {
     let pathname = match copy_path_from_cage(arg1, arg1cage) {
         Some(p) => p,
@@ -229,6 +283,34 @@ pub extern "C" fn unlink_handler(
     };
 
     imfs::with_imfs(|state| state.unlink(&pathname))
+}
+
+pub extern "C" fn link_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let oldpath = match copy_path_from_cage(arg1, arg1cage) {
+        Some(p) => p,
+        None => return -14,
+    };
+
+    let newpath = match copy_path_from_cage(arg2, arg2cage) {
+        Some(p) => p,
+        None => return -14,
+    };
+
+    imfs::with_imfs(|state| state.link(&oldpath, &newpath))
 }
 
 // =====================================================================
@@ -241,12 +323,18 @@ pub extern "C" fn unlink_handler(
 
 pub extern "C" fn pread_handler(
     _cageid: u64,
-    arg1: u64, arg1cage: u64,
-    arg2: u64, arg2cage: u64,
-    arg3: u64, _arg3cage: u64,
-    arg4: u64, _arg4cage: u64,
-    _arg5: u64, _arg5cage: u64,
-    _arg6: u64, _arg6cage: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    _arg3cage: u64,
+    arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
 ) -> i32 {
     let cage_id = arg1cage;
     let fd = arg1;
@@ -260,10 +348,14 @@ pub extern "C" fn pread_handler(
 
     if ret > 0 && arg2 != 0 {
         let _ = copy_data_between_cages(
-            this_cage, arg2cage,
-            buf.as_ptr() as u64, this_cage,
-            arg2, arg2cage,
-            count as u64, 0,
+            this_cage,
+            arg2cage,
+            buf.as_ptr() as u64,
+            this_cage,
+            arg2,
+            arg2cage,
+            count as u64,
+            0,
         );
     }
 
@@ -280,12 +372,18 @@ pub extern "C" fn pread_handler(
 
 pub extern "C" fn pwrite_handler(
     _cageid: u64,
-    arg1: u64, arg1cage: u64,
-    arg2: u64, arg2cage: u64,
-    arg3: u64, _arg3cage: u64,
-    arg4: u64, _arg4cage: u64,
-    _arg5: u64, _arg5cage: u64,
-    _arg6: u64, _arg6cage: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    _arg3cage: u64,
+    arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
 ) -> i32 {
     let cage_id = arg1cage;
     let fd = arg1;
@@ -296,10 +394,14 @@ pub extern "C" fn pwrite_handler(
     let mut buf = vec![0u8; count];
 
     let _ = copy_data_between_cages(
-        this_cage, arg2cage,
-        arg2, arg2cage,
-        buf.as_mut_ptr() as u64, this_cage,
-        count as u64, 0,
+        this_cage,
+        arg2cage,
+        arg2,
+        arg2cage,
+        buf.as_mut_ptr() as u64,
+        this_cage,
+        count as u64,
+        0,
     );
 
     // fd < 3 passthrough.
@@ -322,38 +424,55 @@ pub extern "C" fn pwrite_handler(
 
 pub extern "C" fn fork_handler(
     cageid: u64,
-    arg1: u64, arg1cage: u64,
-    arg2: u64, arg2cage: u64,
-    arg3: u64, arg3cage: u64,
-    arg4: u64, arg4cage: u64,
-    arg5: u64, arg5cage: u64,
-    arg6: u64, arg6cage: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
 ) -> i32 {
     let this_cage = getcageid();
 
     // Forward the fork to the runtime.
     let ret = match make_threei_call(
-        SYS_FORK as u32, 0, this_cage, this_cage,
-        arg1, arg1cage, arg2, arg2cage, arg3, arg3cage,
-        arg4, arg4cage, arg5, arg5cage, arg6, arg6cage, 0,
+        SYS_CLONE as u32, // Fork is SYS_CLONE in lind.
+        0,
+        this_cage,
+        arg1cage,
+        arg1,
+        arg1cage,
+        arg2,
+        arg2cage,
+        arg3,
+        arg3cage,
+        arg4,
+        arg4cage,
+        arg5,
+        arg5cage,
+        arg6,
+        arg6cage,
+        0,
     ) {
         Ok(r) => r,
         Err(_) => return -1,
     };
 
-    // Only the parent (ret > 0) sets up state for the child.
-    if ret <= 0 {
-        return ret;
-    }
-
     let child_cage_id = ret as u64;
 
     // Clone the fdtables for the child — inherits all open fds.
-    let _ = fdtables::copy_fdtable_for_cage(cageid, child_cage_id);
+    let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
 
     // Clone our offset tracking for the child cage.
     imfs::with_imfs(|state| {
-        let parent_offsets: Vec<_> = state.offsets.iter()
+        let parent_offsets: Vec<_> = state
+            .offsets
+            .iter()
             .filter(|&(&(cid, _), _)| cid == cageid)
             .map(|(&(_, fd), &offset)| ((child_cage_id, fd), offset))
             .collect();
@@ -386,25 +505,66 @@ pub extern "C" fn fork_handler(
 
 pub extern "C" fn exec_handler(
     _cageid: u64,
-    arg1: u64, arg1cage: u64,
-    arg2: u64, arg2cage: u64,
-    arg3: u64, arg3cage: u64,
-    arg4: u64, arg4cage: u64,
-    arg5: u64, arg5cage: u64,
-    arg6: u64, arg6cage: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
 ) -> i32 {
     let cage_id = arg1cage;
     let this_cage = getcageid();
+
+    // Interposing on exec also interposes on the very first exec that launches the first child cage.
+    // Since cages are registered to fdtables only on fork, the first cageid won't be registered.
+    // Do that here.
+    match fdtables::check_cage_exists(cage_id) {
+        false => fdtables::init_empty_cage(cage_id),
+        true => {}
+    };
 
     // Close all fds with O_CLOEXEC set. fdtables handles this —
     // it calls the registered close handlers for each closed fd.
     fdtables::empty_fds_for_exec(cage_id);
 
+    // fdtables allocates virtual FDs, which start from 0 instead of 3.
+    // Unlike regular lind, `underfd` does not point to an actual FD allocation mechanism,
+    // so we need to manually open stdin/stdout/stderr file descriptors to reserve them.
+    for fd in 0..3 {
+        fdtables::get_unused_virtual_fd(
+            cage_id,
+            crate::imfs::IMFS_FDKIND,
+            0, // underfd: which node
+            false,
+            0,
+        );
+    }
+
     // Forward the exec to the runtime.
     match make_threei_call(
-        SYS_EXEC as u32, 0, this_cage, this_cage,
-        arg1, arg1cage, arg2, arg2cage, arg3, arg3cage,
-        arg4, arg4cage, arg5, arg5cage, arg6, arg6cage, 0,
+        SYS_EXEC as u32,
+        0,
+        this_cage,
+        arg1cage,
+        arg1,
+        arg1cage,
+        arg2,
+        arg2cage,
+        arg3,
+        arg3cage,
+        arg4,
+        arg4cage,
+        arg5,
+        arg5cage,
+        arg6,
+        arg6cage,
+        0,
     ) {
         Ok(r) => r,
         Err(_) => -1,

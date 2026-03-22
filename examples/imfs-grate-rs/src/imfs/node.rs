@@ -45,18 +45,11 @@ pub enum NodeInfo {
         tail: Option<usize>,
     },
     /// Directory: list of child entries.
-    Dir {
-        children: Vec<DirEntry>,
-    },
+    Dir { children: Vec<DirEntry> },
     /// Symbolic/hard link: index of the target node.
-    Lnk {
-        target: usize,
-    },
+    Lnk { target: usize },
     /// Pipe (limited implementation).
-    Pip {
-        data: Vec<u8>,
-        offset: usize,
-    },
+    Pip { data: Vec<u8>, offset: usize },
     /// Free slot.
     Free,
 }
@@ -90,10 +83,18 @@ impl Node {
         };
 
         let info = match node_type {
-            NodeType::Reg => NodeInfo::Reg { head: None, tail: None },
-            NodeType::Dir => NodeInfo::Dir { children: Vec::new() },
+            NodeType::Reg => NodeInfo::Reg {
+                head: None,
+                tail: None,
+            },
+            NodeType::Dir => NodeInfo::Dir {
+                children: Vec::new(),
+            },
             NodeType::Lnk => NodeInfo::Lnk { target: 0 },
-            NodeType::Pip => NodeInfo::Pip { data: vec![0u8; CHUNK_SIZE], offset: 0 },
+            NodeType::Pip => NodeInfo::Pip {
+                data: vec![0u8; CHUNK_SIZE],
+                offset: 0,
+            },
             NodeType::Free => NodeInfo::Free,
         };
 

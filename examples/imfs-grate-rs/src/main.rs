@@ -35,9 +35,10 @@ fn main() {
         .register(SYS_LSEEK, handlers::lseek_handler)
         .register(SYS_FCNTL, handlers::fcntl_handler)
         .register(SYS_UNLINK, handlers::unlink_handler)
+        .register(SYS_LINK, handlers::link_handler)
         .register(SYS_PREAD, handlers::pread_handler)
         .register(SYS_PWRITE, handlers::pwrite_handler)
-        .register(SYS_FORK, handlers::fork_handler)
+        .register(SYS_CLONE, handlers::fork_handler)
         .register(SYS_EXEC, handlers::exec_handler)
         .teardown(|result: Result<i32, GrateError>| {
             println!("[imfs-grate] exited: {:?}", result);
