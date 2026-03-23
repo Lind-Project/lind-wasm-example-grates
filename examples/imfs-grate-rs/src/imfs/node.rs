@@ -7,12 +7,11 @@
 pub const CHUNK_SIZE: usize = 1024;
 pub const MAX_NODE_NAME: usize = 65;
 pub const MAX_NODES: usize = 1024;
-pub const MAX_DEPTH: usize = 10;
 
 // Stub constants for stat results.
 pub const GET_UID: u32 = 501;
 pub const GET_GID: u32 = 20;
-pub const GET_DEV: u64 = 1;
+pub const _GET_DEV: u64 = 1;
 
 /// The type of a filesystem node.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -24,6 +23,7 @@ pub enum NodeType {
     /// Symbolic link.
     Lnk,
     /// Pipe.
+    #[allow(unused)]
     Pip,
     /// Free / unallocated slot.
     Free,
@@ -49,6 +49,7 @@ pub enum NodeInfo {
     /// Symbolic/hard link: index of the target node.
     Lnk { target: usize },
     /// Pipe (limited implementation).
+    #[allow(unused)]
     Pip { data: Vec<u8>, offset: usize },
     /// Free slot.
     Free,
@@ -58,7 +59,10 @@ pub enum NodeInfo {
 #[derive(Clone, Debug)]
 pub struct Node {
     pub node_type: NodeType,
+
+    #[allow(unused)]
     pub index: usize,
+
     pub total_size: usize,
     pub name: String,
     pub parent_idx: usize,
@@ -67,8 +71,13 @@ pub struct Node {
     /// Marked for deletion once all references are closed.
     pub doomed: bool,
     pub mode: u32,
+
+    #[allow(unused)]
     pub owner: u32,
+
+    #[allow(unused)]
     pub group: u32,
+
     pub info: NodeInfo,
 }
 
@@ -110,14 +119,6 @@ impl Node {
             owner: GET_UID,
             group: GET_GID,
             info,
-        }
-    }
-
-    /// Get the children of a directory node. Panics if not a directory.
-    pub fn children(&self) -> &[DirEntry] {
-        match &self.info {
-            NodeInfo::Dir { children } => children,
-            _ => &[],
         }
     }
 

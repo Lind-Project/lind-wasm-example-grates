@@ -536,8 +536,8 @@ pub extern "C" fn exec_handler(
     // fdtables allocates virtual FDs, which start from 0 instead of 3.
     // Unlike regular lind, `underfd` does not point to an actual FD allocation mechanism,
     // so we need to manually open stdin/stdout/stderr file descriptors to reserve them.
-    for fd in 0..3 {
-        fdtables::get_unused_virtual_fd(
+    for _fd in 0..3 {
+        let _ = fdtables::get_unused_virtual_fd(
             cage_id,
             crate::imfs::IMFS_FDKIND,
             0, // underfd: which node

@@ -86,7 +86,7 @@ fn load_preloads(preloads: &str) {
             fdtables::init_empty_cage(0);
 
             // Create and write the file.
-            let fd = state.open(0, path, imfs::O_CREAT | imfs::O_WRONLY, 0o777);
+            let fd = state.open(0, path, fs::O_CREAT | fs::O_WRONLY, 0o777);
             if fd >= 0 {
                 state.write(0, fd as u64, &data);
                 state.close(0, fd as u64);
