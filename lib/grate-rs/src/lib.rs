@@ -4,20 +4,21 @@
 //! - syscall registration and 3i wrappers
 //! - grate dispatch entrypoint (`pass_fptr_to_wt`)
 //! - the `GrateBuilder` lifecycle helpers
+
+// Use and publicly export constants and grate-rs related ffi shims.
 pub mod constants;
-mod ffi;
+pub mod ffi;
 
 use core::ffi::{c_char, c_int, c_void};
 use std::ffi::{CString, c_uint};
 use std::ptr;
 
+use crate::constants::lind::ELINDAPIABORTED;
+use crate::constants::mman::*;
 use crate::ffi::{
-    MAP_ANON, MAP_FAILED, MAP_SHARED, PROT_READ, PROT_WRITE, clean_exit, cp_data_impl, execv, fork,
-    getpid_impl, make_syscall_impl, mmap, munmap, register_handler_impl, sem_destroy, sem_init,
-    sem_post, sem_t, sem_wait, waitpid,
+    clean_exit, cp_data_impl, execv, fork, getpid_impl, make_syscall_impl, mmap, munmap,
+    register_handler_impl, sem_destroy, sem_init, sem_post, sem_t, sem_wait, waitpid,
 };
-
-const ELINDAPIABORTED: u64 = 0xE001_0001;
 
 /// Error types that can occur during grate execution.
 #[derive(Debug)]
@@ -123,23 +124,25 @@ struct LaunchState {
 }
 
 pub unsafe fn mmap_shared<T>() -> &'static mut T {
-    let ptr = mmap(
-        std::ptr::null_mut(),
-        std::mem::size_of::<T>(),
-        PROT_READ | PROT_WRITE,
-        MAP_SHARED | MAP_ANON,
-        -1,
-        0,
-    );
+    unsafe {
+        let ptr = mmap(
+            std::ptr::null_mut(),
+            std::mem::size_of::<T>(),
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED | MAP_ANON,
+            -1,
+            0,
+        );
 
-    if ptr == MAP_FAILED {
-        let err = std::io::Error::last_os_error();
-        println!("mmap failed: {}", err);
+        if ptr == MAP_FAILED {
+            let err = std::io::Error::last_os_error();
+            println!("mmap failed: {}", err);
 
-        clean_exit(0);
+            clean_exit(0);
+        }
+
+        &mut *(ptr as *mut T)
     }
-
-    &mut *(ptr as *mut T)
 }
 
 // Wrap raw FFI calls in Rust-friendly signatures to keep unsafe usage localized
