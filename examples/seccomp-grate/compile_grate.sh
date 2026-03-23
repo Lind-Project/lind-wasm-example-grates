@@ -6,4 +6,5 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 lind_compile --compile-grate src/seccomp_grate.c src/seccomp.c
-cp src/seccomp.conf $LINDFS_ROOT
+cp policies/seccomp_blacklist_test.conf $LINDFS_ROOT
+cp policies/seccomp_whitelist_test.conf $LINDFS_ROOT
