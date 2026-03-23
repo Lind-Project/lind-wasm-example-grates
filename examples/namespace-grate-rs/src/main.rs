@@ -9,49 +9,14 @@
 mod handlers;
 mod helpers;
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_char, c_void};
 use std::ffi::CString;
 use std::ptr;
 
 use grate_rs::getcageid;
 
-// ── POSIX FFI (re-declared; grate-rs keeps these private) ─────────────────
-
-const PROT_READ: i32 = 0x1;
-const PROT_WRITE: i32 = 0x2;
-const MAP_SHARED: i32 = 0x01;
-const MAP_ANON: i32 = 0x20;
-const MAP_FAILED: *mut c_void = (-1isize) as *mut c_void;
-
-#[allow(non_camel_case_types)]
-type off_t = i32;
-
-#[allow(non_camel_case_types)]
-#[repr(C)]
-struct sem_t {
-    __size: [c_char; 16],
-}
-
-unsafe extern "C" {
-    fn fork() -> i32;
-    fn execv(prog: *const c_char, argv: *const *const c_char) -> c_int;
-    fn waitpid(pid: i32, status: *mut c_int, options: c_int) -> i32;
-    fn mmap(
-        addr: *mut c_void,
-        len: usize,
-        prot: c_int,
-        flags: c_int,
-        fd: c_int,
-        offset: off_t,
-    ) -> *mut c_void;
-    fn munmap(addr: *mut c_void, len: usize) -> c_int;
-    fn sem_init(sem: *mut sem_t, pshared: c_int, value: u32) -> c_int;
-    fn sem_destroy(sem: *mut sem_t) -> c_int;
-    fn sem_post(sem: *mut sem_t) -> c_int;
-    fn sem_wait(sem: *mut sem_t) -> c_int;
-}
-
-// ── Parsed command-line config ────────────────────────────────────────────
+use grate_rs::constants::mman::*;
+use grate_rs::ffi::*;
 
 struct NamespaceConfig {
     /// The path prefix condition (e.g., "/tmp").
@@ -115,8 +80,6 @@ fn parse_argv(args: Vec<String>) -> Result<NamespaceConfig, String> {
     Ok(NamespaceConfig { prefix, exec_chain })
 }
 
-// ── Shared memory helpers ─────────────────────────────────────────────────
-
 unsafe fn mmap_shared<T>() -> *mut T {
     let ptr = unsafe {
         mmap(
@@ -134,8 +97,6 @@ unsafe fn mmap_shared<T>() -> *mut T {
     }
     ptr as *mut T
 }
-
-// ── Main ──────────────────────────────────────────────────────────────────
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -187,7 +148,6 @@ fn main() {
     }
 
     if child_pid == 0 {
-        // ── Child ─────────────────────────────────────────────────────
         // Wait until parent has registered lifecycle handlers.
         unsafe { sem_wait(sem) };
 
@@ -199,7 +159,6 @@ fn main() {
         std::process::exit(-1);
     }
 
-    // ── Parent (namespace grate) ──────────────────────────────────────
     let child_cage_id = child_pid as u64;
 
     println!(

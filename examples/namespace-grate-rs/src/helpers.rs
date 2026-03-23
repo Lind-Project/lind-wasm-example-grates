@@ -53,7 +53,12 @@ pub fn get_ns_cage_id() -> u64 {
 }
 
 pub fn get_routing_prefix() -> String {
-    ROUTING_PREFIX.lock().unwrap().as_ref().cloned().unwrap_or_default()
+    ROUTING_PREFIX
+        .lock()
+        .unwrap()
+        .as_ref()
+        .cloned()
+        .unwrap_or_default()
 }
 
 pub fn is_in_clamp_phase() -> bool {
@@ -78,13 +83,23 @@ pub fn alloc_alt_syscall() -> u64 {
 
 /// Record that this cage is inside the clamp. Also inits its fdtables entry.
 pub fn register_clamped_cage(cage_id: u64) {
+    println!("register_clamped_cage: {}", cage_id);
     let mut cages = CLAMPED_CAGES.lock().unwrap();
     cages.as_mut().unwrap().insert(cage_id, ());
-    fdtables::init_empty_cage(cage_id);
+
+    match fdtables::check_cage_exists(cage_id) {
+        false => fdtables::init_empty_cage(cage_id),
+        _ => {}
+    };
 }
 
 pub fn is_cage_clamped(cage_id: u64) -> bool {
-    CLAMPED_CAGES.lock().unwrap().as_ref().map(|c| c.contains_key(&cage_id)).unwrap_or(false)
+    CLAMPED_CAGES
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|c| c.contains_key(&cage_id))
+        .unwrap_or(false)
 }
 
 // =====================================================================
@@ -95,12 +110,20 @@ pub fn is_cage_clamped(cage_id: u64) -> bool {
 /// Returns whether an alt was already registered for this pair.
 pub fn set_route(cage_id: u64, syscall_nr: u64, alt_nr: u64) -> bool {
     let mut routes = ROUTES.lock().unwrap();
-    routes.as_mut().unwrap().insert((cage_id, syscall_nr), alt_nr).is_some()
+    routes
+        .as_mut()
+        .unwrap()
+        .insert((cage_id, syscall_nr), alt_nr)
+        .is_some()
 }
 
 /// Look up the alt syscall number for a (cage, syscall) pair.
 pub fn get_route(cage_id: u64, syscall_nr: u64) -> Option<u64> {
-    ROUTES.lock().unwrap().as_ref().and_then(|r| r.get(&(cage_id, syscall_nr)).copied())
+    ROUTES
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|r| r.get(&(cage_id, syscall_nr)).copied())
 }
 
 /// Clone routing state from parent cage to child cage.
@@ -108,7 +131,8 @@ pub fn clone_cage_state(parent_cage_id: u64, child_cage_id: u64) {
     {
         let mut routes = ROUTES.lock().unwrap();
         let routes = routes.as_mut().unwrap();
-        let parent_routes: Vec<_> = routes.iter()
+        let parent_routes: Vec<_> = routes
+            .iter()
             .filter(|&(&(cid, _), _)| cid == parent_cage_id)
             .map(|(&(_, syscall_nr), &alt_nr)| ((child_cage_id, syscall_nr), alt_nr))
             .collect();
@@ -141,10 +165,14 @@ pub fn read_path_from_cage(path_ptr: u64, path_cage: u64) -> Option<String> {
     let mut buf = vec![0u8; MAX_PATH_LEN];
 
     match copy_data_between_cages(
-        ns_cage, path_cage,
-        buf.as_mut_ptr() as u64, ns_cage,
-        path_ptr, path_cage,
-        MAX_PATH_LEN as u64, 0,
+        ns_cage,
+        path_cage,
+        path_ptr,
+        path_cage,
+        buf.as_mut_ptr() as u64,
+        ns_cage,
+        MAX_PATH_LEN as u64,
+        0,
     ) {
         Ok(_) => {}
         Err(_) => return None,
@@ -161,17 +189,26 @@ pub fn path_matches_prefix(path: &str) -> bool {
 
 /// Make a syscall via threei with the standard 6-arg pattern.
 ///
-/// Always uses ns_cage as both self_cageid and target_cageid.
-pub fn do_syscall(nr: u64, args: &[u64; 6], arg_cages: &[u64; 6]) -> i32 {
+/// Uses ns_cage as the source cage for routing, and callingcage as the targetcage.
+pub fn do_syscall(callingcage: u64, nr: u64, args: &[u64; 6], arg_cages: &[u64; 6]) -> i32 {
     let ns_cage = get_ns_cage_id();
     match make_threei_call(
-        nr as u32, 0, ns_cage, ns_cage,
-        args[0], arg_cages[0],
-        args[1], arg_cages[1],
-        args[2], arg_cages[2],
-        args[3], arg_cages[3],
-        args[4], arg_cages[4],
-        args[5], arg_cages[5],
+        nr as u32,
+        0,
+        ns_cage,
+        callingcage,
+        args[0],
+        arg_cages[0],
+        args[1],
+        arg_cages[1],
+        args[2],
+        arg_cages[2],
+        args[3],
+        arg_cages[3],
+        args[4],
+        arg_cages[4],
+        args[5],
+        arg_cages[5],
         0,
     ) {
         Ok(ret) => ret,
