@@ -10,7 +10,9 @@ export PATH=$PATH:/home/lind/lind-wasm/scripts/
 
 ## 2. Install required Rust component
 
+```sh
 rustup component add rust-src --toolchain nightly-x86_64-unknown-linux-gnu
+```
 
 ## 3. Build examples with lind_compile
 Navigate to the grate-rs directory and compile the examples:
