@@ -136,29 +136,33 @@ fn parse_argv(args: Vec<String>) -> Result<TeeConfig, String> {
 ///   4. Store the route: (cage, syscall) → primary_alt / secondary_alt
 ///   5. Register the tee dispatch handler on the target cage (if not already)
 ///
-/// Args: arg1 = target_cage, arg2 = syscall_nr, arg3 = grate_id, arg4 = handler_fn_ptr
+/// Register handler args as received by the 3i dispatch:
+///   arg1 = target_cage, arg1cage = syscall_nr
+///   arg2 (unused),      arg2cage = grate_id
+///   arg3 = handler_fn_ptr
 pub extern "C" fn register_handler_handler(
     _cageid: u64,
-    arg1: u64, _arg1cage: u64,
-    arg2: u64, _arg2cage: u64,
-    arg3: u64, _arg3cage: u64,
-    arg4: u64, _arg4cage: u64,
-    _arg5: u64, _arg5cage: u64,
-    _arg6: u64, _arg6cage: u64,
+    target_cage: u64,
+    syscall_nr: u64,
+    _arg2: u64,
+    grate_id: u64,
+    handler_fn_ptr: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
 ) -> i32 {
-    let target_cage = arg1;
-    let syscall_nr = arg2;
-    let grate_id = arg3;
-    let handler_fn_ptr = arg4;
+    let tee_cage = with_tee(|s| s.tee_cage_id);
 
-    let (tee_cage, intercepting) = with_tee(|s| (s.tee_cage_id, s.intercepting));
-
-    // After clamp phase ends, pass through registrations unchanged.
-    if !intercepting {
+    // After interception phase ends, pass through registrations unchanged.
+    if !with_tee(|s| s.intercepting) {
         return do_syscall(
-            tee_cage, SYS_REGISTER_HANDLER,
-            &[target_cage, syscall_nr, grate_id, handler_fn_ptr, 0, 0],
-            &[0; 6],
+            grate_id, SYS_REGISTER_HANDLER,
+            &[target_cage, 0, handler_fn_ptr, 0, 0, 0],
+            &[syscall_nr, grate_id, 0, 0, 0, 0],
         );
     }
 
@@ -172,9 +176,9 @@ pub extern "C" fn register_handler_handler(
 
     // Step 2: Register the clamped handler at the alt number on tee's cage.
     let ret = do_syscall(
-        tee_cage, SYS_REGISTER_HANDLER,
-        &[tee_cage, alt_nr, grate_id, handler_fn_ptr, 0, 0],
-        &[0; 6],
+        grate_id, SYS_REGISTER_HANDLER,
+        &[tee_cage, 0, handler_fn_ptr, 0, 0, 0],
+        &[alt_nr, grate_id, 0, 0, 0, 0],
     );
     if ret != 0 {
         eprintln!("[tee-grate] failed to register alt handler: ret={}", ret);
@@ -202,9 +206,9 @@ pub extern "C" fn register_handler_handler(
                 syscall_nr
             );
             return do_syscall(
-                tee_cage, SYS_REGISTER_HANDLER,
-                &[target_cage, syscall_nr, grate_id, handler_fn_ptr, 0, 0],
-                &[0; 6],
+                grate_id, SYS_REGISTER_HANDLER,
+                &[target_cage, 0, handler_fn_ptr, 0, 0, 0],
+                &[syscall_nr, grate_id, 0, 0, 0, 0],
             );
         }
     }
@@ -214,7 +218,7 @@ pub extern "C" fn register_handler_handler(
 
 /// Handler for syscall 59 (exec).
 ///
-/// Detects %} boundary and ends the clamp phase.
+/// Detects %} boundary and stops register_handler interception.
 pub extern "C" fn exec_handler(
     _cageid: u64,
     arg1: u64, arg1cage: u64,
@@ -228,12 +232,15 @@ pub extern "C" fn exec_handler(
 
     // Read the exec path from cage memory to check for %}.
     let mut buf = vec![0u8; 256];
-    let _ = copy_data_between_cages(
+    if copy_data_between_cages(
         tee_cage, arg1cage,
         arg1, arg1cage,
         buf.as_mut_ptr() as u64, tee_cage,
-        256, 1,
-    );
+        256, 0,
+    ).is_err() {
+        panic!("[tee-grate] Unable to read the execve path");
+    }
+
     let len = buf.iter().position(|&b| b == 0).unwrap_or(256);
     let path = String::from_utf8_lossy(&buf[..len]);
 
@@ -241,42 +248,44 @@ pub extern "C" fn exec_handler(
         println!("[tee-grate] detected %}} boundary — stopping register_handler interception");
         with_tee(|s| s.intercepting = false);
 
-        // Close cloexec fds for this cage before the exec.
-        fdtables::empty_fds_for_exec(arg1cage);
+        // argv[] pointers are 8-byte wide in the Lind runtime.
+        const PTR_SIZE: usize = 8;
+        let argv1_addr = arg2 + PTR_SIZE as u64;
 
-        // Rewrite exec: read argv[1] (the real program) and shift argv.
-        let ptr_size: u64 = 4; // wasm32 pointers
-        let argv1_addr = arg2 + ptr_size;
-
-        let mut ptr_buf = [0u8; 4];
-        let _ = copy_data_between_cages(
+        let mut real_ptr = [0u8; PTR_SIZE];
+        match copy_data_between_cages(
             tee_cage, arg2cage,
             argv1_addr, arg2cage,
-            ptr_buf.as_mut_ptr() as u64, tee_cage,
-            4, 0,
-        );
-        let real_path = u32::from_le_bytes(ptr_buf) as u64;
+            real_ptr.as_mut_ptr() as u64, tee_cage,
+            8, 0,
+        ) {
+            Ok(_) => {}
+            Err(_) => {
+                println!("Invalid command line arguments detected.");
+                return -2;
+            }
+        }
+        let real_path = u64::from_le_bytes(real_ptr);
 
         return do_syscall(
-            tee_cage, SYS_EXEC,
+            arg2cage, SYS_EXEC,
             &[real_path, argv1_addr, arg3, arg4, arg5, arg6],
+            &[arg2cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
+        );
+    } else {
+        return do_syscall(
+            arg1cage, SYS_EXEC,
+            &[arg1, arg2, arg3, arg4, arg5, arg6],
             &[arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
         );
     }
-
-    // Not %} — passthrough.
-    do_syscall(
-        tee_cage, SYS_EXEC,
-        &[arg1, arg2, arg3, arg4, arg5, arg6],
-        &[arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
-    )
 }
 
 /// Handler for syscall 57 (fork).
 ///
 /// Forwards fork, clones tee state to child, registers lifecycle handlers.
 pub extern "C" fn fork_handler(
-    cageid: u64,
+    _cageid: u64,
     arg1: u64, arg1cage: u64,
     arg2: u64, arg2cage: u64,
     arg3: u64, arg3cage: u64,
@@ -284,27 +293,19 @@ pub extern "C" fn fork_handler(
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
 ) -> i32 {
-    let tee_cage = with_tee(|s| s.tee_cage_id);
-
-    let ret = do_syscall(
-        tee_cage, SYS_FORK,
+    let child_cage_id = do_syscall(
+        arg1cage, SYS_CLONE,
         &[arg1, arg2, arg3, arg4, arg5, arg6],
         &[arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
-    );
-
-    if ret <= 0 {
-        return ret;
-    }
-
-    let child_cage_id = ret as u64;
+    ) as u64;
 
     // Clone tee route state and fd table from parent to child.
     with_tee(|s| {
-        if s.is_managed(cageid) {
-            s.clone_cage_state(cageid, child_cage_id);
+        if s.is_managed(arg1cage) {
+            s.clone_cage_state(arg1cage, child_cage_id);
         }
     });
-    let _ = fdtables::copy_fdtable_for_cage(cageid, child_cage_id);
+    let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
 
     // Register lifecycle handlers on the child.
     register_lifecycle_handlers(child_cage_id);
@@ -316,7 +317,7 @@ pub extern "C" fn fork_handler(
 ///
 /// Cleans up tee state for the exiting cage, then forwards.
 pub extern "C" fn exit_handler(
-    cageid: u64,
+    _cageid: u64,
     arg1: u64, arg1cage: u64,
     arg2: u64, arg2cage: u64,
     arg3: u64, arg3cage: u64,
@@ -324,14 +325,11 @@ pub extern "C" fn exit_handler(
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
 ) -> i32 {
-    let tee_cage = with_tee(|s| {
-        s.remove_cage_state(cageid);
-        s.tee_cage_id
-    });
-    fdtables::remove_cage_from_fdtable(cageid);
+    with_tee(|s| { s.remove_cage_state(arg1cage); });
+    fdtables::remove_cage_from_fdtable(arg1cage);
 
     do_syscall(
-        tee_cage, SYS_EXIT,
+        arg1cage, SYS_EXIT,
         &[arg1, arg2, arg3, arg4, arg5, arg6],
         &[arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
     )
@@ -344,7 +342,7 @@ fn register_lifecycle_handlers(cage_id: u64) {
     let handlers: &[(u64, SyscallHandler)] = &[
         (SYS_REGISTER_HANDLER, register_handler_handler),
         (SYS_EXEC, exec_handler),
-        (SYS_FORK, fork_handler),
+        (SYS_CLONE, fork_handler),
         (SYS_EXIT, exit_handler),
     ];
 
@@ -370,7 +368,7 @@ fn register_lifecycle_handlers(cage_id: u64) {
 macro_rules! tee_handler {
     ($name:ident, $nr:expr) => {
         pub extern "C" fn $name(
-            cageid: u64,
+            _cageid: u64,
             arg1: u64, arg1cage: u64,
             arg2: u64, arg2cage: u64,
             arg3: u64, arg3cage: u64,
@@ -379,7 +377,7 @@ macro_rules! tee_handler {
             arg6: u64, arg6cage: u64,
         ) -> i32 {
             tee_dispatch(
-                $nr, cageid,
+                $nr, arg1cage,
                 [arg1, arg2, arg3, arg4, arg5, arg6],
                 [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
             )
@@ -421,22 +419,19 @@ tee_handler!(tee_writev, SYS_WRITEV);
 
 /// open: tee dispatch, then record the returned fd in fdtables.
 pub extern "C" fn tee_open(
-    cageid: u64, arg1: u64, arg1cage: u64, arg2: u64, arg2cage: u64,
+    _cageid: u64, arg1: u64, arg1cage: u64, arg2: u64, arg2cage: u64,
     arg3: u64, arg3cage: u64, arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64, arg6: u64, arg6cage: u64,
 ) -> i32 {
     let ret = tee_dispatch(
-        SYS_OPEN, cageid,
+        SYS_OPEN, arg1cage,
         [arg1, arg2, arg3, arg4, arg5, arg6],
         [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
     );
 
-    // Record the new fd in fdtables. underfd and perfdinfo aren't used
-    // for routing here — we just need fdtables to know the fd exists
-    // so fork/exec/exit handle it correctly.
     if ret >= 0 {
         let _ = fdtables::get_specific_virtual_fd(
-            cageid, ret as u64, 0, ret as u64, false, 0,
+            arg1cage, ret as u64, 0, ret as u64, false, 0,
         );
     }
 
@@ -445,36 +440,36 @@ pub extern "C" fn tee_open(
 
 /// close: tee dispatch, then remove the fd from fdtables.
 pub extern "C" fn tee_close(
-    cageid: u64, arg1: u64, arg1cage: u64, arg2: u64, arg2cage: u64,
+    _cageid: u64, arg1: u64, arg1cage: u64, arg2: u64, arg2cage: u64,
     arg3: u64, arg3cage: u64, arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64, arg6: u64, arg6cage: u64,
 ) -> i32 {
     let ret = tee_dispatch(
-        SYS_CLOSE, cageid,
+        SYS_CLOSE, arg1cage,
         [arg1, arg2, arg3, arg4, arg5, arg6],
         [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
     );
 
-    let _ = fdtables::close_virtualfd(cageid, arg1);
+    let _ = fdtables::close_virtualfd(arg1cage, arg1);
 
     ret
 }
 
 /// dup: tee dispatch, then copy the fd entry in fdtables.
 pub extern "C" fn tee_dup(
-    cageid: u64, arg1: u64, arg1cage: u64, arg2: u64, arg2cage: u64,
+    _cageid: u64, arg1: u64, arg1cage: u64, arg2: u64, arg2cage: u64,
     arg3: u64, arg3cage: u64, arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64, arg6: u64, arg6cage: u64,
 ) -> i32 {
     let ret = tee_dispatch(
-        SYS_DUP, cageid,
+        SYS_DUP, arg1cage,
         [arg1, arg2, arg3, arg4, arg5, arg6],
         [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
     );
 
     if ret >= 0 {
         let _ = fdtables::get_specific_virtual_fd(
-            cageid, ret as u64, 0, ret as u64, false, 0,
+            arg1cage, ret as u64, 0, ret as u64, false, 0,
         );
     }
 
@@ -483,19 +478,19 @@ pub extern "C" fn tee_dup(
 
 /// dup2: tee dispatch, then record the target fd in fdtables.
 pub extern "C" fn tee_dup2(
-    cageid: u64, arg1: u64, arg1cage: u64, arg2: u64, arg2cage: u64,
+    _cageid: u64, arg1: u64, arg1cage: u64, arg2: u64, arg2cage: u64,
     arg3: u64, arg3cage: u64, arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64, arg6: u64, arg6cage: u64,
 ) -> i32 {
     let ret = tee_dispatch(
-        SYS_DUP2, cageid,
+        SYS_DUP2, arg1cage,
         [arg1, arg2, arg3, arg4, arg5, arg6],
         [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
     );
 
     if ret >= 0 {
         let _ = fdtables::get_specific_virtual_fd(
-            cageid, arg2, 0, arg2, false, 0,
+            arg1cage, arg2, 0, arg2, false, 0,
         );
     }
 
@@ -504,19 +499,19 @@ pub extern "C" fn tee_dup2(
 
 /// dup3: tee dispatch, then record the target fd in fdtables.
 pub extern "C" fn tee_dup3(
-    cageid: u64, arg1: u64, arg1cage: u64, arg2: u64, arg2cage: u64,
+    _cageid: u64, arg1: u64, arg1cage: u64, arg2: u64, arg2cage: u64,
     arg3: u64, arg3cage: u64, arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64, arg6: u64, arg6cage: u64,
 ) -> i32 {
     let ret = tee_dispatch(
-        SYS_DUP3, cageid,
+        SYS_DUP3, arg1cage,
         [arg1, arg2, arg3, arg4, arg5, arg6],
         [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
     );
 
     if ret >= 0 {
         let _ = fdtables::get_specific_virtual_fd(
-            cageid, arg2, 0, arg2, false, 0,
+            arg1cage, arg2, 0, arg2, false, 0,
         );
     }
 
@@ -645,7 +640,9 @@ fn main() {
 
     // Mark child as managed and init its fdtables entry.
     with_tee(|s| { s.managed_cages.insert(child_cage_id, ()); });
-    fdtables::init_empty_cage(child_cage_id);
+    if !fdtables::check_cage_exists(child_cage_id) {
+        fdtables::init_empty_cage(child_cage_id);
+    }
 
     // Register lifecycle handlers on the child.
     register_lifecycle_handlers(child_cage_id);

@@ -249,10 +249,17 @@ impl TeeState {
 //  Dispatch logic
 // =====================================================================
 
-/// Execute a syscall via make_threei_call on the tee grate's cage.
-pub fn do_syscall(tee_cage: u64, nr: u64, args: &[u64; 6], arg_cages: &[u64; 6]) -> i32 {
+/// Execute a syscall via make_threei_call.
+///
+/// source_cage (tee grate) is used for handler table lookup.
+/// calling_cage is the cage that made the syscall — used as operational target.
+pub fn do_syscall(calling_cage: u64, nr: u64, args: &[u64; 6], arg_cages: &[u64; 6]) -> i32 {
+    let tee_cage = {
+        let guard = TEE_STATE.lock().unwrap();
+        guard.as_ref().expect("TeeState not initialized").tee_cage_id
+    };
     match make_threei_call(
-        nr as u32, 0, tee_cage, tee_cage,
+        nr as u32, 0, tee_cage, calling_cage,
         args[0], arg_cages[0],
         args[1], arg_cages[1],
         args[2], arg_cages[2],
@@ -277,24 +284,24 @@ pub fn tee_dispatch(
     args: [u64; 6],
     arg_cages: [u64; 6],
 ) -> i32 {
-    let (tee_cage, primary_alt, secondary_alt) = {
+    let (primary_alt, secondary_alt) = {
         let guard = TEE_STATE.lock().unwrap();
         let state = guard.as_ref().expect("TeeState not initialized");
         let route = match state.get_route(cage_id, syscall_nr) {
             Some(r) => r,
             None => {
                 // No route — passthrough to kernel.
-                return do_syscall(state.tee_cage_id, syscall_nr, &args, &arg_cages);
+                return do_syscall(cage_id, syscall_nr, &args, &arg_cages);
             }
         };
-        (state.tee_cage_id, route.primary_alt, route.secondary_alt)
+        (route.primary_alt, route.secondary_alt)
     };
 
     // ── Primary dispatch ────────────────────────────────────────────
     // Use the alt syscall if registered, otherwise passthrough the
     // original syscall number (goes to kernel).
     let primary_nr = primary_alt.unwrap_or(syscall_nr);
-    let primary_result = do_syscall(tee_cage, primary_nr, &args, &arg_cages);
+    let primary_result = do_syscall(cage_id, primary_nr, &args, &arg_cages);
 
     // ── Secondary dispatch (best-effort) ────────────────────────────
     // Skip for syscalls with process-level side effects — executing
@@ -308,7 +315,7 @@ pub fn tee_dispatch(
         // Call secondary with the same args. Each handler does its own
         // copy_data_between_cages internally, so the two paths don't
         // share any local buffers.
-        let sec_result = do_syscall(tee_cage, sec_alt, &args, &arg_cages);
+        let sec_result = do_syscall(cage_id, sec_alt, &args, &arg_cages);
 
         // Log secondary errors but never propagate them.
         if sec_result < 0 {
