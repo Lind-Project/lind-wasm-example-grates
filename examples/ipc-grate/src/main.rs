@@ -23,13 +23,16 @@ use ipc::*;
 
 /// Forward a syscall to the next handler via make_threei_call.
 /// Used for fds that are NOT owned by ipc-grate.
+///
+/// source_cage (grate) is used for handler table lookup.
+/// calling_cage is the cage that made the syscall — used as operational target.
 fn forward_syscall(
-    nr: u64, cage_id: u64,
+    nr: u64, calling_cage: u64,
     args: &[u64; 6], arg_cages: &[u64; 6],
 ) -> i32 {
-    let this_cage = getcageid();
+    let grate_cage = getcageid();
     match make_threei_call(
-        nr as u32, 0, this_cage, this_cage,
+        nr as u32, 0, grate_cage, calling_cage,
         args[0], arg_cages[0], args[1], arg_cages[1], args[2], arg_cages[2],
         args[3], arg_cages[3], args[4], arg_cages[4], args[5], arg_cages[5], 0,
     ) {
@@ -506,7 +509,7 @@ pub extern "C" fn fork_handler(
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
-    let ret = forward_syscall(SYS_FORK, cage_id, &args, &arg_cages);
+    let ret = forward_syscall(SYS_CLONE, cage_id, &args, &arg_cages);
 
     if ret <= 0 {
         return ret;
@@ -602,6 +605,7 @@ pub extern "C" fn socket_handler(
 
     if domain == socket::AF_UNIX {
         // AF_UNIX: entirely ours. Create in registry, register in fdtables.
+        ensure_cage_exists(cage_id);
         let socket_id = with_ipc(|s| s.sockets.create_socket(domain, socktype, 0));
 
         return match fdtables::get_unused_virtual_fd(
@@ -652,6 +656,8 @@ pub extern "C" fn socketpair_handler(
     if domain != socket::AF_UNIX {
         return -97; // EAFNOSUPPORT
     }
+
+    ensure_cage_exists(cage_id);
 
     // Create connected pair with swapped pipes.
     let (sid1, sid2) = with_ipc(|s| {
@@ -1134,7 +1140,7 @@ fn main() {
         .register(SYS_ACCEPT, accept_handler)
         .register(SYS_SHUTDOWN, shutdown_handler)
         // Lifecycle
-        .register(SYS_FORK, fork_handler)
+        .register(SYS_CLONE, fork_handler)
         .register(SYS_EXEC, exec_handler)
         .teardown(|result: Result<i32, GrateError>| {
             println!("[ipc-grate] exited: {:?}", result);

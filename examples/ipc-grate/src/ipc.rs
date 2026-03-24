@@ -99,6 +99,8 @@ impl IpcState {
     ///
     /// Returns (read_fd, write_fd) on success, or a negative errno on failure.
     pub fn create_pipe(&mut self, cage_id: u64, flags: i32) -> Result<(i32, i32), i32> {
+        ensure_cage_exists(cage_id);
+
         let pipe_id = self.next_pipe_id;
         self.next_pipe_id += 1;
 
@@ -160,6 +162,13 @@ pub fn is_write_end(flags: i32) -> bool {
 /// Initialize the global IPC state.
 pub fn init(grate_cage_id: u64) {
     *IPC_STATE.lock().unwrap() = Some(IpcState::new(grate_cage_id));
+}
+
+/// Ensure a cage exists in fdtables. Idempotent — safe to call multiple times.
+pub fn ensure_cage_exists(cage_id: u64) {
+    if !fdtables::check_cage_exists(cage_id) {
+        fdtables::init_empty_cage(cage_id);
+    }
 }
 
 // =====================================================================
