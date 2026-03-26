@@ -86,6 +86,7 @@ pub const SYS_GETPPID: u64 = 110;
 pub const SYS_MKNOD: u64 = 133;
 pub const SYS_STATFS: u64 = 137;
 pub const SYS_FSTATFS: u64 = 138;
+pub const SYS_CHROOT: u64 = 161;
 pub const SYS_GETHOSTNAME: u64 = 170;
 pub const SYS_FUTEX: u64 = 202;
 pub const SYS_EPOLL_CREATE: u64 = 213;
