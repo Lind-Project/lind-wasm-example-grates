@@ -204,6 +204,12 @@ pub fn translate_sockaddr(
     if sa_family == AF_UNIX && addrlen > 2 {
         // Extract and chroot the path (starts at offset 2).
         let path_bytes = &sockaddr_buf[2..];
+
+        // Abstract socket paths start with \0. Skip these.
+        if path_bytes.first() == Some(&0) {
+            return Some((sockaddr_buf, addrlen));
+        }
+
         let path_len = path_bytes
             .iter()
             .position(|&b| b == 0)

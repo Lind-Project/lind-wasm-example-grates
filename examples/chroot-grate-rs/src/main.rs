@@ -1,14 +1,17 @@
 //! `chroot-grate-rs`
 
+use grate_rs::constants::fs::S_IFDIR;
 use grate_rs::constants::{
     SYS_ACCEPT, SYS_ACCESS, SYS_BIND, SYS_CHDIR, SYS_CHMOD, SYS_CHROOT, SYS_CONNECT, SYS_EXECVE,
     SYS_FCHDIR, SYS_FORK, SYS_GETCWD, SYS_GETPEERNAME, SYS_GETSOCKNAME, SYS_LINK, SYS_MKDIR,
     SYS_OPEN, SYS_READLINK, SYS_READLINKAT, SYS_RECVFROM, SYS_RENAME, SYS_RMDIR, SYS_SENDTO,
     SYS_STATFS, SYS_TRUNCATE, SYS_UNLINK, SYS_UNLINKAT, SYS_XSTAT,
 };
+use grate_rs::ffi::stat;
 use grate_rs::{GrateBuilder, copy_data_between_cages, getcageid, make_threei_call};
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::ffi::c_char;
 use std::sync::Mutex;
 
 mod paths;
@@ -27,10 +30,30 @@ pub static CHROOT_DIR: Mutex<String> = Mutex::new(String::new());
 /// Per-cage virtual current working directory (cwd) tracking.
 pub static CAGE_CWDS: Mutex<Option<HashMap<u64, String>>> = Mutex::new(None);
 
+/// Check if a directory exists.
+fn check_dir(dir: String) -> bool {
+    let cwd_cstring = match CString::new(dir.as_str()) {
+        Ok(cstr) => cstr,
+        Err(_) => return false,
+    };
+    let mut st: stat = unsafe { std::mem::zeroed() };
+    let ret = unsafe { stat(cwd_cstring.as_ptr() as *const c_char, &mut st) };
+    if ret < 0 {
+        return false;
+    }
+
+    return !(st.st_mode & S_IFDIR == 00);
+}
+
 /// Initialize chroot state for this grate process.
 pub fn init_state(chroot_dir: String) {
-    *CHROOT_DIR.lock().unwrap() = chroot_dir;
-    *CAGE_CWDS.lock().unwrap() = Some(HashMap::new());
+    match check_dir(chroot_dir.clone()) {
+        false => panic!("Invalid path for --chroot-dir"),
+        true => {
+            *CHROOT_DIR.lock().unwrap() = chroot_dir;
+            *CAGE_CWDS.lock().unwrap() = Some(HashMap::new());
+        }
+    };
 }
 
 /// Dispatch a syscall via ThreeI, optionally rewriting some argument pointers.
@@ -388,10 +411,14 @@ extern "C" fn chdir_handler(
     let cwd = get_cage_cwd(cageid);
     let new_cwd = normalize_path(&path, &cwd);
 
-    // Update the cage's cwd in the table.
-    set_cage_cwd(cageid, new_cwd);
-
-    0
+    match check_dir(new_cwd.clone()) {
+        false => return -20, // ENOTDIR
+        true => {
+            // Update the cwd of cage in our hashmap.
+            set_cage_cwd(cageid, new_cwd);
+            return 0;
+        }
+    }
 }
 
 /// `fchdir(2)` handler.
