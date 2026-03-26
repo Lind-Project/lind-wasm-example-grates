@@ -2,8 +2,8 @@
 
 use grate_rs::constants::fs::S_IFDIR;
 use grate_rs::constants::{
-    SYS_ACCEPT, SYS_ACCESS, SYS_BIND, SYS_CHDIR, SYS_CHMOD, SYS_CHROOT, SYS_CONNECT, SYS_EXECVE,
-    SYS_FCHDIR, SYS_FORK, SYS_GETCWD, SYS_GETPEERNAME, SYS_GETSOCKNAME, SYS_LINK, SYS_MKDIR,
+    SYS_ACCEPT, SYS_ACCESS, SYS_BIND, SYS_CHDIR, SYS_CHMOD, SYS_CHROOT, SYS_CLONE, SYS_CONNECT,
+    SYS_EXECVE, SYS_FCHDIR, SYS_GETCWD, SYS_GETPEERNAME, SYS_GETSOCKNAME, SYS_LINK, SYS_MKDIR,
     SYS_OPEN, SYS_READLINK, SYS_READLINKAT, SYS_RECVFROM, SYS_RENAME, SYS_RMDIR, SYS_SENDTO,
     SYS_STATFS, SYS_TRUNCATE, SYS_UNLINK, SYS_UNLINKAT, SYS_XSTAT,
 };
@@ -352,7 +352,7 @@ extern "C" fn fork_handler(
 ) -> i32 {
     // Call the real fork syscall.
     let ret = match make_threei_call(
-        SYS_FORK as u32,
+        SYS_CLONE as u32,
         0,
         cageid,
         arg1cage,
@@ -609,7 +609,7 @@ fn main() {
 
     let builder = GrateBuilder::new()
         // Process management
-        .register(SYS_FORK, fork_handler)
+        .register(SYS_CLONE, fork_handler)
         // Filesystem syscalls
         .register(SYS_OPEN, open_handler)
         .register(SYS_EXECVE, execve_handler)
