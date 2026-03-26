@@ -63,7 +63,7 @@ pub fn init_state(chroot_dir: String) {
 fn call_with_rewrites(
     syscall_no: u32,
     thiscage: u64,
-    cageid: u64,
+    calling_cageid: u64,
     mut args: [u64; 6],
     mut arg_cages: [u64; 6],
     rewrites: &[(usize, u64)],
@@ -79,8 +79,8 @@ fn call_with_rewrites(
     match make_threei_call(
         syscall_no,
         0,
-        thiscage, // self cage (grate)
-        cageid,   // execute as-if from cageid
+        thiscage,       // self cage (grate)
+        calling_cageid, // execute as-if from cageid
         args[0],
         arg_cages[0],
         args[1],
@@ -144,7 +144,7 @@ fn write_bytes_to_cage(
 // "Path input" syscalls: read the path argument(s), chroot them, and dispatch
 // the real syscall with rewritten pointers.
 input_path_handler!(open_handler, SYS_OPEN, 0);
-input_path_handler!(execve_handler, SYS_EXECVE, 0);
+// input_path_handler!(execve_handler, SYS_EXECVE, 0);
 input_path_handler!(stat_handler, SYS_XSTAT, 0);
 input_path_handler!(access_handler, SYS_ACCESS, 0);
 input_path_handler!(statfs_handler, SYS_STATFS, 0);
@@ -355,7 +355,7 @@ extern "C" fn fork_handler(
         SYS_FORK as u32,
         0,
         cageid,
-        cageid,
+        arg1cage,
         arg1,
         arg1cage,
         arg2,
@@ -374,12 +374,65 @@ extern "C" fn fork_handler(
         Err(_) => return -1,
     };
 
-    // On success: `ret > 0` in the parent and `ret` is the child's cageid.
-    if ret > 0 {
-        register_cage(cageid, ret as u64);
-    }
+    register_cage(cageid, ret as u64);
 
     ret
+}
+
+/// execve handler.
+extern "C" fn execve_handler(
+    cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    // Call the real fork syscall.
+    let thiscage = getcageid();
+
+    let path = match read_path_from_cage(arg1, arg1cage) {
+        Some(p) => p,
+        None => return -(libc::EFAULT as i32),
+    };
+
+    let transformed = chroot_path(&path, cageid);
+    let c_path = match CString::new(transformed) {
+        Ok(p) => p,
+        Err(_) => return -1,
+    };
+
+    let rewritten_ptr = c_path.as_ptr() as u64;
+
+    match make_threei_call(
+        SYS_EXECVE as u32,
+        0,
+        thiscage,
+        arg1cage,
+        rewritten_ptr,
+        thiscage | (1u64 << 63),
+        arg2,
+        arg2cage,
+        arg3,
+        arg3cage,
+        arg4,
+        arg4cage,
+        arg5,
+        arg5cage,
+        arg6,
+        arg6cage,
+        0,
+    ) {
+        Ok(r) => return r,
+        Err(_) => return -1,
+    }
 }
 
 /// `chdir(2)` handler.

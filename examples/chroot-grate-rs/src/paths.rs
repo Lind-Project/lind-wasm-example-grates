@@ -39,6 +39,8 @@ macro_rules! input_path_handler {
         ) -> i32 {
             let thiscage = getcageid();
 
+            let callingcage = arg1cage;
+
             let args = [arg1, arg2, arg3, arg4, arg5, arg6];
             let cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -74,7 +76,7 @@ macro_rules! input_path_handler {
             call_with_rewrites(
                 $syscall_const as u32,
                 thiscage,
-                arg1cage,
+                callingcage,
                 args,
                 cages,
                 &rewrites,
