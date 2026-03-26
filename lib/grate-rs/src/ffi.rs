@@ -9,29 +9,42 @@ use libc::{pid_t, size_t};
 use std::ffi::{c_uint, c_void};
 use std::io::Write;
 
-pub(crate) const PROT_READ: i32 = 0x1; // pages may be read
-pub(crate) const PROT_WRITE: i32 = 0x2; // pages may be written
-
-pub(crate) const MAP_SHARED: i32 = 0x01; // share mapping with other processes
-pub(crate) const MAP_ANON: i32 = 0x20; // mapping is not backed by a file (same as MAP_ANONYMOUS)
-pub(crate) const MAP_FAILED: *mut core::ffi::c_void = (-1isize) as *mut core::ffi::c_void;
-
 #[allow(non_camel_case_types)]
 // Do not import off_t from libc since those are defined as i64.
-type off_t = i32;
+pub type off_t = i32;
 
 #[allow(non_camel_case_types)]
 // We use 32-bit pointer width, which requires sem_t to be defined as an array of length 16.
 #[repr(C)]
-pub(crate) struct sem_t {
+pub struct sem_t {
     __size: [c_char; 16],
+}
+
+// Lind-compatible stat struct.
+#[repr(C)]
+#[derive(Eq, PartialEq, Default, Debug)]
+pub struct stat {
+    pub st_dev: u64,
+    pub st_ino: usize,
+    pub st_nlink: u32,
+    pub st_mode: u32,
+    pub st_uid: u32,
+    pub st_gid: u32,
+    pub st_rdev: u64,
+    pub st_size: usize,
+    pub st_blksize: i32,
+    pub st_blocks: u32,
+    //currently we don't populate or care about the time bits here
+    pub st_atim: [u64; 2],
+    pub st_mtim: [u64; 2],
+    pub st_ctim: [u64; 2],
 }
 
 /// Flush stdio streams and terminate the process.
 ///
 /// This helper is shared by both the public library logic (`lib.rs`) and
 /// internal FFI error paths (`call_sys!`).
-pub fn clean_exit(status: i32) -> ! {
+pub(crate) fn clean_exit(status: i32) -> ! {
     std::io::stdout().flush().unwrap();
     std::io::stderr().flush().unwrap();
 
@@ -88,12 +101,12 @@ unsafe extern "C" {
     pub(crate) fn getpid_impl() -> pid_t;
 
     // Multiprocessing.
-    pub(crate) fn fork() -> pid_t;
-    pub(crate) fn execv(prog: *const c_char, argv: *const *const c_char) -> c_int;
-    pub(crate) fn waitpid(pid: pid_t, status: *mut c_int, options: c_int) -> pid_t;
+    pub fn fork() -> pid_t;
+    pub fn execv(prog: *const c_char, argv: *const *const c_char) -> c_int;
+    pub fn waitpid(pid: pid_t, status: *mut c_int, options: c_int) -> pid_t;
 
     // Memory management.
-    pub(crate) fn mmap(
+    pub fn mmap(
         addr: *mut c_void,
         len: size_t,
         prot: c_int,
@@ -101,11 +114,14 @@ unsafe extern "C" {
         fd: c_int,
         offset: off_t,
     ) -> *mut c_void;
-    pub(crate) fn munmap(addr: *mut c_void, len: size_t) -> c_int;
+    pub fn munmap(addr: *mut c_void, len: size_t) -> c_int;
 
     // POSIX semaphores.
-    pub(crate) fn sem_init(sem: *mut sem_t, pshared: c_int, value: c_uint) -> c_int;
-    pub(crate) fn sem_destroy(sem: *mut sem_t) -> c_int;
-    pub(crate) fn sem_post(sem: *mut sem_t) -> c_int;
-    pub(crate) fn sem_wait(sem: *mut sem_t) -> c_int;
+    pub fn sem_init(sem: *mut sem_t, pshared: c_int, value: c_uint) -> c_int;
+    pub fn sem_destroy(sem: *mut sem_t) -> c_int;
+    pub fn sem_post(sem: *mut sem_t) -> c_int;
+    pub fn sem_wait(sem: *mut sem_t) -> c_int;
+
+    // Stat
+    pub fn stat(path: *const c_char, buf: *mut stat) -> c_int;
 }
