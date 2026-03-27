@@ -635,10 +635,11 @@ impl ImfsState {
     /// fcntl: only F_GETFL implemented — returns flags from fdtables perfdinfo.
     pub fn fcntl(&self, cage_id: u64, fd: u64, op: i32, _arg: i32) -> i32 {
         match op {
-            F_GETFL => match fdtables::translate_virtual_fd(cage_id, fd) {
-                Ok(entry) => entry.perfdinfo as i32,
-                Err(_) => -9,
-            },
+            F_GETFL => {
+                let fd_info = self.fd_info.get(&(cage_id, fd)).unwrap().lock().unwrap();
+
+                fd_info.flags as i32
+            }
             _ => -1,
         }
     }
