@@ -38,6 +38,7 @@ fn main() {
         .register(SYS_LINK, handlers::link_handler)
         .register(SYS_PREAD, handlers::pread_handler)
         .register(SYS_PWRITE, handlers::pwrite_handler)
+        .register(SYS_MKDIR, handlers::mkdir_handler)
         .register(SYS_CLONE, handlers::fork_handler)
         .register(SYS_EXEC, handlers::exec_handler)
         .teardown(|result: Result<i32, GrateError>| {

@@ -416,6 +416,36 @@ pub extern "C" fn pwrite_handler(
 }
 
 // =====================================================================
+//  mkdir (syscall 83)
+// =====================================================================
+
+pub extern "C" fn mkdir_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    // Copy the pathname from the cage's memory.
+    let pathname = match copy_path_from_cage(arg1, arg1cage) {
+        Some(p) => p,
+        None => return -14, // EFAULT
+    };
+
+    let mode = arg2 as u32;
+
+    imfs::with_imfs(|state| state.mkdir(&pathname, mode))
+}
+
+// =====================================================================
 //  fork (syscall 57)
 //
 //  Forward the fork, then clone the fdtables and offset state for the

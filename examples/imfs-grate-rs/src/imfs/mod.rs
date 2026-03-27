@@ -5,7 +5,6 @@
 //!
 //! fd management is handled entirely by the fdtables library:
 //!   - underfd  = node index (which file this fd points to)
-//!   - perfdinfo = open flags (O_RDONLY, O_WRONLY, etc.)
 //!
 //! The only per-fd state we track ourselves is the read/write offset,
 //! stored in a HashMap<(cage_id, fd), offset>.
@@ -34,8 +33,7 @@ where
     f(guard.as_mut().expect("IMFS not initialized"))
 }
 
-struct FDInfo {
-    node_index: usize,
+pub struct FDInfo {
     flags: u64,
     offset: i64,
 }
@@ -380,7 +378,9 @@ impl ImfsState {
         };
 
         let node_idx = entry.underfd as usize;
-        let flags = entry.perfdinfo as i32;
+
+        let fd_info = self.fd_info.get(&(cage_id, fd)).unwrap().lock().unwrap();
+        let flags = fd_info.flags as i32;
 
         let mut idx = node_idx;
 
@@ -398,7 +398,6 @@ impl ImfsState {
     //
     //  These use fdtables directly:
     //    - underfd  = node index
-    //    - perfdinfo = open flags
     //    - offsets HashMap for per-fd read/write position
     // =====================================================================
 
@@ -454,12 +453,11 @@ impl ImfsState {
             IMFS_FDKIND,
             node_idx as u64, // underfd: which node
             false,
-            flags as u64, // perfdinfo: open flags
+            0,
         ) {
             Ok(vfd) => {
                 // Track the offset for this fd.
                 let new_fdinfo = Arc::new(Mutex::new(FDInfo {
-                    node_index: node_idx,
                     flags: flags as u64,
                     offset: 0,
                 }));
