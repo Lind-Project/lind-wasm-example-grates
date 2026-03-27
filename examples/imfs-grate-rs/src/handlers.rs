@@ -468,29 +468,8 @@ pub extern "C" fn fork_handler(
     // Clone the fdtables for the child — inherits all open fds.
     let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
 
-    // Clone our offset tracking for the child cage.
     imfs::with_imfs(|state| {
-        let parent_offsets: Vec<_> = state
-            .offsets
-            .iter()
-            .filter(|&(&(cid, _), _)| cid == cageid)
-            .map(|(&(_, fd), &offset)| ((child_cage_id, fd), offset))
-            .collect();
-
-        for (key, val) in parent_offsets {
-            state.offsets.insert(key, val);
-        }
-
-        // Increment in_use on all nodes the child now references.
-        // The child's fdtable is a copy of the parent's, so we walk
-        // the parent's fds and bump the node refcounts.
-        let parent_fds = fdtables::return_fdtable_copy(child_cage_id);
-        for (_fd, entry) in &parent_fds {
-            let node_idx = entry.underfd as usize;
-            if node_idx < state.nodes.len() {
-                state.nodes[node_idx].in_use += 1;
-            }
-        }
+        state.fork(arg1cage, child_cage_id);
     });
 
     child_cage_id as i32

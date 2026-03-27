@@ -13,7 +13,7 @@
 pub mod node;
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use node::*;
 
@@ -34,6 +34,12 @@ where
     f(guard.as_mut().expect("IMFS not initialized"))
 }
 
+struct FDInfo {
+    node_index: usize,
+    flags: u64,
+    offset: i64,
+}
+
 /// The complete IMFS state.
 pub struct ImfsState {
     pub nodes: Vec<Node>,
@@ -45,7 +51,8 @@ pub struct ImfsState {
     /// Per-fd read/write offsets: (cage_id, fd) -> offset.
     /// This is the ONLY per-fd state we track outside of fdtables.
     /// fdtables stores everything else (node index as underfd, flags as perfdinfo).
-    pub offsets: HashMap<(u64, u64), i64>,
+    // pub offsets: HashMap<(u64, u64), i64>,
+    pub fd_info: HashMap<(u64, u64), Arc<Mutex<FDInfo>>>,
 }
 
 /// Initialize the global IMFS. Called once at startup.
@@ -56,7 +63,7 @@ pub fn init() {
         node_free_list: Vec::new(),
         chunk_free_list: Vec::new(),
         root_idx: 0,
-        offsets: HashMap::new(),
+        fd_info: HashMap::new(),
     };
 
     // Create root directory.
@@ -230,6 +237,19 @@ impl ImfsState {
     /// Walks the linked list of chunks, skipping past the offset, then copies data
     /// into buf. Returns the number of bytes actually read (may be less than buf.len()
     /// if EOF is reached).
+
+    fn get_offset(&self, cageid: u64, fd: u64) -> i64 {
+        let underfd = self.fd_info.get(&(cageid, fd)).unwrap().lock().unwrap();
+
+        underfd.offset
+    }
+
+    fn set_offset(&self, cageid: u64, fd: u64, offset: i64) {
+        let mut underfd = self.fd_info.get(&(cageid, fd)).unwrap().lock().unwrap();
+
+        underfd.offset = offset;
+    }
+
     fn read_from_node(&self, node_idx: usize, offset: usize, buf: &mut [u8]) -> usize {
         let node = &self.nodes[node_idx];
         if offset >= node.total_size {
@@ -382,6 +402,15 @@ impl ImfsState {
     //    - offsets HashMap for per-fd read/write position
     // =====================================================================
 
+    /// fork: shares the FDInfo information to the child cage.
+    pub fn fork(&mut self, parent_cage: u64, child_cage: u64) {
+        for ((cage_id, fd), underfd_arc) in self.fd_info.clone().iter() {
+            if *cage_id == parent_cage {
+                self.fd_info.insert((child_cage, *fd), underfd_arc.clone());
+            }
+        }
+    }
+
     /// open: create or open a file. Returns the fd allocated by fdtables.
     pub fn open(&mut self, cage_id: u64, path: &str, flags: i32, mode: u32) -> i32 {
         let node_idx = if let Some(idx) = self.find_node(path) {
@@ -429,7 +458,14 @@ impl ImfsState {
         ) {
             Ok(vfd) => {
                 // Track the offset for this fd.
-                self.offsets.insert((cage_id, vfd), 0);
+                let new_fdinfo = Arc::new(Mutex::new(FDInfo {
+                    node_index: node_idx,
+                    flags: flags as u64,
+                    offset: 0,
+                }));
+
+                self.fd_info.insert((cage_id, vfd), new_fdinfo.clone());
+
                 vfd as i32
             }
             Err(_) => {
@@ -454,7 +490,7 @@ impl ImfsState {
         }
 
         // Remove our offset tracking.
-        self.offsets.remove(&(cage_id, fd));
+        self.fd_info.remove(&(cage_id, fd));
 
         // Close in fdtables.
         match fdtables::close_virtualfd(cage_id, fd) {
@@ -483,12 +519,12 @@ impl ImfsState {
         }
 
         // Get the current offset from our tracking.
-        let offset = self.offsets.get(&(cage_id, fd)).copied().unwrap_or(0);
+        let offset = self.get_offset(cage_id, fd);
 
         let n = self.read_from_node(node_idx, offset as usize, buf);
 
         // Advance the offset.
-        self.offsets.insert((cage_id, fd), offset + n as i64);
+        self.set_offset(cage_id, fd, offset + n as i64);
 
         n as i32
     }
@@ -536,12 +572,12 @@ impl ImfsState {
         let offset = if (flags & O_APPEND) != 0 {
             self.nodes[node_idx].total_size as i64
         } else {
-            self.offsets.get(&(cage_id, fd)).copied().unwrap_or(0)
+            self.get_offset(cage_id, fd)
         };
 
         let n = self.write_to_node(node_idx, offset as usize, buf);
 
-        self.offsets.insert((cage_id, fd), offset + n as i64);
+        self.set_offset(cage_id, fd, offset + n as i64);
 
         n as i32
     }
@@ -584,7 +620,7 @@ impl ImfsState {
             _ => return -9, // EBADF on Free/Lnk (will never be hit)
         };
 
-        let current = self.offsets.get(&(cage_id, fd)).copied().unwrap_or(0);
+        let current = self.get_offset(cage_id, fd);
 
         let new_offset = match whence {
             SEEK_SET => offset,
@@ -593,7 +629,8 @@ impl ImfsState {
             _ => return -22,
         };
 
-        self.offsets.insert((cage_id, fd), new_offset);
+        self.set_offset(cage_id, fd, new_offset);
+
         new_offset as i32
     }
 

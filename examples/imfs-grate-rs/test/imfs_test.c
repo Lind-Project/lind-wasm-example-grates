@@ -30,7 +30,7 @@ static int tests_passed = 0;
     } \
 } while (0)
 
-/* ── Test 1: Basic open/write/read/close cycle ────────────────────────── */
+/*  Test 1: Basic open/write/read/close cycle  */
 
 static void test_basic_rw(void) {
     printf("\n[test_basic_rw]\n");
@@ -58,7 +58,7 @@ static void test_basic_rw(void) {
     CHECK("close succeeds", ret == 0);
 }
 
-/* ── Test 2: Open nonexistent file without O_CREAT ────────────────────── */
+/*  Test 2: Open nonexistent file without O_CREAT  */
 
 static void test_open_nocreat(void) {
     printf("\n[test_open_nocreat]\n");
@@ -67,7 +67,7 @@ static void test_open_nocreat(void) {
     CHECK("open nonexistent without O_CREAT fails", fd < 0);
 }
 
-/* ── Test 3: O_APPEND writes at end ───────────────────────────────────── */
+/*  Test 3: O_APPEND writes at end  */
 
 static void test_append(void) {
     printf("\n[test_append]\n");
@@ -100,7 +100,7 @@ static void test_append(void) {
     close(fd);
 }
 
-/* ── Test 4: lseek with SEEK_CUR and SEEK_END ─────────────────────────── */
+/*  Test 4: lseek with SEEK_CUR and SEEK_END  */
 
 static void test_lseek(void) {
     printf("\n[test_lseek]\n");
@@ -132,7 +132,7 @@ static void test_lseek(void) {
     close(fd);
 }
 
-/* ── Test 5: pread and pwrite (positional, no offset change) ──────────── */
+/*  Test 5: pread and pwrite (positional, no offset change)  */
 
 static void test_pread_pwrite(void) {
     printf("\n[test_pread_pwrite]\n");
@@ -164,7 +164,7 @@ static void test_pread_pwrite(void) {
     close(fd);
 }
 
-/* ── Test 6: mkdir and nested file creation ────────────────────────────── */
+/*  Test 6: mkdir and nested file creation  */
 
 static void test_mkdir(void) {
     printf("\n[test_mkdir]\n");
@@ -196,7 +196,7 @@ static void test_mkdir(void) {
     CHECK("mkdir on existing dir fails", ret != 0);
 }
 
-/* ── Test 7: unlink ───────────────────────────────────────────────────── */
+/*  Test 7: unlink  */
 
 static void test_unlink(void) {
     printf("\n[test_unlink]\n");
@@ -220,7 +220,7 @@ static void test_unlink(void) {
     CHECK("unlink nonexistent fails", ret != 0);
 }
 
-/* ── Test 8: fcntl F_GETFL ────────────────────────────────────────────── */
+/*  Test 8: fcntl F_GETFL  */
 
 static void test_fcntl(void) {
     printf("\n[test_fcntl]\n");
@@ -235,7 +235,7 @@ static void test_fcntl(void) {
     close(fd);
 }
 
-/* ── Test 9: Large write spanning multiple chunks ─────────────────────── */
+/*  Test 9: Large write spanning multiple chunks  */
 
 static void test_large_write(void) {
     printf("\n[test_large_write]\n");
@@ -263,7 +263,7 @@ static void test_large_write(void) {
     close(fd);
 }
 
-/* ── Test 10: Read at EOF returns 0 ───────────────────────────────────── */
+/*  Test 10: Read at EOF returns 0  */
 
 static void test_read_eof(void) {
     printf("\n[test_read_eof]\n");
@@ -284,7 +284,7 @@ static void test_read_eof(void) {
     close(fd);
 }
 
-/* ── Test 11: Write to stdout passes through (fd < 3) ─────────────────── */
+/*  Test 11: Write to stdout passes through (fd < 3)  */
 
 static void test_stdout_passthrough(void) {
     printf("\n[test_stdout_passthrough]\n");
@@ -364,7 +364,7 @@ static void test_link_rw(void) {
     unlink("file2");
 }
 
-/* ── Main ──────────────────────────────────────────────────────────────── */
+/*  Main  */
 
 int main(void) {
     printf("=== imfs grate test ===\n");
