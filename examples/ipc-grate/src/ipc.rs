@@ -14,6 +14,19 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+/// Protects fdtable cage initialization to prevent TOCTOU races.
+///
+/// Acquired by:
+///   - `ensure_cage_exists` (check + init must be atomic)
+///   - `lookup_ipc_fd` (blocks child until fork setup completes)
+///   - `fork_handler` (during fdtable copy for the child)
+///
+/// Lock ordering: CAGE_INIT_LOCK → IPC_STATE (never reversed).
+/// `create_pipe` calls ensure_cage_exists while IPC_STATE is held, which is
+/// IPC_STATE → CAGE_INIT_LOCK — compatible because fork_handler acquires them
+/// sequentially (not nested).
+pub static CAGE_INIT_LOCK: Mutex<()> = Mutex::new(());
+
 use crate::pipe::{PipeBuffer, PIPE_CAPACITY};
 use crate::socket::{SocketRegistry, IPC_SOCKET};
 
@@ -140,7 +153,17 @@ impl IpcState {
 
 /// Check if a fd belongs to the IPC grate (pipe endpoint or socket).
 /// Returns (underfd, fdkind, flags) or None if it's not ours.
+///
+/// Acquires CAGE_INIT_LOCK so that a freshly-forked child blocks here until
+/// the parent's fork_handler has finished copying the fdtable + bumping
+/// refcounts.  Without this, the child would see an empty (or missing)
+/// fdtable, causing pipe operations to be forwarded to the kernel (EBADF)
+/// or triggering fdtables assertion panics.
 pub fn lookup_ipc_fd(cage_id: u64, fd: u64) -> Option<(u64, u32, i32)> {
+    let _guard = CAGE_INIT_LOCK.lock().unwrap();
+    if !fdtables::check_cage_exists(cage_id) {
+        return None;
+    }
     match fdtables::translate_virtual_fd(cage_id, fd) {
         Ok(entry) if entry.fdkind == IPC_PIPE || entry.fdkind == IPC_SOCKET => {
             Some((entry.underfd, entry.fdkind, entry.perfdinfo as i32))
@@ -165,7 +188,12 @@ pub fn init(grate_cage_id: u64) {
 }
 
 /// Ensure a cage exists in fdtables. Idempotent — safe to call multiple times.
+///
+/// Acquires CAGE_INIT_LOCK to prevent the TOCTOU race where two concurrent
+/// handlers both see the cage as missing and both try to init it (the second
+/// would panic on fdtables' `assert!(!check_cage_exists(...))`).
 pub fn ensure_cage_exists(cage_id: u64) {
+    let _guard = CAGE_INIT_LOCK.lock().unwrap();
     if !fdtables::check_cage_exists(cage_id) {
         fdtables::init_empty_cage(cage_id);
     }
