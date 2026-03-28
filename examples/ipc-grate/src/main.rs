@@ -517,38 +517,96 @@ pub extern "C" fn fork_handler(
 
     let child_cage_id = ret as u64;
 
-    // Clone the fd table so the child inherits pipe fds.
-    let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id);
+    // --- Phase 1: pre-collect pipe/socket Arc references (under IPC_STATE,
+    //     but NOT under CAGE_INIT_LOCK — avoids lock-ordering deadlock with
+    //     create_pipe → ensure_cage_exists which is IPC_STATE → CAGE_INIT_LOCK).
+    let parent_fds = fdtables::return_fdtable_copy(cage_id);
 
-    // Increment refcounts on all pipes/sockets the child inherits.
-    let child_fds = fdtables::return_fdtable_copy(child_cage_id);
-    for (_fd, entry) in &child_fds {
+    enum RefBump {
+        Pipe { pipe: std::sync::Arc<pipe::PipeBuffer>, is_read: bool },
+        Socket {
+            sendpipe: Option<std::sync::Arc<pipe::PipeBuffer>>,
+            recvpipe: Option<std::sync::Arc<pipe::PipeBuffer>>,
+        },
+    }
+
+    let mut bumps: Vec<RefBump> = Vec::new();
+    for (_fd, entry) in &parent_fds {
         match entry.fdkind {
             IPC_PIPE => {
                 if let Some(pipe) = with_ipc(|s| s.get_pipe(entry.underfd)) {
-                    if is_read_end(entry.perfdinfo as i32) {
+                    bumps.push(RefBump::Pipe {
+                        pipe,
+                        is_read: is_read_end(entry.perfdinfo as i32),
+                    });
+                }
+            }
+            socket::IPC_SOCKET => {
+                let refs = with_ipc(|s| {
+                    s.sockets.get(entry.underfd).map(|sock| {
+                        (sock.sendpipe.clone(), sock.recvpipe.clone())
+                    })
+                });
+                if let Some((sp, rp)) = refs {
+                    bumps.push(RefBump::Socket { sendpipe: sp, recvpipe: rp });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // --- Phase 2: copy fdtable + bump refcounts (under CAGE_INIT_LOCK only).
+    //
+    // Any handler the child calls acquires the same lock (via lookup_ipc_fd)
+    // and blocks here until the fdtable is fully populated and refcounts are
+    // bumped.  This prevents the child from closing an inherited fd before
+    // the refcount reflects the new owner.
+    {
+        let _guard = ipc::CAGE_INIT_LOCK.lock().unwrap();
+
+        // Copy the parent's fdtable to the child.
+        //
+        // Race: the child may have already called ensure_cage_exists (or a
+        // handler hit lookup_ipc_fd → check_cage_exists), creating an empty
+        // table.  copy_fdtable_for_cage would panic in that case, so we
+        // fall back to a manual entry-by-entry copy.
+        if fdtables::check_cage_exists(child_cage_id) {
+            for (fd, entry) in &parent_fds {
+                let _ = fdtables::get_specific_virtual_fd(
+                    child_cage_id,
+                    *fd,
+                    entry.fdkind,
+                    entry.underfd,
+                    entry.should_cloexec,
+                    entry.perfdinfo,
+                );
+            }
+        } else {
+            let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id);
+        }
+
+        // Bump refcounts using the pre-collected Arc references.
+        // No IPC_STATE lock needed here — we already hold the Arcs.
+        for bump in &bumps {
+            match bump {
+                RefBump::Pipe { pipe, is_read } => {
+                    if *is_read {
                         pipe.incr_read_ref();
                     } else {
                         pipe.incr_write_ref();
                     }
                 }
-            }
-            socket::IPC_SOCKET => {
-                // Child inherits the socket — bump refs on both pipes.
-                with_ipc(|s| {
-                    if let Some(sock) = s.sockets.get(entry.underfd) {
-                        if let Some(ref sp) = sock.sendpipe {
-                            sp.incr_write_ref();
-                        }
-                        if let Some(ref rp) = sock.recvpipe {
-                            rp.incr_read_ref();
-                        }
+                RefBump::Socket { sendpipe, recvpipe } => {
+                    if let Some(sp) = sendpipe {
+                        sp.incr_write_ref();
                     }
-                });
+                    if let Some(rp) = recvpipe {
+                        rp.incr_read_ref();
+                    }
+                }
             }
-            _ => {}
         }
-    }
+    } // CAGE_INIT_LOCK released — child can now proceed.
 
     child_cage_id as i32
 }
