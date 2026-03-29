@@ -496,6 +496,19 @@ pub extern "C" fn fcntl_handler(
 }
 
 /// fork (syscall 57): forward fork and clone fdtables for the child.
+///
+/// The child cage starts running as soon as forward_syscall(SYS_CLONE)
+/// returns.  To prevent the child from using an uninitialised fdtable
+/// (which causes "Unknown cageid" panics) or closing an fd before its
+/// refcount is bumped (which causes premature pipe EOF / EPIPE), we:
+///
+///   1. Pre-collect parent's pipe Arc refs via with_ipc (needs IPC_STATE,
+///      so must happen BEFORE acquiring CAGE_INIT_LOCK to avoid deadlock
+///      with create_pipe → ensure_cage_exists path).
+///   2. Acquire CAGE_INIT_LOCK, then fork, copy fdtable, bump refcounts,
+///      and release.  The child's first handler call goes through
+///      lookup_ipc_fd which also acquires CAGE_INIT_LOCK — so the child
+///      blocks until setup is complete.
 pub extern "C" fn fork_handler(
     cageid: u64,
     arg1: u64, arg1cage: u64,
@@ -509,17 +522,9 @@ pub extern "C" fn fork_handler(
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
-    let ret = forward_syscall(SYS_CLONE, cage_id, &args, &arg_cages);
-
-    if ret <= 0 {
-        return ret;
-    }
-
-    let child_cage_id = ret as u64;
-
-    // --- Phase 1: pre-collect pipe/socket Arc references (under IPC_STATE,
-    //     but NOT under CAGE_INIT_LOCK — avoids lock-ordering deadlock with
-    //     create_pipe → ensure_cage_exists which is IPC_STATE → CAGE_INIT_LOCK).
+    // --- Phase 1: snapshot parent's fdtable and pre-collect pipe/socket
+    //     Arc references BEFORE forking.  Uses IPC_STATE (via with_ipc) but
+    //     NOT CAGE_INIT_LOCK, so no lock-ordering issue.
     let parent_fds = fdtables::return_fdtable_copy(cage_id);
 
     enum RefBump {
@@ -555,58 +560,63 @@ pub extern "C" fn fork_handler(
         }
     }
 
-    // --- Phase 2: copy fdtable + bump refcounts (under CAGE_INIT_LOCK only).
+    // --- Phase 2: fork + copy fdtable + bump refcounts, all under
+    //     CAGE_INIT_LOCK.  The child starts running after forward_syscall
+    //     returns but immediately blocks in lookup_ipc_fd (which acquires
+    //     the same lock), so it cannot touch fdtables or pipe refcounts
+    //     until we are done.
+    let _guard = ipc::CAGE_INIT_LOCK.lock().unwrap();
+
+    let ret = forward_syscall(SYS_CLONE, cage_id, &args, &arg_cages);
+
+    if ret <= 0 {
+        return ret;
+    }
+
+    let child_cage_id = ret as u64;
+
+    // Copy the parent's fdtable to the child.
     //
-    // Any handler the child calls acquires the same lock (via lookup_ipc_fd)
-    // and blocks here until the fdtable is fully populated and refcounts are
-    // bumped.  This prevents the child from closing an inherited fd before
-    // the refcount reflects the new owner.
-    {
-        let _guard = ipc::CAGE_INIT_LOCK.lock().unwrap();
-
-        // Copy the parent's fdtable to the child.
-        //
-        // Race: the child may have already called ensure_cage_exists (or a
-        // handler hit lookup_ipc_fd → check_cage_exists), creating an empty
-        // table.  copy_fdtable_for_cage would panic in that case, so we
-        // fall back to a manual entry-by-entry copy.
-        if fdtables::check_cage_exists(child_cage_id) {
-            for (fd, entry) in &parent_fds {
-                let _ = fdtables::get_specific_virtual_fd(
-                    child_cage_id,
-                    *fd,
-                    entry.fdkind,
-                    entry.underfd,
-                    entry.should_cloexec,
-                    entry.perfdinfo,
-                );
-            }
-        } else {
-            let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id);
+    // Race (unlikely now, but defensive): the child may have already called
+    // ensure_cage_exists, creating an empty table.  copy_fdtable_for_cage
+    // would panic, so fall back to entry-by-entry copy.
+    if fdtables::check_cage_exists(child_cage_id) {
+        for (fd, entry) in &parent_fds {
+            let _ = fdtables::get_specific_virtual_fd(
+                child_cage_id,
+                *fd,
+                entry.fdkind,
+                entry.underfd,
+                entry.should_cloexec,
+                entry.perfdinfo,
+            );
         }
+    } else {
+        let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id);
+    }
 
-        // Bump refcounts using the pre-collected Arc references.
-        // No IPC_STATE lock needed here — we already hold the Arcs.
-        for bump in &bumps {
-            match bump {
-                RefBump::Pipe { pipe, is_read } => {
-                    if *is_read {
-                        pipe.incr_read_ref();
-                    } else {
-                        pipe.incr_write_ref();
-                    }
+    // Bump refcounts using the pre-collected Arc references.
+    for bump in &bumps {
+        match bump {
+            RefBump::Pipe { pipe, is_read } => {
+                if *is_read {
+                    pipe.incr_read_ref();
+                } else {
+                    pipe.incr_write_ref();
                 }
-                RefBump::Socket { sendpipe, recvpipe } => {
-                    if let Some(sp) = sendpipe {
-                        sp.incr_write_ref();
-                    }
-                    if let Some(rp) = recvpipe {
-                        rp.incr_read_ref();
-                    }
+            }
+            RefBump::Socket { sendpipe, recvpipe } => {
+                if let Some(sp) = sendpipe {
+                    sp.incr_write_ref();
+                }
+                if let Some(rp) = recvpipe {
+                    rp.incr_read_ref();
                 }
             }
         }
-    } // CAGE_INIT_LOCK released — child can now proceed.
+    }
+
+    drop(_guard); // CAGE_INIT_LOCK released — child can now proceed.
 
     child_cage_id as i32
 }
