@@ -633,14 +633,10 @@ pub extern "C" fn exec_handler(
 ) -> i32 {
     let cage_id = arg1cage;
 
-    // Initial call to exec fails in closing fds for the
-    // cage due to the missing entry in fdtable
-    //
-    // avoid this failure by creating an empty table for
-    match fdtables::check_cage_exists(cage_id) {
-        false => fdtables::init_empty_cage(cage_id),
-        true => {}
-    };
+    // The first exec may arrive before the cage has an fdtable entry
+    // (e.g. right after fork).  Use the lock-protected helper to avoid
+    // the TOCTOU race in the raw check + init pattern.
+    ipc::ensure_cage_exists(cage_id);
 
     // Close cloexec fds.
     fdtables::empty_fds_for_exec(cage_id);
