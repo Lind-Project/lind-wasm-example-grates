@@ -10,15 +10,23 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "ed25519.h"
+
 #define SYS_READ    0
 #define SYS_WRITE   1
 #define SYS_EXECVE  59
 #define SYS_OPENAT  257
 
-#define MAX_PATH_LEN 512
-#define MAX_PREVIEW  64
+#define SEED_LEN    32
+#define PUBKEY_LEN  32
+#define PRIVKEY_LEN 64
+#define SIG_LEN     64
 
 static FILE *witness_log = NULL;
+static uint8_t witness_seed[SEED_LEN];
+static uint8_t witness_pubkey[PUBKEY_LEN];
+static uint8_t witness_privkey[PRIVKEY_LEN];
+static uint64_t witness_seqno = 0;
 
 /* ---------------- logging ---------------- */
 
@@ -46,6 +54,55 @@ static void log_line(const char *line) {
     init_witness_log();
     fprintf(witness_log, "%s\n", line);
     fflush(witness_log);
+}
+
+static void bytes_to_hex(const uint8_t *in, size_t len, char *out, size_t out_len) {
+    static const char *hex = "0123456789abcdef";
+    size_t i;
+
+    if (out_len < len * 2 + 1) {
+        assert(0);
+    }
+
+    for (i = 0; i < len; i++) {
+        out[2 * i]     = hex[(in[i] >> 4) & 0xf];
+        out[2 * i + 1] = hex[in[i] & 0xf];
+    }
+    out[2 * len] = '\0';
+}
+
+/* ---------------- keygen ---------------- */
+
+static void load_seed_from_file(const char *path) {
+    FILE *fp = fopen(path, "rb");
+    if (fp == NULL) {
+        perror("[WitnessGrate] fopen seed");
+        assert(0);
+    }
+
+    size_t n = fread(witness_seed, 1, SEED_LEN, fp);
+    fclose(fp);
+
+    if (n != SEED_LEN) {
+        fprintf(stderr, "[WitnessGrate] seed file must be exactly %d bytes\n", SEED_LEN);
+        assert(0);
+    }
+}
+
+static void init_witness_keys(void) {
+    const char *seed_path = "witness.seed";
+
+    load_seed_from_file(seed_path);
+    ed25519_create_keypair(witness_pubkey, witness_privkey, witness_seed);
+}
+
+static void emit_public_key(void) {
+    char pub_hex[PUBKEY_LEN * 2 + 1];
+    char line[256];
+
+    bytes_to_hex(witness_pubkey, PUBKEY_LEN, pub_hex, sizeof(pub_hex));
+    snprintf(line, sizeof(line), "PUBKEY %s", pub_hex);
+    log_line(line);
 }
 
 /* ---------------- dispatcher ---------------- */
@@ -86,128 +143,128 @@ static int forward_syscall(uint64_t syscallno,
 
     return make_threei_call(
         syscallno,
-        0,              // callname unused
-        self_grate_id,  // grate cage
-        arg1cage,       // target cage
+        0,
+        self_grate_id,
+        arg1cage,
         arg1, arg1cage,
         arg2, arg2cage,
         arg3, arg3cage,
         arg4, arg4cage,
         arg5, arg5cage,
         arg6, arg6cage,
-        0               // raw errno
+        0
     );
 }
 
-/* ---------------- helpers ---------------- */
+/* ---------------- syscall record ---------------- */
 
-/*
- * Copy a NULL-terminated string from caller cage memory into the grate.
- *
- * src_ptr: pointer in src_cage's address space
- * src_cage: cage that owns the source memory
- *
- * Returns 0 on success, -1 on failure.
- */
-static int copy_cstr_from_cage(uint64_t src_ptr, uint64_t src_cage,
-                               char *dst, size_t dst_len) {
-    if (dst == NULL || dst_len == 0) {
-        return -1;
-    }
+typedef struct {
+    uint64_t seqno;
+    uint64_t syscallno;
+    uint64_t cageid;
+    uint64_t args[6];
+    uint64_t arg_cages[6];
+} syscall_record_t;
 
-    memset(dst, 0, dst_len);
+/* ---------------- signature backend ---------------- */
 
-    int self_grate_id = getpid();
-
-    int ret = copy_data_between_cages(
-        self_grate_id,          // thiscage (caller = grate)
-        self_grate_id,          // targetcage
-        src_ptr,                // srcaddr in source cage
-        src_cage,               // srccage
-        (uint64_t)(uintptr_t)dst,
-        self_grate_id,          // dest buffer belongs to grate
-        dst_len - 1,            // leave room for NUL
-        1                       // string copy
-    );
-
-    if (ret < 0) {
-        dst[0] = '\0';
-        return -1;
-    }
-
-    dst[dst_len - 1] = '\0';
+static int sign_record_detached(const syscall_record_t *rec,
+                                const uint8_t *pubkey,
+                                const uint8_t *privkey,
+                                uint8_t sig[SIG_LEN]) {
+    ed25519_sign(sig,
+                 (const unsigned char *)rec,
+                 sizeof(*rec),
+                 pubkey,
+                 privkey);
     return 0;
 }
 
-/*
- * Copy up to max_len bytes from caller cage into local buffer.
- * Used for read/write previews.
- */
-static int copy_bytes_from_cage(uint64_t src_ptr, uint64_t src_cage,
-                                void *dst, size_t max_len) {
-    if (dst == NULL || max_len == 0) {
-        return -1;
+/* ---------------- evidence output ---------------- */
+
+static void emit_signed_record(const syscall_record_t *rec,
+                               const uint8_t sig[SIG_LEN]) {
+    char sig_hex[SIG_LEN * 2 + 1];
+    char line[1024];
+
+    bytes_to_hex(sig, SIG_LEN, sig_hex, sizeof(sig_hex));
+
+    snprintf(line, sizeof(line),
+             "SIGNED seq=%llu syscall=%llu cage=%llu "
+             "a=[%llu,%llu,%llu,%llu,%llu,%llu] "
+             "ac=[%llu,%llu,%llu,%llu,%llu,%llu] sig=%s",
+             (unsigned long long)rec->seqno,
+             (unsigned long long)rec->syscallno,
+             (unsigned long long)rec->cageid,
+             (unsigned long long)rec->args[0],
+             (unsigned long long)rec->args[1],
+             (unsigned long long)rec->args[2],
+             (unsigned long long)rec->args[3],
+             (unsigned long long)rec->args[4],
+             (unsigned long long)rec->args[5],
+             (unsigned long long)rec->arg_cages[0],
+             (unsigned long long)rec->arg_cages[1],
+             (unsigned long long)rec->arg_cages[2],
+             (unsigned long long)rec->arg_cages[3],
+             (unsigned long long)rec->arg_cages[4],
+             (unsigned long long)rec->arg_cages[5],
+             sig_hex);
+
+    log_line(line);
+}
+
+/* ---------------- signed forwarding ---------------- */
+
+static int signed_forward(uint64_t syscallno,
+                          uint64_t cageid,
+                          uint64_t arg1, uint64_t arg1cage,
+                          uint64_t arg2, uint64_t arg2cage,
+                          uint64_t arg3, uint64_t arg3cage,
+                          uint64_t arg4, uint64_t arg4cage,
+                          uint64_t arg5, uint64_t arg5cage,
+                          uint64_t arg6, uint64_t arg6cage) {
+    syscall_record_t rec;
+    uint8_t sig[SIG_LEN];
+
+    memset(&rec, 0, sizeof(rec));
+    rec.seqno = witness_seqno++;
+    rec.syscallno = syscallno;
+    rec.cageid = cageid;
+
+    rec.args[0] = arg1;
+    rec.args[1] = arg2;
+    rec.args[2] = arg3;
+    rec.args[3] = arg4;
+    rec.args[4] = arg5;
+    rec.args[5] = arg6;
+
+    rec.arg_cages[0] = arg1cage;
+    rec.arg_cages[1] = arg2cage;
+    rec.arg_cages[2] = arg3cage;
+    rec.arg_cages[3] = arg4cage;
+    rec.arg_cages[4] = arg5cage;
+    rec.arg_cages[5] = arg6cage;
+
+    if (sign_record_detached(&rec, witness_pubkey, witness_privkey, sig) != 0) {
+        fprintf(stderr, "[WitnessGrate] sign_record_detached failed\n");
+        assert(0);
     }
 
-    int self_grate_id = getpid();
+    emit_signed_record(&rec, sig);
 
-    return copy_data_between_cages(
-        self_grate_id,
-        self_grate_id,
-        src_ptr,
-        src_cage,
-        (uint64_t)(uintptr_t)dst,
-        self_grate_id,
-        max_len,
-        0   // normal copy
+    return forward_syscall(
+        syscallno, cageid,
+        arg1, arg1cage,
+        arg2, arg2cage,
+        arg3, arg3cage,
+        arg4, arg4cage,
+        arg5, arg5cage,
+        arg6, arg6cage
     );
-}
-
-static void render_preview(const unsigned char *buf, size_t len,
-                           char *out, size_t out_len) {
-    size_t i;
-    size_t pos = 0;
-
-    if (out_len == 0) {
-        return;
-    }
-
-    out[0] = '\0';
-
-    for (i = 0; i < len; i++) {
-        unsigned char c = buf[i];
-        char tmp[5];
-
-        if (c >= 32 && c <= 126 && c != '\\' && c != '"') {
-            tmp[0] = (char)c;
-            tmp[1] = '\0';
-        } else {
-            snprintf(tmp, sizeof(tmp), "\\x%02x", c);
-        }
-
-        size_t need = strlen(tmp);
-        if (pos + need + 1 >= out_len) {
-            break;
-        }
-
-        memcpy(out + pos, tmp, need);
-        pos += need;
-        out[pos] = '\0';
-    }
-}
-
-static void safe_copy_path_or_placeholder(uint64_t ptr, uint64_t cage,
-                                          char *buf, size_t buflen) {
-    if (copy_cstr_from_cage(ptr, cage, buf, buflen) < 0 || buf[0] == '\0') {
-        snprintf(buf, buflen, "<unresolved ptr=%llu cage=%llu>",
-                 (unsigned long long)ptr,
-                 (unsigned long long)cage);
-    }
 }
 
 /* ---------------- witness handlers ---------------- */
 
-/* execve(filename, argv, envp) */
 int execve_witness(uint64_t cageid,
                    uint64_t arg1, uint64_t arg1cage,
                    uint64_t arg2, uint64_t arg2cage,
@@ -215,40 +272,15 @@ int execve_witness(uint64_t cageid,
                    uint64_t arg4, uint64_t arg4cage,
                    uint64_t arg5, uint64_t arg5cage,
                    uint64_t arg6, uint64_t arg6cage) {
-    char filebuf[MAX_PATH_LEN];
-    char logbuf[1024];
-
-    safe_copy_path_or_placeholder(arg1, arg1cage, filebuf, sizeof(filebuf));
-
-    snprintf(logbuf, sizeof(logbuf),
-             "[WitnessGrate] BEFORE execve cage=%llu file=\"%s\" argv_ptr=%llu argv_cage=%llu",
-             (unsigned long long)cageid,
-             filebuf,
-             (unsigned long long)arg2,
-             (unsigned long long)arg2cage);
-    log_line(logbuf);
-
-    int ret = forward_syscall(
-        SYS_EXECVE, cageid,
-        arg1, arg1cage,
-        arg2, arg2cage,
-        arg3, arg3cage,
-        arg4, arg4cage,
-        arg5, arg5cage,
-        arg6, arg6cage
-    );
-
-    snprintf(logbuf, sizeof(logbuf),
-             "[WitnessGrate] AFTER execve cage=%llu file=\"%s\" ret=%d",
-             (unsigned long long)cageid,
-             filebuf,
-             ret);
-    log_line(logbuf);
-
-    return ret;
+    return signed_forward(SYS_EXECVE, cageid,
+                          arg1, arg1cage,
+                          arg2, arg2cage,
+                          arg3, arg3cage,
+                          arg4, arg4cage,
+                          arg5, arg5cage,
+                          arg6, arg6cage);
 }
 
-/* openat(dirfd, pathname, flags, mode) */
 int openat_witness(uint64_t cageid,
                    uint64_t arg1, uint64_t arg1cage,
                    uint64_t arg2, uint64_t arg2cage,
@@ -256,41 +288,15 @@ int openat_witness(uint64_t cageid,
                    uint64_t arg4, uint64_t arg4cage,
                    uint64_t arg5, uint64_t arg5cage,
                    uint64_t arg6, uint64_t arg6cage) {
-    char pathbuf[MAX_PATH_LEN];
-    char logbuf[1024];
-
-    safe_copy_path_or_placeholder(arg2, arg2cage, pathbuf, sizeof(pathbuf));
-
-    snprintf(logbuf, sizeof(logbuf),
-             "[WitnessGrate] BEFORE openat cage=%llu dirfd=%lld path=\"%s\" flags=%llu mode=%llu",
-             (unsigned long long)cageid,
-             (long long)arg1,
-             pathbuf,
-             (unsigned long long)arg3,
-             (unsigned long long)arg4);
-    log_line(logbuf);
-
-    int ret = forward_syscall(
-        SYS_OPENAT, cageid,
-        arg1, arg1cage,
-        arg2, arg2cage,
-        arg3, arg3cage,
-        arg4, arg4cage,
-        arg5, arg5cage,
-        arg6, arg6cage
-    );
-
-    snprintf(logbuf, sizeof(logbuf),
-             "[WitnessGrate] AFTER openat cage=%llu path=\"%s\" ret=%d",
-             (unsigned long long)cageid,
-             pathbuf,
-             ret);
-    log_line(logbuf);
-
-    return ret;
+    return signed_forward(SYS_OPENAT, cageid,
+                          arg1, arg1cage,
+                          arg2, arg2cage,
+                          arg3, arg3cage,
+                          arg4, arg4cage,
+                          arg5, arg5cage,
+                          arg6, arg6cage);
 }
 
-/* read(fd, buf, count) */
 int read_witness(uint64_t cageid,
                  uint64_t arg1, uint64_t arg1cage,
                  uint64_t arg2, uint64_t arg2cage,
@@ -298,63 +304,15 @@ int read_witness(uint64_t cageid,
                  uint64_t arg4, uint64_t arg4cage,
                  uint64_t arg5, uint64_t arg5cage,
                  uint64_t arg6, uint64_t arg6cage) {
-    char logbuf[1024];
-
-    snprintf(logbuf, sizeof(logbuf),
-             "[WitnessGrate] BEFORE read cage=%llu fd=%lld count=%llu buf_ptr=%llu buf_cage=%llu",
-             (unsigned long long)cageid,
-             (long long)arg1,
-             (unsigned long long)arg3,
-             (unsigned long long)arg2,
-             (unsigned long long)arg2cage);
-    log_line(logbuf);
-
-    int ret = forward_syscall(
-        SYS_READ, cageid,
-        arg1, arg1cage,
-        arg2, arg2cage,
-        arg3, arg3cage,
-        arg4, arg4cage,
-        arg5, arg5cage,
-        arg6, arg6cage
-    );
-
-    if (ret > 0) {
-        unsigned char preview[MAX_PREVIEW];
-        char rendered[4 * MAX_PREVIEW + 1];
-        size_t copy_len = (ret < MAX_PREVIEW) ? (size_t)ret : (size_t)MAX_PREVIEW;
-
-        memset(preview, 0, sizeof(preview));
-        rendered[0] = '\0';
-
-        if (copy_bytes_from_cage(arg2, arg2cage, preview, copy_len) >= 0) {
-            render_preview(preview, copy_len, rendered, sizeof(rendered));
-            snprintf(logbuf, sizeof(logbuf),
-                     "[WitnessGrate] AFTER read cage=%llu fd=%lld ret=%d preview=\"%s\"",
-                     (unsigned long long)cageid,
-                     (long long)arg1,
-                     ret,
-                     rendered);
-        } else {
-            snprintf(logbuf, sizeof(logbuf),
-                     "[WitnessGrate] AFTER read cage=%llu fd=%lld ret=%d preview=<copy-failed>",
-                     (unsigned long long)cageid,
-                     (long long)arg1,
-                     ret);
-        }
-    } else {
-        snprintf(logbuf, sizeof(logbuf),
-                 "[WitnessGrate] AFTER read cage=%llu fd=%lld ret=%d",
-                 (unsigned long long)cageid,
-                 (long long)arg1,
-                 ret);
-    }
-
-    log_line(logbuf);
-    return ret;
+    return signed_forward(SYS_READ, cageid,
+                          arg1, arg1cage,
+                          arg2, arg2cage,
+                          arg3, arg3cage,
+                          arg4, arg4cage,
+                          arg5, arg5cage,
+                          arg6, arg6cage);
 }
 
-/* write(fd, buf, count) */
 int write_witness(uint64_t cageid,
                   uint64_t arg1, uint64_t arg1cage,
                   uint64_t arg2, uint64_t arg2cage,
@@ -362,49 +320,13 @@ int write_witness(uint64_t cageid,
                   uint64_t arg4, uint64_t arg4cage,
                   uint64_t arg5, uint64_t arg5cage,
                   uint64_t arg6, uint64_t arg6cage) {
-    char logbuf[1024];
-    unsigned char preview[MAX_PREVIEW];
-    char rendered[4 * MAX_PREVIEW + 1];
-    size_t copy_len = (arg3 < MAX_PREVIEW) ? (size_t)arg3 : (size_t)MAX_PREVIEW;
-
-    rendered[0] = '\0';
-
-    if (copy_len > 0 && copy_bytes_from_cage(arg2, arg2cage, preview, copy_len) >= 0) {
-        render_preview(preview, copy_len, rendered, sizeof(rendered));
-        snprintf(logbuf, sizeof(logbuf),
-                 "[WitnessGrate] BEFORE write cage=%llu fd=%lld count=%llu preview=\"%s\"",
-                 (unsigned long long)cageid,
-                 (long long)arg1,
-                 (unsigned long long)arg3,
-                 rendered);
-    } else {
-        snprintf(logbuf, sizeof(logbuf),
-                 "[WitnessGrate] BEFORE write cage=%llu fd=%lld count=%llu preview=<unavailable>",
-                 (unsigned long long)cageid,
-                 (long long)arg1,
-                 (unsigned long long)arg3);
-    }
-    log_line(logbuf);
-
-    int ret = forward_syscall(
-        SYS_WRITE, cageid,
-        arg1, arg1cage,
-        arg2, arg2cage,
-        arg3, arg3cage,
-        arg4, arg4cage,
-        arg5, arg5cage,
-        arg6, arg6cage
-    );
-
-    snprintf(logbuf, sizeof(logbuf),
-             "[WitnessGrate] AFTER write cage=%llu fd=%lld count=%llu ret=%d",
-             (unsigned long long)cageid,
-             (long long)arg1,
-             (unsigned long long)arg3,
-             ret);
-    log_line(logbuf);
-
-    return ret;
+    return signed_forward(SYS_WRITE, cageid,
+                          arg1, arg1cage,
+                          arg2, arg2cage,
+                          arg3, arg3cage,
+                          arg4, arg4cage,
+                          arg5, arg5cage,
+                          arg6, arg6cage);
 }
 
 /* ---------------- registration ---------------- */
@@ -454,6 +376,10 @@ int main(int argc, char *argv[]) {
     }
 
     init_witness_log();
+
+    init_witness_keys();
+    emit_public_key();
+    log_line("=== witness keypair generated ===");
 
     int grateid = getpid();
     printf("[WitnessGrate] Start grate pid=%d\n", grateid);
