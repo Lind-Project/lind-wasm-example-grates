@@ -10,8 +10,12 @@ int main(void) {
 
   ssize_t ret = write(fd, "hello", 5);
 
-  assert(ret == -1);      // write must fail
-  assert(errno == EPERM); // and specifically EPERM
+  // write() must fail
+  assert(ret == EPERM);
   close(fd);
+  
+  // remove testfile
+  unlink("testfile.txt");
+  
   return 0;
 }

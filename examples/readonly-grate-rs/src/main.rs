@@ -1,7 +1,10 @@
 // readonly-grate blocks all writes unconditionally
 // by returning EPERM (operation not permitted).
 
-use grate_rs::{GrateBuilder, GrateError, constants::SYS_WRITE};
+use grate_rs::{
+    GrateBuilder, GrateError,
+    constants::{SYS_WRITE, error::EPERM},
+};
 
 // write() syscall handler
 extern "C" fn write_syscall(
@@ -19,15 +22,14 @@ extern "C" fn write_syscall(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    println!("[readonly-grate] Operation not permitted.");
-    -1 // return EPERM (Opertation no permitted);
+    EPERM // return EPERM (Opertation no permitted);
 }
 
 fn main() {
     // vector to store args passed along with the grate
     let argv = std::env::args().skip(1).collect::<Vec<_>>();
 
-    let builder = GrateBuilder::new()
+    GrateBuilder::new()
         .register(SYS_WRITE, write_syscall)
         .teardown(|result: Result<i32, GrateError>| println!("Result: {:#?}", result))
         .run(argv);
