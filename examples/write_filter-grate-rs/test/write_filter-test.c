@@ -24,7 +24,7 @@ int main(void) {
   // errno 63 is mapped to EPERM in wasi
   assert(ret == 63);
   close(fd);
-  unlink("filetest.log");
+  unlink("filetest.txt");
 
   return 0;
 }
