@@ -3,7 +3,7 @@
 
 use grate_rs::{
     GrateBuilder, GrateError,
-    constants::{SYS_OPEN, SYS_WRITE},
+    constants::{SYS_OPEN, SYS_WRITE, error::EPERM},
     copy_data_between_cages, getcageid, make_threei_call,
 };
 use std::{path::Path, sync::Mutex};
@@ -151,7 +151,7 @@ extern "C" fn write_syscall(
     }
 
     // return EPERM (Operation not permitted)
-    libc::EPERM
+    EPERM
 }
 
 fn main() {

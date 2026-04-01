@@ -21,8 +21,8 @@ int main(void) {
   assert(fd >= 0); // open succeeds
 
   ret = write(fd, "Hello, txt!\n", 11);
-  // errno 63 is mapped to EPERM in wasi
-  assert(ret == 63);
+
+  assert(ret == EPERM);
   close(fd);
   unlink("filetest.txt");
 
