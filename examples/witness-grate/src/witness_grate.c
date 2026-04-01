@@ -2,10 +2,12 @@
 #include <lind_syscall.h>
 
 #include <assert.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -22,13 +24,15 @@
 #define PRIVKEY_LEN 64
 #define SIG_LEN     64
 
-static FILE *witness_log = NULL;
-static uint8_t witness_seed[SEED_LEN];
-static uint8_t witness_pubkey[PUBKEY_LEN];
-static uint8_t witness_privkey[PRIVKEY_LEN];
-static uint64_t witness_seqno = 0;
+#define MAX_WITNESS_CAGES 128
+#define MAX_PATH_LEN 512
 
-/* ---------------- logging ---------------- */
+/* ============================================================
+ * Global logging
+ * ============================================================ */
+
+static FILE *witness_log = NULL;
+static pthread_mutex_t witness_log_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void init_witness_log(void) {
     if (witness_log != NULL) {
@@ -51,9 +55,13 @@ static void init_witness_log(void) {
 }
 
 static void log_line(const char *line) {
+    pthread_mutex_lock(&witness_log_lock);
+
     init_witness_log();
     fprintf(witness_log, "%s\n", line);
     fflush(witness_log);
+
+    pthread_mutex_unlock(&witness_log_lock);
 }
 
 static void bytes_to_hex(const uint8_t *in, size_t len, char *out, size_t out_len) {
@@ -71,41 +79,166 @@ static void bytes_to_hex(const uint8_t *in, size_t len, char *out, size_t out_le
     out[2 * len] = '\0';
 }
 
-/* ---------------- keygen ---------------- */
+/* ============================================================
+ * Per-cage witness context
+ * ============================================================ */
 
-static void load_seed_from_file(const char *path) {
+typedef struct {
+    uint64_t cageid;
+
+    uint8_t seed[SEED_LEN];
+    uint8_t pubkey[PUBKEY_LEN];
+    uint8_t privkey[PRIVKEY_LEN];
+
+    uint64_t seqno;
+
+    pthread_mutex_t lock;
+    int initialized;
+} witness_ctx_t;
+
+static witness_ctx_t witness_ctxs[MAX_WITNESS_CAGES];
+static pthread_mutex_t witness_ctxs_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* ============================================================
+ * Syscall record
+ * ============================================================ */
+
+typedef struct {
+    uint64_t seqno;
+    uint64_t syscallno;
+    uint64_t cageid;
+    uint64_t args[6];
+    uint64_t arg_cages[6];
+} syscall_record_t;
+
+/* ============================================================
+ * Seed / key handling
+ * ============================================================ */
+
+static void build_seed_path_for_cage(uint64_t cageid, char *out, size_t out_len) {
+    const char *seed_dir = getenv("WITNESS_SEED_DIR");
+    if (seed_dir == NULL) {
+        seed_dir = ".";
+    }
+
+    int n = snprintf(out, out_len, "%s/witness.%llu.seed",
+                     seed_dir, (unsigned long long)cageid);
+    if (n < 0 || (size_t)n >= out_len) {
+        fprintf(stderr, "[WitnessGrate] seed path too long\n");
+        assert(0);
+    }
+}
+
+static void load_seed_file_exact(const char *path, uint8_t seed[SEED_LEN]) {
     FILE *fp = fopen(path, "rb");
     if (fp == NULL) {
         perror("[WitnessGrate] fopen seed");
+        fprintf(stderr, "[WitnessGrate] failed seed path: %s\n", path);
         assert(0);
     }
 
-    size_t n = fread(witness_seed, 1, SEED_LEN, fp);
+    size_t n = fread(seed, 1, SEED_LEN, fp);
     fclose(fp);
 
     if (n != SEED_LEN) {
-        fprintf(stderr, "[WitnessGrate] seed file must be exactly %d bytes\n", SEED_LEN);
+        fprintf(stderr, "[WitnessGrate] seed file must be exactly %d bytes: %s\n",
+                SEED_LEN, path);
         assert(0);
     }
 }
 
-static void init_witness_keys(void) {
-    const char *seed_path = "witness.seed";
+/*
+ * Preferred behavior:
+ *   1. try WITNESS_SEED_DIR/witness.<cageid>.seed
+ *   2. fallback to ./witness.seed for compatibility
+ */
+static void load_seed_for_cage(uint64_t cageid, uint8_t seed[SEED_LEN]) {
+    char cage_seed_path[MAX_PATH_LEN];
+    build_seed_path_for_cage(cageid, cage_seed_path, sizeof(cage_seed_path));
 
-    load_seed_from_file(seed_path);
-    ed25519_create_keypair(witness_pubkey, witness_privkey, witness_seed);
+    FILE *fp = fopen(cage_seed_path, "rb");
+    if (fp != NULL) {
+        fclose(fp);
+        load_seed_file_exact(cage_seed_path, seed);
+        return;
+    }
+
+    /* compatibility fallback */
+    load_seed_file_exact("witness.seed", seed);
 }
 
-static void emit_public_key(void) {
+static void init_witness_keys_for_cage(witness_ctx_t *ctx, uint64_t cageid) {
+    memset(ctx->seed, 0, sizeof(ctx->seed));
+    memset(ctx->pubkey, 0, sizeof(ctx->pubkey));
+    memset(ctx->privkey, 0, sizeof(ctx->privkey));
+
+    load_seed_for_cage(cageid, ctx->seed);
+    ed25519_create_keypair(ctx->pubkey, ctx->privkey, ctx->seed);
+}
+
+static void emit_public_key_for_cage(uint64_t cageid, const uint8_t pubkey[PUBKEY_LEN]) {
     char pub_hex[PUBKEY_LEN * 2 + 1];
     char line[256];
 
-    bytes_to_hex(witness_pubkey, PUBKEY_LEN, pub_hex, sizeof(pub_hex));
-    snprintf(line, sizeof(line), "PUBKEY %s", pub_hex);
+    bytes_to_hex(pubkey, PUBKEY_LEN, pub_hex, sizeof(pub_hex));
+    snprintf(line, sizeof(line), "PUBKEY cage=%llu %s",
+             (unsigned long long)cageid, pub_hex);
     log_line(line);
 }
 
-/* ---------------- dispatcher ---------------- */
+/* ============================================================
+ * Witness ctx table management
+ * ============================================================ */
+
+static witness_ctx_t *find_witness_ctx_locked(uint64_t cageid) {
+    int i;
+    for (i = 0; i < MAX_WITNESS_CAGES; i++) {
+        if (witness_ctxs[i].initialized && witness_ctxs[i].cageid == cageid) {
+            return &witness_ctxs[i];
+        }
+    }
+    return NULL;
+}
+
+static witness_ctx_t *alloc_witness_ctx_locked(uint64_t cageid) {
+    int i;
+    for (i = 0; i < MAX_WITNESS_CAGES; i++) {
+        if (!witness_ctxs[i].initialized) {
+            witness_ctxs[i].cageid = cageid;
+            witness_ctxs[i].seqno = 0;
+            if (pthread_mutex_init(&witness_ctxs[i].lock, NULL) != 0) {
+                perror("[WitnessGrate] pthread_mutex_init");
+                assert(0);
+            }
+            init_witness_keys_for_cage(&witness_ctxs[i], cageid);
+            witness_ctxs[i].initialized = 1;
+            emit_public_key_for_cage(cageid, witness_ctxs[i].pubkey);
+            return &witness_ctxs[i];
+        }
+    }
+
+    fprintf(stderr, "[WitnessGrate] witness ctx table full\n");
+    assert(0);
+    return NULL;
+}
+
+static witness_ctx_t *get_or_create_witness_ctx(uint64_t cageid) {
+    witness_ctx_t *ctx;
+
+    pthread_mutex_lock(&witness_ctxs_lock);
+
+    ctx = find_witness_ctx_locked(cageid);
+    if (ctx == NULL) {
+        ctx = alloc_witness_ctx_locked(cageid);
+    }
+
+    pthread_mutex_unlock(&witness_ctxs_lock);
+    return ctx;
+}
+
+/* ============================================================
+ * Dispatcher
+ * ============================================================ */
 
 int pass_fptr_to_wt(uint64_t fn_ptr_uint, uint64_t cageid, uint64_t arg1,
                     uint64_t arg1cage, uint64_t arg2, uint64_t arg2cage,
@@ -129,7 +262,9 @@ int pass_fptr_to_wt(uint64_t fn_ptr_uint, uint64_t cageid, uint64_t arg1,
               arg5, arg5cage, arg6, arg6cage);
 }
 
-/* ---------------- shared forwarding ---------------- */
+/* ============================================================
+ * Shared forwarding
+ * ============================================================ */
 
 static int forward_syscall(uint64_t syscallno,
                            uint64_t cageid,
@@ -140,6 +275,8 @@ static int forward_syscall(uint64_t syscallno,
                            uint64_t arg5, uint64_t arg5cage,
                            uint64_t arg6, uint64_t arg6cage) {
     int self_grate_id = getpid();
+
+    (void)cageid; /* currently unused by make_threei_call path */
 
     return make_threei_call(
         syscallno,
@@ -156,17 +293,9 @@ static int forward_syscall(uint64_t syscallno,
     );
 }
 
-/* ---------------- syscall record ---------------- */
-
-typedef struct {
-    uint64_t seqno;
-    uint64_t syscallno;
-    uint64_t cageid;
-    uint64_t args[6];
-    uint64_t arg_cages[6];
-} syscall_record_t;
-
-/* ---------------- signature backend ---------------- */
+/* ============================================================
+ * Signature backend
+ * ============================================================ */
 
 static int sign_record_detached(const syscall_record_t *rec,
                                 const uint8_t *pubkey,
@@ -180,7 +309,9 @@ static int sign_record_detached(const syscall_record_t *rec,
     return 0;
 }
 
-/* ---------------- evidence output ---------------- */
+/* ============================================================
+ * Evidence output
+ * ============================================================ */
 
 static void emit_signed_record(const syscall_record_t *rec,
                                const uint8_t sig[SIG_LEN]) {
@@ -213,7 +344,9 @@ static void emit_signed_record(const syscall_record_t *rec,
     log_line(line);
 }
 
-/* ---------------- signed forwarding ---------------- */
+/* ============================================================
+ * Signed forwarding
+ * ============================================================ */
 
 static int signed_forward(uint64_t syscallno,
                           uint64_t cageid,
@@ -223,11 +356,15 @@ static int signed_forward(uint64_t syscallno,
                           uint64_t arg4, uint64_t arg4cage,
                           uint64_t arg5, uint64_t arg5cage,
                           uint64_t arg6, uint64_t arg6cage) {
+    witness_ctx_t *ctx = get_or_create_witness_ctx(cageid);
     syscall_record_t rec;
     uint8_t sig[SIG_LEN];
 
     memset(&rec, 0, sizeof(rec));
-    rec.seqno = witness_seqno++;
+
+    pthread_mutex_lock(&ctx->lock);
+
+    rec.seqno = ctx->seqno++;
     rec.syscallno = syscallno;
     rec.cageid = cageid;
 
@@ -245,10 +382,13 @@ static int signed_forward(uint64_t syscallno,
     rec.arg_cages[4] = arg5cage;
     rec.arg_cages[5] = arg6cage;
 
-    if (sign_record_detached(&rec, witness_pubkey, witness_privkey, sig) != 0) {
+    if (sign_record_detached(&rec, ctx->pubkey, ctx->privkey, sig) != 0) {
+        pthread_mutex_unlock(&ctx->lock);
         fprintf(stderr, "[WitnessGrate] sign_record_detached failed\n");
         assert(0);
     }
+
+    pthread_mutex_unlock(&ctx->lock);
 
     emit_signed_record(&rec, sig);
 
@@ -263,7 +403,9 @@ static int signed_forward(uint64_t syscallno,
     );
 }
 
-/* ---------------- witness handlers ---------------- */
+/* ============================================================
+ * Witness handlers
+ * ============================================================ */
 
 int execve_witness(uint64_t cageid,
                    uint64_t arg1, uint64_t arg1cage,
@@ -329,7 +471,9 @@ int write_witness(uint64_t cageid,
                           arg6, arg6cage);
 }
 
-/* ---------------- registration ---------------- */
+/* ============================================================
+ * Registration
+ * ============================================================ */
 
 static void register_witness_handlers(int cageid, int grateid) {
     uint64_t execve_ptr = (uint64_t)(uintptr_t)&execve_witness;
@@ -367,42 +511,89 @@ static void register_witness_handlers(int cageid, int grateid) {
            cageid, grateid);
 }
 
-/* ---------------- main ---------------- */
+/* ============================================================
+ * Runtime init
+ * ============================================================ */
+
+static void init_witness_runtime(void) {
+    memset(witness_ctxs, 0, sizeof(witness_ctxs));
+}
+
+/* ============================================================
+ * Main
+ * ============================================================ */
 
 int main(int argc, char *argv[]) {
+    int sync_pipe[2];
+    int grateid;
+    pid_t pid;
+    int status;
+
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <target_program> [target args...]\n", argv[0]);
         assert(0);
     }
 
     init_witness_log();
+    init_witness_runtime();
 
-    init_witness_keys();
-    emit_public_key();
-    log_line("=== witness keypair generated ===");
-
-    int grateid = getpid();
+    grateid = getpid();
     printf("[WitnessGrate] Start grate pid=%d\n", grateid);
 
-    pid_t pid = fork();
+    if (pipe(sync_pipe) < 0) {
+        perror("[WitnessGrate] pipe failed");
+        assert(0);
+    }
+
+    pid = fork();
     if (pid < 0) {
         perror("[WitnessGrate] fork failed");
         assert(0);
-    } else if (pid == 0) {
-        int cageid = getpid();
+    }
 
-        printf("[WitnessGrate] Child cage=%d registering handlers with grate=%d\n",
-               cageid, grateid);
+    if (pid == 0) {
+        /* child: wait until parent finishes ctx init + registration */
+        char ready = 0;
 
-        register_witness_handlers(cageid, grateid);
+        close(sync_pipe[1]);
+
+        if (read(sync_pipe[0], &ready, 1) != 1) {
+            perror("[WitnessGrate] child sync read failed");
+            assert(0);
+        }
+
+        close(sync_pipe[0]);
 
         if (execv(argv[1], &argv[1]) == -1) {
             perror("[WitnessGrate] execv failed");
             assert(0);
         }
+
+        assert(0);
     }
 
-    int status;
+    /* parent: initialize per-cage witness state and register handlers */
+    close(sync_pipe[0]);
+
+    {
+        int cageid = pid;
+
+        printf("[WitnessGrate] Parent preparing child cage=%d with grate=%d\n",
+               cageid, grateid);
+
+        (void)get_or_create_witness_ctx((uint64_t)cageid);
+        log_line("=== witness keypair generated for cage ===");
+
+        register_witness_handlers(cageid, grateid);
+
+        if (write(sync_pipe[1], "R", 1) != 1) {
+            perror("[WitnessGrate] parent sync write failed");
+            assert(0);
+        }
+
+        close(sync_pipe[1]);
+    }
+
     while (wait(&status) > 0) {
         if (status != 0) {
             fprintf(stderr, "[WitnessGrate] FAIL: child exited with status %d\n", status);
