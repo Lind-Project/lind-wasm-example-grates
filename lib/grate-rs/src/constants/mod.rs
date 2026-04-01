@@ -8,3 +8,5 @@ pub mod lind {
 
 pub mod syscall_numbers;
 pub use syscall_numbers::*;
+
+pub mod error;
