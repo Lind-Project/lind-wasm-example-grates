@@ -1,12 +1,14 @@
 //! Tee grate — duplicates syscalls across two independent handler chains.
 //!
 //! Usage:
-//!   tee-grate --primary <primary-grate> --secondary <secondary-grate> \
-//!             [--log <logfile>] [--buffer-limit <bytes>] \
-//!             -- <program> [args...]
+//!   tee-grate [--log <logfile>] [--buffer-limit <bytes>] \
+//!             %{ <secondary-grate> [secondary-args...] %} <primary-chain...>
 //!
-//! Or inline clamping style:
-//!   tee-grate %{ <secondary-grate> %} <program> [args...]
+//! Everything inside `%{ %}` is the secondary grate chain. Everything after
+//! `%}` is the primary chain (the normal grate composition continues).
+//!
+//! Example:
+//!   tee-grate %{ imfs-grate %} strace-grate cage_binary args...
 //!
 //! The tee grate interposes on register_handler (1001), exec (59), fork (57),
 //! and exit (60). When clamped grates register handlers, tee captures both the
@@ -37,6 +39,7 @@ use grate_rs::constants::mman::*;
 
 struct TeeConfig {
     /// The full exec chain passed to the first child.
+    /// Contains: [secondary-grates..., "%}", primary-chain...]
     exec_chain: Vec<String>,
     /// Path to log file for secondary errors (optional).
     log_path: Option<String>,
@@ -44,76 +47,62 @@ struct TeeConfig {
     buffer_limit: usize,
 }
 
+/// Parse argv using the clamping syntax (matches namespace-grate).
+///
+/// Expected: tee-grate [--log <file>] [--buffer-limit <n>] %{ secondary... %} primary-chain...
+///
+/// After parsing:
+///   exec_chain = ["secondary-grate", ..., "%}", "primary-grate", ..., "cage", "args"]
 fn parse_argv(args: Vec<String>) -> Result<TeeConfig, String> {
-    let mut primary: Option<String> = None;
-    let mut secondary: Option<String> = None;
     let mut log_path: Option<String> = None;
     let mut buffer_limit = DEFAULT_SECONDARY_BUFFER_LIMIT;
-    let mut app_args: Vec<String> = Vec::new();
     let mut i = 0;
 
-    // Check for %{ %} inline style first.
-    if args.iter().any(|a| a == "%{") {
-        // Inline style: tee-grate %{ secondary-grate %} app args...
-        // Everything inside %{ %} is the secondary exec chain.
-        // Everything after %} is the app.
-        // Primary is whatever is stacked below tee in the normal grate chain.
-        let exec_chain: Vec<String> = args.to_vec();
-        if !exec_chain.iter().any(|a| a == "%}") {
-            return Err("missing %} in inline tee syntax".into());
-        }
-        return Ok(TeeConfig {
-            exec_chain,
-            log_path: None,
-            buffer_limit,
-        });
-    }
-
-    // --primary/--secondary style.
+    // Parse tee-grate options before %{.
     while i < args.len() {
         match args[i].as_str() {
-            "--primary" => {
-                i += 1;
-                if i >= args.len() { return Err("--primary requires an argument".into()); }
-                primary = Some(args[i].clone());
-            }
-            "--secondary" => {
-                i += 1;
-                if i >= args.len() { return Err("--secondary requires an argument".into()); }
-                secondary = Some(args[i].clone());
-            }
             "--log" => {
                 i += 1;
                 if i >= args.len() { return Err("--log requires an argument".into()); }
                 log_path = Some(args[i].clone());
+                i += 1;
             }
             "--buffer-limit" => {
                 i += 1;
                 if i >= args.len() { return Err("--buffer-limit requires an argument".into()); }
                 buffer_limit = args[i].parse().map_err(|_| "--buffer-limit must be a number")?;
+                i += 1;
             }
-            "--" => {
-                // Everything after -- is the app command line.
-                app_args = args[i + 1..].to_vec();
+            "%{" => {
+                i += 1; // consume %{
                 break;
             }
             other => {
-                return Err(format!("unexpected argument: {}", other));
+                if let Some(val) = other.strip_prefix("--log=") {
+                    log_path = Some(val.to_string());
+                    i += 1;
+                } else if let Some(val) = other.strip_prefix("--buffer-limit=") {
+                    buffer_limit = val.parse().map_err(|_| "--buffer-limit must be a number")?;
+                    i += 1;
+                } else {
+                    return Err(format!("unexpected argument before %{{: {}", other));
+                }
             }
         }
-        i += 1;
     }
 
-    let primary = primary.ok_or("--primary is required")?;
-    let secondary = secondary.ok_or("--secondary is required")?;
-    if app_args.is_empty() {
-        return Err("missing -- <program> [args...]".into());
+    if i >= args.len() {
+        return Err("missing %{ ... %} block".into());
     }
 
-    // Build exec chain: primary secondary app args...
-    // The primary grate forks and execs the secondary, which forks and execs the app.
-    let mut exec_chain = vec![primary, secondary];
-    exec_chain.extend(app_args);
+    // Everything from here is the exec chain (secondary args, %}, primary chain).
+    // Passed as-is to the first clamped grate — the %} boundary is detected
+    // at exec time by exec_handler.
+    let exec_chain: Vec<String> = args[i..].to_vec();
+
+    if !exec_chain.contains(&"%}".to_string()) {
+        return Err("missing %} in command line".into());
+    }
 
     Ok(TeeConfig {
         exec_chain,
@@ -561,8 +550,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.is_empty() {
-        eprintln!("Usage: tee-grate --primary <grate> --secondary <grate> [--log <file>] -- <program> [args...]");
-        eprintln!("   or: tee-grate %{{ <secondary-grate> %}} <program> [args...]");
+        eprintln!("Usage: tee-grate [--log <file>] [--buffer-limit <n>] %{{ <secondary> %}} <primary-chain...>");
         std::process::exit(1);
     }
 
