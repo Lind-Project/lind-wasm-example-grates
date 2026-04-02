@@ -1,9 +1,9 @@
-// readonly-grate blocks all writes unconditionally
-// by returning EPERM (operation not permitted).
+// write_filter-grate blocks all write related calls unconditionally
+// for files with .log extension by returning EPERM (operation not permitted).
 
 use grate_rs::{
     GrateBuilder, GrateError,
-    constants::{SYS_OPEN, SYS_WRITE, error::EPERM},
+    constants::{SYS_OPEN, SYS_PWRITE, SYS_WRITE, SYS_WRITEV, error::EPERM},
     copy_data_between_cages, getcageid, make_threei_call,
 };
 use std::{path::Path, sync::Mutex};
@@ -167,6 +167,138 @@ extern "C" fn write_syscall(
     EPERM
 }
 
+// writev() syscall handler
+extern "C" fn writev_syscall(
+    cageid: u64,
+    fd: u64,
+    fd_cage: u64,
+    iovec: u64,
+    iovec_cage: u64,
+    vlen: u64,
+    vlen_cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let this_cage = getcageid();
+
+    // acquire mutex guard
+    let mut lock_guard = FILE.lock().unwrap();
+
+    // set is_log to true if file needs to be written
+    // has .log extension
+    let is_log = lock_guard
+        .as_ref()
+        .map(|f| f.log_ext && f.fd == fd)
+        .unwrap_or(false);
+
+    // empty File struct
+    if is_log {
+        lock_guard.take();
+    }
+
+    // explicitly drop the lock
+    drop(lock_guard);
+
+    if is_log {
+        let ret = match make_threei_call(
+            SYS_WRITEV as u32,
+            0,
+            this_cage,
+            fd_cage,
+            fd,
+            fd_cage,
+            iovec,
+            iovec_cage,
+            vlen,
+            vlen_cage,
+            arg4,
+            arg4cage,
+            arg5,
+            arg5cage,
+            arg6,
+            arg6cage,
+            0,
+        ) {
+            Ok(ret) => ret,
+            Err(_) => -1,
+        };
+        return ret;
+    }
+
+    // return EPERM (Operation not permitted)
+    EPERM
+}
+
+// pwrite() syscall handler
+extern "C" fn pwrite_syscall(
+    cageid: u64,
+    fd: u64,
+    fd_cage: u64,
+    buf: u64,
+    buf_cage: u64,
+    count: u64,
+    count_cage: u64,
+    pos: u64,
+    pos_cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let this_cage = getcageid();
+
+    // acquire mutex guard
+    let mut lock_guard = FILE.lock().unwrap();
+
+    // set is_log to true if file needs to be written
+    // has .log extension
+    let is_log = lock_guard
+        .as_ref()
+        .map(|f| f.log_ext && f.fd == fd)
+        .unwrap_or(false);
+
+    // empty File struct
+    if is_log {
+        lock_guard.take();
+    }
+
+    // explicitly drop the lock
+    drop(lock_guard);
+
+    if is_log {
+        let ret = match make_threei_call(
+            SYS_PWRITE as u32,
+            0,
+            this_cage,
+            fd_cage,
+            fd,
+            fd_cage,
+            buf,
+            buf_cage,
+            count,
+            count_cage,
+            pos,
+            pos_cage,
+            arg5,
+            arg5cage,
+            arg6,
+            arg6cage,
+            0,
+        ) {
+            Ok(ret) => ret,
+            Err(_) => -1,
+        };
+        return ret;
+    }
+
+    // return EPERM (Operation not permitted)
+    EPERM
+}
+
 fn main() {
     // vector to store args passed along with the grate
     let argv = std::env::args().skip(1).collect::<Vec<_>>();
@@ -175,6 +307,8 @@ fn main() {
     GrateBuilder::new()
         .register(SYS_OPEN, open_syscall)
         .register(SYS_WRITE, write_syscall)
+        .register(SYS_PWRITE, pwrite_syscall)
+        .register(SYS_WRITEV, writev_syscall)
         .teardown(|result: Result<i32, GrateError>| println!("Result: {:#?}", result))
         .run(argv);
 }
