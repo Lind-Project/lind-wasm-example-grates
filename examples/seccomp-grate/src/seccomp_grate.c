@@ -8,7 +8,7 @@
 
 int main(int argc, char *argv[]) {
   if (argc < 3) {
-    fprintf(stderr, "Usage: %s <seccomp-config.ini> <cage_binary> [args...]\n",
+    fprintf(stderr, "Usage: %s <seccomp-config.conf> <cage_binary> [args...]\n",
             argv[0]);
     exit(EXIT_FAILURE);
   }
@@ -53,7 +53,6 @@ int main(int argc, char *argv[]) {
   sem_post(sem);
 
   int status;
-  int w;
 
   wait(&status);
 

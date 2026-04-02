@@ -23,9 +23,6 @@ typedef int (*syscall_handler_t)(uint64_t cageid, uint64_t arg1,
                                  uint64_t arg5cage, uint64_t arg6,
                                  uint64_t arg6cage);
 
-// syscall handler table
-extern syscall_handler_t syscall_handler_table[MAX_SYSCALLS];
-
 // lookup mapping structure
 typedef struct {
   const char *name;

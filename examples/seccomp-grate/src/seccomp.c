@@ -5,9 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-// syscall handler table
-syscall_handler_t syscall_handler_table[MAX_SYSCALLS] = {0};
-
 // default every syscall to blacklist for safety
 seccomp_mode_t syscall_mode[MAX_SYSCALLS] = {BL};
 
@@ -122,6 +119,16 @@ void parse_config(const char *filename) {
     for (size_t i = 0; i < NUM_SYSCALLS; i++) {
       if (strcmp(trimmed, syscall_map[i].name) == 0) {
         int sys_num = syscall_map[i].num;
+
+        // detect duplicate syscall definitions
+        if (explicitly_set[sys_num]) {
+          fprintf(
+              stderr,
+              "Config Error: Duplicate definition of syscall '%s' on line %d\n",
+              trimmed, line_num);
+          exit(EXIT_FAILURE);
+        }
+
         syscall_mode[sys_num] = current_mode;
         explicitly_set[sys_num] = 1;
         found = 1;

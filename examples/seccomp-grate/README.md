@@ -30,7 +30,7 @@ The seccomp-grate uses a configuration file to define its security boundaries. T
 
 ### Syntax Rules
 
-* System calls must be listed one per line using their standard `SYS_` prefix (e.g., SYS_read). Supported syscalls are listed (here)[https://github.com/Lind-Project/lind-wasm/blob/main/src/rawposix/src/syscall_table.rs].
+* System calls must be listed one per line using their standard `SYS_` prefix (e.g., SYS_read). Supported syscalls are listed [here](https://github.com/Lind-Project/lind-wasm/blob/main/src/rawposix/src/syscall_table.rs).
 * Empty lines and comments (lines beginning with # or ;) are ignored by the parser.
 
 ### Example Configuration
