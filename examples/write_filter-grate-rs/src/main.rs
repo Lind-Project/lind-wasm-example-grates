@@ -119,35 +119,48 @@ extern "C" fn write_syscall(
 ) -> i32 {
     let this_cage = getcageid();
 
-    // forwards write call only if .log file was opened
+    // acquire mutex guard
     let mut lock_guard = FILE.lock().unwrap();
-    if let Some(ref file_data) = *lock_guard {
-        if file_data.log_ext == true && file_data.fd == fd {
-            let ret = match make_threei_call(
-                SYS_WRITE as u32,
-                0,
-                this_cage,
-                fd_cage,
-                fd,
-                fd_cage,
-                buf,
-                buf_cage,
-                count,
-                count_cage,
-                arg4,
-                arg4cage,
-                arg5,
-                arg5cage,
-                arg6,
-                arg6cage,
-                0,
-            ) {
-                Ok(ret) => ret,
-                Err(_) => -1,
-            };
-            lock_guard.take();
-            return ret;
-        }
+
+    // set is_log to true if file needs to be written
+    // has .log extension
+    let is_log = lock_guard
+        .as_ref()
+        .map(|f| f.log_ext && f.fd == fd)
+        .unwrap_or(false);
+
+    // empty File struct
+    if is_log {
+        lock_guard.take();
+    }
+
+    // explicitly drop the lock
+    drop(lock_guard);
+
+    if is_log {
+        let ret = match make_threei_call(
+            SYS_WRITE as u32,
+            0,
+            this_cage,
+            fd_cage,
+            fd,
+            fd_cage,
+            buf,
+            buf_cage,
+            count,
+            count_cage,
+            arg4,
+            arg4cage,
+            arg5,
+            arg5cage,
+            arg6,
+            arg6cage,
+            0,
+        ) {
+            Ok(ret) => ret,
+            Err(_) => -1,
+        };
+        return ret;
     }
 
     // return EPERM (Operation not permitted)
