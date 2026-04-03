@@ -560,39 +560,39 @@ pub extern "C" fn fork_handler(
         }
     }
 
-    // --- Phase 2: fork + copy fdtable + bump refcounts, all under
-    //     CAGE_INIT_LOCK.  The child starts running after forward_syscall
-    //     returns but immediately blocks in lookup_ipc_fd (which acquires
-    //     the same lock), so it cannot touch fdtables or pipe refcounts
-    //     until we are done.
-    let _guard = ipc::CAGE_INIT_LOCK.lock().unwrap();
+    // --- Phase 2: fork + copy fdtable + bump refcounts, all under the
+    //     shared-memory fork semaphore.  The child starts running after
+    //     forward_syscall returns but blocks in lookup_ipc_fd (which also
+    //     acquires the semaphore), so it cannot touch fdtables or pipe
+    //     refcounts until we are done.
+    ipc::fork_lock();
 
     let ret = forward_syscall(SYS_CLONE, cage_id, &args, &arg_cages);
 
     if ret <= 0 {
+        ipc::fork_unlock();
         return ret;
     }
 
     let child_cage_id = ret as u64;
 
-    // Copy the parent's fdtable to the child.
+    // Copy the parent's fdtable to the child entry-by-entry.
     //
-    // Race (unlikely now, but defensive): the child may have already called
-    // ensure_cage_exists, creating an empty table.  copy_fdtable_for_cage
-    // would panic, so fall back to entry-by-entry copy.
-    if fdtables::check_cage_exists(child_cage_id) {
-        for (fd, entry) in &parent_fds {
-            let _ = fdtables::get_specific_virtual_fd(
-                child_cage_id,
-                *fd,
-                entry.fdkind,
-                entry.underfd,
-                entry.should_cloexec,
-                entry.perfdinfo,
-            );
-        }
-    } else {
-        let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id);
+    // We intentionally avoid copy_fdtable_for_cage because it copies a
+    // [Option<FDTableEntry>; 1024] (~24KB) onto the WASM stack which can
+    // overflow and corrupt memory.
+    if !fdtables::check_cage_exists(child_cage_id) {
+        fdtables::init_empty_cage(child_cage_id);
+    }
+    for (fd, entry) in &parent_fds {
+        let _ = fdtables::get_specific_virtual_fd(
+            child_cage_id,
+            *fd,
+            entry.fdkind,
+            entry.underfd,
+            entry.should_cloexec,
+            entry.perfdinfo,
+        );
     }
 
     // Bump refcounts using the pre-collected Arc references.
@@ -616,7 +616,7 @@ pub extern "C" fn fork_handler(
         }
     }
 
-    drop(_guard); // CAGE_INIT_LOCK released — child can now proceed.
+    ipc::fork_unlock(); // child can now proceed
 
     child_cage_id as i32
 }
@@ -1197,6 +1197,7 @@ pub extern "C" fn shutdown_handler(
 fn main() {
     let grate_cage_id = getcageid();
     init(grate_cage_id);
+    ipc::init_fork_sem();
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
 

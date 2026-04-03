@@ -13,19 +13,63 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Protects fdtable cage initialization to prevent TOCTOU races.
+use grate_rs::ffi::{sem_t, sem_init, sem_wait, sem_post, sem_destroy, mmap, munmap};
+use grate_rs::constants::mman::*;
+use core::ffi::c_void;
+
+/// Shared-memory semaphore used as a fork gate.
 ///
-/// Acquired by:
-///   - `ensure_cage_exists` (check + init must be atomic)
-///   - `lookup_ipc_fd` (blocks child until fork setup completes)
-///   - `fork_handler` (during fdtable copy for the child)
+/// std::sync::Mutex does NOT synchronize across Lind runtime threads (each
+/// forked cage runs on its own runtime thread).  POSIX semaphores on
+/// mmap(MAP_SHARED) memory DO work because the memory is physically shared.
 ///
-/// Lock ordering: CAGE_INIT_LOCK → IPC_STATE (never reversed).
-/// `create_pipe` calls ensure_cage_exists while IPC_STATE is held, which is
-/// IPC_STATE → CAGE_INIT_LOCK — compatible because fork_handler acquires them
-/// sequentially (not nested).
-pub static CAGE_INIT_LOCK: Mutex<()> = Mutex::new(());
+/// The semaphore is allocated once in `init_fork_sem()` and its address stored
+/// here.  Value 0 means a fork is in progress (child blocks); value 1 means
+/// idle (child proceeds immediately).
+static FORK_SEM_ADDR: AtomicU64 = AtomicU64::new(0);
+
+/// Allocate and initialise the fork semaphore.  Called once from main().
+pub fn init_fork_sem() {
+    let ptr = unsafe {
+        mmap(
+            std::ptr::null_mut(),
+            std::mem::size_of::<sem_t>(),
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED | MAP_ANON,
+            -1,
+            0,
+        )
+    };
+    if ptr == MAP_FAILED {
+        panic!("[ipc-grate] mmap for fork semaphore failed");
+    }
+    if unsafe { sem_init(ptr as *mut sem_t, 1, 1) } < 0 {
+        panic!("[ipc-grate] sem_init for fork semaphore failed");
+    }
+    FORK_SEM_ADDR.store(ptr as u64, Ordering::Release);
+}
+
+fn fork_sem() -> *mut sem_t {
+    FORK_SEM_ADDR.load(Ordering::Acquire) as *mut sem_t
+}
+
+/// Acquire the fork gate (blocks if a fork is in progress).
+pub fn fork_lock() {
+    let sem = fork_sem();
+    if !sem.is_null() {
+        unsafe { sem_wait(sem) };
+    }
+}
+
+/// Release the fork gate.
+pub fn fork_unlock() {
+    let sem = fork_sem();
+    if !sem.is_null() {
+        unsafe { sem_post(sem) };
+    }
+}
 
 use crate::pipe::{PipeBuffer, PIPE_CAPACITY};
 use crate::socket::{SocketRegistry, IPC_SOCKET};
@@ -154,15 +198,18 @@ impl IpcState {
 /// Check if a fd belongs to the IPC grate (pipe endpoint or socket).
 /// Returns (underfd, fdkind, flags) or None if it's not ours.
 ///
-/// Acquires CAGE_INIT_LOCK so that a freshly-forked child blocks here until
-/// the parent's fork_handler has finished copying the fdtable + bumping
-/// refcounts.  Without this, the child would see an empty (or missing)
-/// fdtable, causing pipe operations to be forwarded to the kernel (EBADF)
-/// or triggering fdtables assertion panics.
+/// If the cage doesn't exist in fdtables (fork in progress on another thread),
+/// briefly acquires the shared-memory fork semaphore to block until the
+/// parent's fork_handler has finished copying the fdtable + bumping refcounts.
 pub fn lookup_ipc_fd(cage_id: u64, fd: u64) -> Option<(u64, u32, i32)> {
-    let _guard = CAGE_INIT_LOCK.lock().unwrap();
     if !fdtables::check_cage_exists(cage_id) {
-        return None;
+        // Fork is likely in progress — block until parent finishes setup.
+        fork_lock();
+        fork_unlock();
+        // If cage still doesn't exist, it's genuinely unknown.
+        if !fdtables::check_cage_exists(cage_id) {
+            return None;
+        }
     }
     match fdtables::translate_virtual_fd(cage_id, fd) {
         Ok(entry) if entry.fdkind == IPC_PIPE || entry.fdkind == IPC_SOCKET => {
@@ -189,14 +236,14 @@ pub fn init(grate_cage_id: u64) {
 
 /// Ensure a cage exists in fdtables. Idempotent — safe to call multiple times.
 ///
-/// Acquires CAGE_INIT_LOCK to prevent the TOCTOU race where two concurrent
-/// handlers both see the cage as missing and both try to init it (the second
-/// would panic on fdtables' `assert!(!check_cage_exists(...))`).
+/// Uses the shared-memory fork semaphore to prevent the TOCTOU race where two
+/// concurrent handlers both see the cage as missing and both try to init it.
 pub fn ensure_cage_exists(cage_id: u64) {
-    let _guard = CAGE_INIT_LOCK.lock().unwrap();
+    fork_lock();
     if !fdtables::check_cage_exists(cage_id) {
         fdtables::init_empty_cage(cage_id);
     }
+    fork_unlock();
 }
 
 // =====================================================================
