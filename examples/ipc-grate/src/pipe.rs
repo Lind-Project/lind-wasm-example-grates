@@ -4,17 +4,26 @@
 //! split into Producer (write) and Consumer (read) halves, with atomic
 //! refcounts for each endpoint and an EOF flag.
 //!
+//! # Thread safety
+//!
+//! `ringbuf`'s Producer and Consumer are a lock-free SPSC pair — they are
+//! designed to be used from two separate threads without external locking.
+//! We do NOT wrap them in Mutex because std::sync::Mutex does not synchronize
+//! across Lind runtime threads (each forked cage runs on its own runtime
+//! thread).  Using Mutex here would give a false sense of safety and actively
+//! corrupt the ringbuf state when both sides "acquire" what they think is
+//! exclusive access.
+//!
 //! # Blocking
 //!
-//! Spin-loop with `thread::yield_now()` — matches the existing grate model
-//! (synchronous single-threaded, no async runtime).
+//! Spin-loop with `thread::yield_now()`.
 //!
 //! # Capacity
 //!
 //! Default 65,536 bytes (same as safeposix PIPE_CAPACITY and Linux default).
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Mutex;
+use std::cell::UnsafeCell;
 
 use ringbuf::RingBuffer;
 use ringbuf::{Consumer, Producer};
@@ -25,13 +34,12 @@ pub const PIPE_CAPACITY: usize = 65536;
 /// A userspace pipe backed by a `ringbuf` ring buffer.
 ///
 /// Both endpoints (read and write) share the same PipeBuffer via Arc.
-/// The ring buffer is split into a Producer and Consumer, each behind
-/// a Mutex for thread safety (matching safeposix-rust's approach).
+/// Producer and Consumer are lock-free SPSC — no Mutex needed.
 pub struct PipeBuffer {
-    /// Producer half — writers push bytes here.
-    producer: Mutex<Producer<u8>>,
-    /// Consumer half — readers pull bytes here.
-    consumer: Mutex<Consumer<u8>>,
+    /// Producer half — writers push bytes here.  Only accessed from writer thread.
+    producer: UnsafeCell<Producer<u8>>,
+    /// Consumer half — readers pull bytes here.  Only accessed from reader thread.
+    consumer: UnsafeCell<Consumer<u8>>,
     /// Number of open write-end file descriptors.
     pub write_refs: AtomicU32,
     /// Number of open read-end file descriptors.
@@ -40,6 +48,11 @@ pub struct PipeBuffer {
     pub eof: AtomicBool,
 }
 
+// SAFETY: Producer and Consumer are SPSC halves designed for cross-thread use.
+// Each half is only accessed from one side (reader or writer) at a time.
+unsafe impl Send for PipeBuffer {}
+unsafe impl Sync for PipeBuffer {}
+
 impl PipeBuffer {
     /// Create a new pipe with the given capacity.
     pub fn new(capacity: usize) -> Self {
@@ -47,8 +60,8 @@ impl PipeBuffer {
         let (prod, cons) = rb.split();
 
         PipeBuffer {
-            producer: Mutex::new(prod),
-            consumer: Mutex::new(cons),
+            producer: UnsafeCell::new(prod),
+            consumer: UnsafeCell::new(cons),
             write_refs: AtomicU32::new(1),
             read_refs: AtomicU32::new(1),
             eof: AtomicBool::new(false),
@@ -66,13 +79,11 @@ impl PipeBuffer {
         let read_count = count.min(dst.len());
 
         loop {
-            // Try to read from the consumer.
-            {
-                let mut cons = self.consumer.lock().unwrap();
-                let n = cons.pop_slice(&mut dst[..read_count]);
-                if n > 0 {
-                    return n as i32;
-                }
+            // SAFETY: only one reader thread accesses the consumer at a time
+            // (SPSC contract — one consumer per pipe).
+            let n = unsafe { (*self.consumer.get()).pop_slice(&mut dst[..read_count]) };
+            if n > 0 {
+                return n as i32;
             }
 
             // Buffer is empty. Check for EOF.
@@ -105,12 +116,12 @@ impl PipeBuffer {
         let mut total_written = 0;
 
         while total_written < write_count {
-            // Try to write what we can.
-            {
-                let mut prod = self.producer.lock().unwrap();
-                let n = prod.push_slice(&src[total_written..write_count]);
-                total_written += n;
-            }
+            // SAFETY: only one writer thread accesses the producer at a time
+            // (SPSC contract — one producer per pipe).
+            let n = unsafe {
+                (*self.producer.get()).push_slice(&src[total_written..write_count])
+            };
+            total_written += n;
 
             if total_written >= write_count {
                 break;
@@ -160,14 +171,14 @@ impl PipeBuffer {
 
     /// Check if the pipe has data available for reading.
     pub fn has_data(&self) -> bool {
-        let cons = self.consumer.lock().unwrap();
-        !cons.is_empty()
+        // SAFETY: read-only length check, safe from any thread.
+        unsafe { !(*self.consumer.get()).is_empty() }
     }
 
     /// Check if the pipe has space available for writing.
     pub fn has_space(&self) -> bool {
-        let prod = self.producer.lock().unwrap();
-        !prod.is_full()
+        // SAFETY: read-only length check, safe from any thread.
+        unsafe { !(*self.producer.get()).is_full() }
     }
 }
 
