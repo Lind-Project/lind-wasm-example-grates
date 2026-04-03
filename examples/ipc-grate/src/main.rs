@@ -641,6 +641,14 @@ pub extern "C" fn exec_handler(
     // Close cloexec fds.
     fdtables::empty_fds_for_exec(cage_id);
 
+    // Reserve fds 0/1/2 (stdin/stdout/stderr) so that pipe() and socket()
+    // never allocate them.  Without this, the first pipe() gets fds 0 and 1,
+    // which hijacks stdout — every printf goes into a pipe instead of the
+    // console.  fdkind=0 marks these as non-IPC (lookup_ipc_fd ignores them).
+    for fd in 0..3u64 {
+        let _ = fdtables::get_specific_virtual_fd(cage_id, fd, 0, fd, false, 0);
+    }
+
     forward_syscall(
         SYS_EXEC, cage_id,
         &[arg1, arg2, arg3, arg4, arg5, arg6],
