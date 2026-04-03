@@ -1,4 +1,4 @@
-// readonly-grate blocks all writes unconditionally
+// block_sys_write-grate blocks all writes unconditionally
 // by returning EPERM (operation not permitted).
 
 use grate_rs::{
@@ -22,7 +22,7 @@ extern "C" fn write_syscall(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    EPERM // return EPERM (Opertation no permitted);
+    EPERM // return EPERM (Operation not permitted);
 }
 
 fn main() {
