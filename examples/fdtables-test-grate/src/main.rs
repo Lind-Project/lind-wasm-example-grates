@@ -7,10 +7,58 @@
 //! All handlers do fdtables bookkeeping + forward the real syscall.
 //! Minimal output — only prints on errors.
 
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use grate_rs::constants::*;
-use grate_rs::{GrateBuilder, GrateError, getcageid, make_threei_call};
+use grate_rs::{GrateBuilder, GrateError, copy_data_between_cages, getcageid, make_threei_call};
 
 const FDT_KIND: u32 = 1;
+
+// =====================================================================
+//  Mutex / atomic contention probes
+//
+//  The write handler increments these on every call. After fork, both
+//  parent and child cage write through this grate, so the counters get
+//  hit from two runtime threads.
+//
+//  MUTEX_COUNT: incremented under std::sync::Mutex.
+//  ATOMIC_COUNT: incremented with AtomicU64::fetch_add.
+//  UNSYNC_COUNT: incremented with NO synchronisation (plain read-modify-write).
+//
+//  If Mutex actually works cross-thread:
+//    MUTEX_COUNT == ATOMIC_COUNT == total writes
+//  If Mutex is a no-op across threads:
+//    MUTEX_COUNT < ATOMIC_COUNT  (lost updates)
+//  If atomics don't work either:
+//    ATOMIC_COUNT < total writes
+//  UNSYNC_COUNT is the control — expected to lose updates under concurrency.
+// =====================================================================
+
+static MUTEX_COUNTER: Mutex<u64> = Mutex::new(0);
+static ATOMIC_COUNTER: AtomicU64 = AtomicU64::new(0);
+static UNSYNC_COUNTER: AtomicU64 = AtomicU64::new(0); // abused as plain u64 via load+store
+
+/// Read counter values and write them back to the cage's buffer.
+/// Triggered by read() on fd 99 (magic fd, see C test).
+fn report_counters(cage_id: u64, buf_ptr: u64, buf_cage: u64) -> i32 {
+    let mutex_val = *MUTEX_COUNTER.lock().unwrap();
+    let atomic_val = ATOMIC_COUNTER.load(Ordering::SeqCst);
+    let unsync_val = UNSYNC_COUNTER.load(Ordering::Relaxed);
+
+    let report = format!("mutex={} atomic={} unsync={}\n", mutex_val, atomic_val, unsync_val);
+    let bytes = report.as_bytes();
+
+    let grate_cage = getcageid();
+    let _ = copy_data_between_cages(
+        grate_cage, buf_cage,
+        bytes.as_ptr() as u64, grate_cage,
+        buf_ptr, buf_cage,
+        bytes.len() as u64, 0,
+    );
+
+    bytes.len() as i32
+}
 
 fn forward(
     nr: u64, calling_cage: u64,
@@ -166,8 +214,15 @@ pub extern "C" fn read_handler(
     arg5: u64, arg5cage: u64, arg6: u64, arg6cage: u64,
 ) -> i32 {
     let cage_id = arg1cage;
+    let fd = arg1;
+
+    // Magic fd 99: report counter values instead of forwarding.
+    if fd == 99 {
+        return report_counters(cage_id, arg2, arg2cage);
+    }
+
     if fdtables::check_cage_exists(cage_id) {
-        let _ = fdtables::translate_virtual_fd(cage_id, arg1);
+        let _ = fdtables::translate_virtual_fd(cage_id, fd);
     }
     forward(SYS_READ, cage_id,
         &[arg1, arg2, arg3, arg4, arg5, arg6],
@@ -181,8 +236,24 @@ pub extern "C" fn write_handler(
     arg5: u64, arg5cage: u64, arg6: u64, arg6cage: u64,
 ) -> i32 {
     let cage_id = arg1cage;
+    let fd = arg1;
+
+    // Bump contention counters on every write (except stdout/stderr).
+    if fd > 2 {
+        // Mutex-protected increment.
+        {
+            let mut count = MUTEX_COUNTER.lock().unwrap();
+            *count += 1;
+        }
+        // Atomic increment.
+        ATOMIC_COUNTER.fetch_add(1, Ordering::SeqCst);
+        // Unsynchronised increment (deliberate race — control group).
+        let v = UNSYNC_COUNTER.load(Ordering::Relaxed);
+        UNSYNC_COUNTER.store(v + 1, Ordering::Relaxed);
+    }
+
     if fdtables::check_cage_exists(cage_id) {
-        let _ = fdtables::translate_virtual_fd(cage_id, arg1);
+        let _ = fdtables::translate_virtual_fd(cage_id, fd);
     }
     forward(SYS_WRITE, cage_id,
         &[arg1, arg2, arg3, arg4, arg5, arg6],

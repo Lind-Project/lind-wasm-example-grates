@@ -28,6 +28,66 @@ static int tests_passed = 0;
     } \
 } while (0)
 
+/* ── Test 0: Mutex/atomic contention probe ─────────────────────────── */
+/* Parent and child both write 500 times to a file.  The grate bumps
+ * three counters on each write: one under Mutex, one with fetch_add,
+ * one with unsynchronised load+store.  After both finish, we read the
+ * counters via magic fd 99 and check if Mutex/atomic actually work.
+ * Expected total = 1000 (500 parent + 500 child).                    */
+
+static void test_mutex_atomic_probe(void) {
+    printf("\n[test_mutex_atomic_probe]\n");
+
+    int fd = open("/tmp/fdt_probe.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    CHECK("open succeeds", fd >= 0);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* Child: 500 writes. */
+        for (int i = 0; i < 500; i++) {
+            write(fd, "c", 1);
+        }
+        close(fd);
+        _exit(0);
+    }
+
+    /* Parent: 500 writes (concurrent with child). */
+    for (int i = 0; i < 500; i++) {
+        write(fd, "p", 1);
+    }
+
+    int status;
+    waitpid(pid, &status, 0);
+    CHECK("child exited cleanly", WIFEXITED(status) && WEXITSTATUS(status) == 0);
+
+    close(fd);
+    unlink("/tmp/fdt_probe.txt");
+
+    /* Read counters from the grate via magic fd 99. */
+    char buf[128] = {0};
+    ssize_t nr = read(99, buf, sizeof(buf) - 1);
+    if (nr <= 0) {
+        printf("  FAIL: couldn't read counters from grate (nr=%zd)\n", nr);
+        tests_run++;
+        return;
+    }
+    buf[nr] = '\0';
+
+    unsigned long mutex_val = 0, atomic_val = 0, unsync_val = 0;
+    sscanf(buf, "mutex=%lu atomic=%lu unsync=%lu", &mutex_val, &atomic_val, &unsync_val);
+
+    printf("  counters: mutex=%lu atomic=%lu unsync=%lu (expected 1000)\n",
+           mutex_val, atomic_val, unsync_val);
+
+    CHECK("atomic counter == 1000", atomic_val == 1000);
+    CHECK("mutex counter == 1000 (mutex works cross-thread)", mutex_val == 1000);
+    if (unsync_val < 1000) {
+        printf("  (unsync=%lu < 1000 — expected, confirms real concurrency)\n", unsync_val);
+    } else {
+        printf("  (unsync=%lu == 1000 — no concurrency detected, single-threaded?)\n", unsync_val);
+    }
+}
+
 /* ── Test 1: Single open/close ─────────────────────────────────────── */
 
 static void test_single_open_close(void) {
@@ -754,6 +814,9 @@ static void test_rapid_double_fork(void) {
 
 int main(void) {
     printf("=== fdtables stress test ===\n");
+
+    /* Mutex/atomic probe — run first to diagnose cross-thread sync. */
+    test_mutex_atomic_probe();
 
     /* Single-cage tests (no fork). */
     test_single_open_close();
