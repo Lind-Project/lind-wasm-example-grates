@@ -13,63 +13,10 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-use grate_rs::ffi::{sem_t, sem_init, sem_wait, sem_post, sem_destroy, mmap, munmap};
-use grate_rs::constants::mman::*;
-use core::ffi::c_void;
-
-/// Shared-memory semaphore used as a fork gate.
-///
-/// std::sync::Mutex does NOT synchronize across Lind runtime threads (each
-/// forked cage runs on its own runtime thread).  POSIX semaphores on
-/// mmap(MAP_SHARED) memory DO work because the memory is physically shared.
-///
-/// The semaphore is allocated once in `init_fork_sem()` and its address stored
-/// here.  Value 0 means a fork is in progress (child blocks); value 1 means
-/// idle (child proceeds immediately).
-static FORK_SEM_ADDR: AtomicU64 = AtomicU64::new(0);
-
-/// Allocate and initialise the fork semaphore.  Called once from main().
-pub fn init_fork_sem() {
-    let ptr = unsafe {
-        mmap(
-            std::ptr::null_mut(),
-            std::mem::size_of::<sem_t>(),
-            PROT_READ | PROT_WRITE,
-            MAP_SHARED | MAP_ANON,
-            -1,
-            0,
-        )
-    };
-    if ptr == MAP_FAILED {
-        panic!("[ipc-grate] mmap for fork semaphore failed");
-    }
-    if unsafe { sem_init(ptr as *mut sem_t, 1, 1) } < 0 {
-        panic!("[ipc-grate] sem_init for fork semaphore failed");
-    }
-    FORK_SEM_ADDR.store(ptr as u64, Ordering::Release);
-}
-
-fn fork_sem() -> *mut sem_t {
-    FORK_SEM_ADDR.load(Ordering::Acquire) as *mut sem_t
-}
-
-/// Acquire the fork gate (blocks if a fork is in progress).
-pub fn fork_lock() {
-    let sem = fork_sem();
-    if !sem.is_null() {
-        unsafe { sem_wait(sem) };
-    }
-}
-
-/// Release the fork gate.
-pub fn fork_unlock() {
-    let sem = fork_sem();
-    if !sem.is_null() {
-        unsafe { sem_post(sem) };
-    }
-}
+// Neither std::sync::Mutex nor POSIX shared-memory semaphores synchronize
+// across Lind runtime threads.  The only cross-thread primitive that works
+// is DashMap (used by fdtables).  We use fdtables::check_cage_exists as a
+// spin-wait signal: the child spins until its cage appears in the DashMap.
 
 use crate::pipe::{PipeBuffer, PIPE_CAPACITY};
 use crate::socket::{SocketRegistry, IPC_SOCKET};
@@ -198,18 +145,14 @@ impl IpcState {
 /// Check if a fd belongs to the IPC grate (pipe endpoint or socket).
 /// Returns (underfd, fdkind, flags) or None if it's not ours.
 ///
-/// If the cage doesn't exist in fdtables (fork in progress on another thread),
-/// briefly acquires the shared-memory fork semaphore to block until the
-/// parent's fork_handler has finished copying the fdtable + bumping refcounts.
+/// If the cage doesn't exist in fdtables yet (fork in progress on another
+/// runtime thread), spin-waits until it appears.  DashMap's internal locking
+/// provides the cross-thread visibility that std::sync::Mutex and POSIX
+/// semaphores cannot in the Lind WASM environment.
 pub fn lookup_ipc_fd(cage_id: u64, fd: u64) -> Option<(u64, u32, i32)> {
-    if !fdtables::check_cage_exists(cage_id) {
-        // Fork is likely in progress — block until parent finishes setup.
-        fork_lock();
-        fork_unlock();
-        // If cage still doesn't exist, it's genuinely unknown.
-        if !fdtables::check_cage_exists(cage_id) {
-            return None;
-        }
+    // Spin until cage is set up by fork_handler on the parent's thread.
+    while !fdtables::check_cage_exists(cage_id) {
+        std::thread::yield_now();
     }
     match fdtables::translate_virtual_fd(cage_id, fd) {
         Ok(entry) if entry.fdkind == IPC_PIPE || entry.fdkind == IPC_SOCKET => {
@@ -235,15 +178,10 @@ pub fn init(grate_cage_id: u64) {
 }
 
 /// Ensure a cage exists in fdtables. Idempotent — safe to call multiple times.
-///
-/// Uses the shared-memory fork semaphore to prevent the TOCTOU race where two
-/// concurrent handlers both see the cage as missing and both try to init it.
 pub fn ensure_cage_exists(cage_id: u64) {
-    fork_lock();
     if !fdtables::check_cage_exists(cage_id) {
         fdtables::init_empty_cage(cage_id);
     }
-    fork_unlock();
 }
 
 // =====================================================================

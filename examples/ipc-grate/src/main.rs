@@ -560,42 +560,26 @@ pub extern "C" fn fork_handler(
         }
     }
 
-    // --- Phase 2: fork + copy fdtable + bump refcounts, all under the
-    //     shared-memory fork semaphore.  The child starts running after
-    //     forward_syscall returns but blocks in lookup_ipc_fd (which also
-    //     acquires the semaphore), so it cannot touch fdtables or pipe
-    //     refcounts until we are done.
-    ipc::fork_lock();
+    // --- Phase 2: fork, bump refcounts, THEN create child cage in fdtables.
+    //
+    // The child's handlers spin on fdtables::check_cage_exists (via
+    // lookup_ipc_fd) until the cage appears.  By bumping refcounts BEFORE
+    // creating the cage entry, we guarantee the child can't close an
+    // inherited pipe fd and prematurely drop a refcount to zero.
+    //
+    // After copy_fdtable_for_cage (which atomically creates + copies the
+    // cage entry), the child unblocks and sees both correct fds and correct
+    // refcounts.
 
     let ret = forward_syscall(SYS_CLONE, cage_id, &args, &arg_cages);
 
     if ret <= 0 {
-        ipc::fork_unlock();
         return ret;
     }
 
     let child_cage_id = ret as u64;
 
-    // Copy the parent's fdtable to the child entry-by-entry.
-    //
-    // We intentionally avoid copy_fdtable_for_cage because it copies a
-    // [Option<FDTableEntry>; 1024] (~24KB) onto the WASM stack which can
-    // overflow and corrupt memory.
-    if !fdtables::check_cage_exists(child_cage_id) {
-        fdtables::init_empty_cage(child_cage_id);
-    }
-    for (fd, entry) in &parent_fds {
-        let _ = fdtables::get_specific_virtual_fd(
-            child_cage_id,
-            *fd,
-            entry.fdkind,
-            entry.underfd,
-            entry.should_cloexec,
-            entry.perfdinfo,
-        );
-    }
-
-    // Bump refcounts using the pre-collected Arc references.
+    // Bump refcounts FIRST (child is spinning, can't interfere).
     for bump in &bumps {
         match bump {
             RefBump::Pipe { pipe, is_read } => {
@@ -616,7 +600,9 @@ pub extern "C" fn fork_handler(
         }
     }
 
-    ipc::fork_unlock(); // child can now proceed
+    // Now create the child cage in fdtables — this is the signal that
+    // unblocks the child's spin-wait in lookup_ipc_fd.
+    let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id);
 
     child_cage_id as i32
 }
@@ -1197,7 +1183,6 @@ pub extern "C" fn shutdown_handler(
 fn main() {
     let grate_cage_id = getcageid();
     init(grate_cage_id);
-    ipc::init_fork_sem();
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
 
