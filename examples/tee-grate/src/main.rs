@@ -1,7 +1,7 @@
 //! Tee grate — duplicates syscalls across two independent handler chains.
 //!
 //! Usage:
-//!   tee-grate [--log <logfile>] [--buffer-limit <bytes>] \
+//!   tee-grate [--buffer-limit <bytes>] \
 //!             %{ <secondary-grate> [secondary-args...] %} <primary-chain...>
 //!
 //! Everything inside `%{ %}` is the secondary grate chain. Everything after
@@ -41,32 +41,23 @@ struct TeeConfig {
     /// The full exec chain passed to the first child.
     /// Contains: [secondary-grates..., "%}", primary-chain...]
     exec_chain: Vec<String>,
-    /// Path to log file for secondary errors (optional).
-    log_path: Option<String>,
     /// Maximum bytes for secondary buffer.
     buffer_limit: usize,
 }
 
 /// Parse argv using the clamping syntax (matches namespace-grate).
 ///
-/// Expected: tee-grate [--log <file>] [--buffer-limit <n>] %{ secondary... %} primary-chain...
+/// Expected: tee-grate [--buffer-limit <n>] %{ secondary... %} primary-chain...
 ///
 /// After parsing:
 ///   exec_chain = ["secondary-grate", ..., "%}", "primary-grate", ..., "cage", "args"]
 fn parse_argv(args: Vec<String>) -> Result<TeeConfig, String> {
-    let mut log_path: Option<String> = None;
     let mut buffer_limit = DEFAULT_SECONDARY_BUFFER_LIMIT;
     let mut i = 0;
 
     // Parse tee-grate options before %{.
     while i < args.len() {
         match args[i].as_str() {
-            "--log" => {
-                i += 1;
-                if i >= args.len() { return Err("--log requires an argument".into()); }
-                log_path = Some(args[i].clone());
-                i += 1;
-            }
             "--buffer-limit" => {
                 i += 1;
                 if i >= args.len() { return Err("--buffer-limit requires an argument".into()); }
@@ -78,10 +69,7 @@ fn parse_argv(args: Vec<String>) -> Result<TeeConfig, String> {
                 break;
             }
             other => {
-                if let Some(val) = other.strip_prefix("--log=") {
-                    log_path = Some(val.to_string());
-                    i += 1;
-                } else if let Some(val) = other.strip_prefix("--buffer-limit=") {
+                if let Some(val) = other.strip_prefix("--buffer-limit=") {
                     buffer_limit = val.parse().map_err(|_| "--buffer-limit must be a number")?;
                     i += 1;
                 } else {
@@ -106,7 +94,6 @@ fn parse_argv(args: Vec<String>) -> Result<TeeConfig, String> {
 
     Ok(TeeConfig {
         exec_chain,
-        log_path,
         buffer_limit,
     })
 }
@@ -550,7 +537,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.is_empty() {
-        eprintln!("Usage: tee-grate [--log <file>] [--buffer-limit <n>] %{{ <secondary> %}} <primary-chain...>");
+        eprintln!("Usage: tee-grate [--buffer-limit <n>] %{{ <secondary> %}} <primary-chain...>");
         std::process::exit(1);
     }
 
