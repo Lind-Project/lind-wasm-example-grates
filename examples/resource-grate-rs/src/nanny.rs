@@ -4,6 +4,19 @@ use std::time::{Duration, Instant};
 
 use crate::resources::ResourceConfig;
 
+/// Sleep using libc::nanosleep instead of std::thread::sleep.
+/// Lind's WASM sysroot provides nanosleep (syscall 35) but not
+/// clock_nanosleep which Rust's std::thread::sleep requires.
+fn lind_sleep(dur: Duration) {
+    let ts = libc::timespec {
+        tv_sec: dur.as_secs() as libc::time_t,
+        tv_nsec: dur.subsec_nanos() as libc::c_long,
+    };
+    unsafe {
+        libc::nanosleep(&ts, std::ptr::null_mut());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Renewable resource: token-bucket rate limiter
 // ---------------------------------------------------------------------------
@@ -122,7 +135,7 @@ impl NannyState {
         // this is intentional and matches repy's behaviour.
         if inner.consumed > res.allowed_per_sec {
             let sleep_secs = (inner.consumed - res.allowed_per_sec) / res.allowed_per_sec;
-            std::thread::sleep(Duration::from_secs_f64(sleep_secs));
+            lind_sleep(Duration::from_secs_f64(sleep_secs));
 
             // Re-drain after waking.
             let now = Instant::now();
