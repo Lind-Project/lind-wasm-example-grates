@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define PASS()                                                                 \
@@ -196,6 +197,104 @@ int test_getrandom(void) {
 	return 0;
 }
 
+/* -----------------------------------------------------------------
+ *  Test 7: timed write — verify rate limiting actually throttles
+ *
+ *  Config has filewrite = 50000 (50 KB/sec).
+ *  We write 200 KB. With block rounding each 4096-byte write costs
+ *  4096 bytes, so 50 writes × 4096 = 200 KB charged.
+ *  Expected: ~3-4 seconds (200KB / 50KB/sec = 4s, minus burst window).
+ *  Without rate limiting: < 0.1 seconds.
+ * ----------------------------------------------------------------- */
+int test_timed_write(void) {
+	int fd = open("/tmp/res_timed.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+	if (fd < 0)
+		FAIL("open");
+
+	char buf[4096];
+	memset(buf, 'T', sizeof(buf));
+
+	struct timespec start, end;
+	clock_gettime(CLOCK_MONOTONIC, &start);
+
+	for (int i = 0; i < 50; i++) {
+		if (write(fd, buf, sizeof(buf)) != (int)sizeof(buf))
+			FAIL("write");
+	}
+
+	clock_gettime(CLOCK_MONOTONIC, &end);
+
+	double elapsed = (end.tv_sec - start.tv_sec)
+	               + (end.tv_nsec - start.tv_nsec) / 1e9;
+
+	printf("  wrote 200KB in %.2f seconds (expect ~3-4s if rate-limited)\n",
+	       elapsed);
+
+	if (elapsed < 0.5) {
+		printf("  FAIL: too fast — rate limiting not working\n");
+		failures++;
+		tests_run++;
+	} else {
+		PASS();
+	}
+
+	close(fd);
+	unlink("/tmp/res_timed.txt");
+	return 0;
+}
+
+/* -----------------------------------------------------------------
+ *  Test 8: timed read — verify fileread rate limiting
+ *
+ *  Same idea: read 200 KB at 50 KB/sec limit → ~3-4 seconds.
+ * ----------------------------------------------------------------- */
+int test_timed_read(void) {
+	/* Create a 200 KB file first. */
+	int fd = open("/tmp/res_tread.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+	if (fd < 0)
+		FAIL("open for write");
+
+	char wbuf[4096];
+	memset(wbuf, 'R', sizeof(wbuf));
+	for (int i = 0; i < 50; i++) {
+		write(fd, wbuf, sizeof(wbuf));
+	}
+	close(fd);
+
+	fd = open("/tmp/res_tread.txt", O_RDONLY);
+	if (fd < 0)
+		FAIL("open for read");
+
+	char rbuf[4096];
+	struct timespec start, end;
+	clock_gettime(CLOCK_MONOTONIC, &start);
+
+	for (int i = 0; i < 50; i++) {
+		if (read(fd, rbuf, sizeof(rbuf)) <= 0)
+			break;
+	}
+
+	clock_gettime(CLOCK_MONOTONIC, &end);
+
+	double elapsed = (end.tv_sec - start.tv_sec)
+	               + (end.tv_nsec - start.tv_nsec) / 1e9;
+
+	printf("  read 200KB in %.2f seconds (expect ~3-4s if rate-limited)\n",
+	       elapsed);
+
+	if (elapsed < 0.5) {
+		printf("  FAIL: too fast — rate limiting not working\n");
+		failures++;
+		tests_run++;
+	} else {
+		PASS();
+	}
+
+	close(fd);
+	unlink("/tmp/res_tread.txt");
+	return 0;
+}
+
 /* ================================================================= */
 
 int main(void) {
@@ -207,6 +306,8 @@ int main(void) {
 	test_filesopened_cap();
 	test_lograte();
 	test_getrandom();
+	test_timed_write();
+	test_timed_read();
 
 	printf("\n=== Results: %d tests, %d failures ===\n",
 	       total_tests, failures);
