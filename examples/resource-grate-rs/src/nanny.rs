@@ -4,16 +4,14 @@ use std::time::{Duration, Instant};
 
 use crate::resources::ResourceConfig;
 
-/// Sleep using libc::nanosleep instead of std::thread::sleep.
-/// Lind's WASM sysroot provides nanosleep (syscall 35) but not
-/// clock_nanosleep which Rust's std::thread::sleep requires.
+/// Busy-wait for the given duration using yield.
+/// Lind's WASM sysroot doesn't provide clock_nanosleep (which both
+/// std::thread::sleep and libc::nanosleep require on WASI), so we
+/// spin with sched_yield like the IPC grate does.
 fn lind_sleep(dur: Duration) {
-    let ts = libc::timespec {
-        tv_sec: dur.as_secs() as libc::time_t,
-        tv_nsec: dur.subsec_nanos() as libc::c_long,
-    };
-    unsafe {
-        libc::nanosleep(&ts, std::ptr::null_mut());
+    let deadline = Instant::now() + dur;
+    while Instant::now() < deadline {
+        std::thread::yield_now();
     }
 }
 
