@@ -176,10 +176,10 @@ int test_lograte(void) {
 /* -----------------------------------------------------------------
  *  Test 6: getrandom (random resource)
  * ----------------------------------------------------------------- */
+/* getrandom may not have a header in the Lind sysroot. */
+extern ssize_t getrandom(void *buf, size_t buflen, unsigned int flags);
+
 int test_getrandom(void) {
-#ifdef __linux__
-	#include <sys/random.h>
-#endif
 	char buf[32];
 
 	/* If getrandom is available, each call charges 1024 bytes. */
