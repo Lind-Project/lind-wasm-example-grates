@@ -24,8 +24,27 @@ pub struct ResourceConfig {
 
 impl ResourceConfig {
     pub fn parse_file(path: &str) -> Self {
-        let content = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("Failed to read resource file '{}': {}", path, e));
+        // Use libc open/read instead of std::fs::read_to_string because
+        // Rust's WASI filesystem layer may not work in the Lind grate context.
+        use std::ffi::CString;
+
+        let cpath = CString::new(path).unwrap();
+        let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDONLY) };
+        if fd < 0 {
+            panic!("Failed to open resource file '{}': errno={}", path,
+                   std::io::Error::last_os_error());
+        }
+
+        let mut buf = vec![0u8; 8192];
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        unsafe { libc::close(fd) };
+
+        if n < 0 {
+            panic!("Failed to read resource file '{}': errno={}", path,
+                   std::io::Error::last_os_error());
+        }
+
+        let content = String::from_utf8_lossy(&buf[..n as usize]).into_owned();
         Self::parse(&content)
     }
 
