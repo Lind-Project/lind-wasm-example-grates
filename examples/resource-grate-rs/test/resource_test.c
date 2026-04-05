@@ -530,13 +530,27 @@ int test_timed_getrandom(void) {
  *  LOGRATE TIMED TEST
  * ================================================================= */
 
-/* Test 17: timed lograte — stdout at 30KB/sec */
+/* Test 17: timed lograte — write to /tmp file via dup2 onto fd 1
+ * The grate charges lograte for writes to fd 1/2 regardless of where
+ * they actually point.  We dup2 a temp file onto fd 1, write 90KB
+ * (charged as lograte), then restore stdout. */
 int test_timed_lograte(void) {
 	/* Config: lograte = 30000 (30 KB/sec).
-	 * Write 90KB to stdout → ~2-3s. */
+	 * Write 90KB to fd 1 → ~2-3s. */
+
+	/* Save real stdout and redirect fd 1 to a temp file. */
+	int saved_stdout = dup(STDOUT_FILENO);
+	int tmpfd = open("/tmp/res_lograte.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+	if (tmpfd < 0 || saved_stdout < 0) {
+		if (saved_stdout >= 0) close(saved_stdout);
+		if (tmpfd >= 0) close(tmpfd);
+		FAIL("setup");
+	}
+	dup2(tmpfd, STDOUT_FILENO);
+	close(tmpfd);
+
 	char line[1000];
-	memset(line, 'L', sizeof(line) - 1);
-	line[sizeof(line) - 1] = '\n';
+	memset(line, 'L', sizeof(line));
 
 	struct timespec start, end;
 	clock_gettime(CLOCK_MONOTONIC, &start);
@@ -546,8 +560,14 @@ int test_timed_lograte(void) {
 	}
 
 	clock_gettime(CLOCK_MONOTONIC, &end);
+
+	/* Restore real stdout. */
+	dup2(saved_stdout, STDOUT_FILENO);
+	close(saved_stdout);
+	unlink("/tmp/res_lograte.txt");
+
 	double dt = elapsed_sec(&start, &end);
-	printf("  wrote 90KB to stdout in %.2fs (expect ~2-3s)\n", dt);
+	printf("  wrote 90KB to fd 1 (redirected) in %.2fs (expect ~2-3s)\n", dt);
 
 	if (dt < 0.5)
 		FAIL("too fast — lograte limiting not working");
