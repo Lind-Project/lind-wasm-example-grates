@@ -230,16 +230,12 @@ int test_timed_write(void) {
 	printf("  wrote 200KB in %.2f seconds (expect ~3-4s if rate-limited)\n",
 	       elapsed);
 
-	if (elapsed < 0.5) {
-		printf("  FAIL: too fast — rate limiting not working\n");
-		failures++;
-		tests_run++;
-	} else {
-		PASS();
-	}
-
 	close(fd);
 	unlink("/tmp/res_timed.txt");
+
+	if (elapsed < 0.5)
+		FAIL("too fast — rate limiting not working");
+	PASS();
 	return 0;
 }
 
@@ -282,16 +278,12 @@ int test_timed_read(void) {
 	printf("  read 200KB in %.2f seconds (expect ~3-4s if rate-limited)\n",
 	       elapsed);
 
-	if (elapsed < 0.5) {
-		printf("  FAIL: too fast — rate limiting not working\n");
-		failures++;
-		tests_run++;
-	} else {
-		PASS();
-	}
-
 	close(fd);
 	unlink("/tmp/res_tread.txt");
+
+	if (elapsed < 0.5)
+		FAIL("too fast — rate limiting not working");
+	PASS();
 	return 0;
 }
 
