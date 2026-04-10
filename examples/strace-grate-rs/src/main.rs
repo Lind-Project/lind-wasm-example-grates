@@ -1,18 +1,18 @@
 mod strace;
 
-use strace::{Arg, parse_arg};
-use grate_rs::{GrateBuilder, make_threei_call, GrateError};
 use grate_rs::constants;
+use grate_rs::{GrateBuilder, GrateError, make_threei_call};
+use strace::{Arg, parse_arg};
 
 // invoking macros to register syscall handler
 //
 // ARGS:
 // 1. handler_name      - syscall handler name
-// 2. syscall_number    - syscall number passed via "Syscall" enum 
+// 2. syscall_number    - syscall number passed via "Syscall" enum
 // 3. [arg_type]        - argument types passed sequentially in a tuple
 
 define_syscall_handler!(read_syscall, constants::SYS_READ, [Int, Int, Int]);
-define_syscall_handler!(write_syscall, constants::SYS_WRITE, [Int, Int, Int]);
+define_syscall_handler!(write_syscall, constants::SYS_WRITE, [Int, CString, Int]);
 define_syscall_handler!(open_syscall, constants::SYS_OPEN, [CString, Int, Int]);
 define_syscall_handler!(close_syscall, constants::SYS_CLOSE, [Int]);
 define_syscall_handler!(stat_syscall, constants::SYS_XSTAT, [CString, Int]);
@@ -27,6 +27,7 @@ define_syscall_handler!(sigaction_syscall, constants::SYS_SIGACTION, [Int, Int, 
 define_syscall_handler!(sigprocmask_syscall, constants::SYS_SIGPROCMASK, [Int, Int, Int]);
 define_syscall_handler!(ioctl_syscall, constants::SYS_IOCTL, [Int, Int, Int]);
 define_syscall_handler!(pread_syscall, constants::SYS_PREAD, [Int, Int, Int, Int]);
+define_syscall_handler!(readv_syscall, constants::SYS_READV, [Int, Int, Int, Int]);
 define_syscall_handler!(pwrite_syscall, constants::SYS_PWRITE, [Int, Int, Int, Int]);
 define_syscall_handler!(writev_syscall, constants::SYS_WRITEV, [Int, Int, Int]);
 define_syscall_handler!(access_syscall, constants::SYS_ACCESS, [CString, Int]);
@@ -86,7 +87,7 @@ define_syscall_handler!(fstatfs_syscall, constants::SYS_FSTATFS, [Int, Int]);
 define_syscall_handler!(gethostname_syscall, constants::SYS_GETHOSTNAME, [Int, Int]);
 define_syscall_handler!(futex_syscall, constants::SYS_FUTEX, [Int, Int, Int, Int, Int, Int]);
 define_syscall_handler!(epoll_create_syscall, constants::SYS_EPOLL_CREATE, [Int]);
-define_syscall_handler!(clock_gettime_syscall, constants::SYS_CLOCK_GETTIME, [Int, Int]);
+define_syscall_handler!(clock_gettime_syscall, constants::SYS_CLOCK_GETTIME,[Int, Int]);
 define_syscall_handler!(epoll_wait_syscall, constants::SYS_EPOLL_WAIT, [Int, Int, Int, Int]);
 define_syscall_handler!(epoll_ctl_syscall, constants::SYS_EPOLL_CTL, [Int, Int, Int, Int]);
 define_syscall_handler!(unlinkat_syscall, constants::SYS_UNLINKAT, [Int, CString, Int]);
@@ -97,15 +98,14 @@ define_syscall_handler!(dup3_syscall, constants::SYS_DUP3, [Int, Int, Int]);
 define_syscall_handler!(pipe2_syscall, constants::SYS_PIPE2, [Int, Int]);
 define_syscall_handler!(getrandom_syscall, constants::SYS_GETRANDOM, [Int, Int, Int]);
 fn main() {
-    println!("[Grate Init]: Initializing Strace Grate\n");
-    
+    println!("[Grate Init]: Initializing Strace Grate");
+
     // register syscall handlers
     let builder = GrateBuilder::new()
         .register(constants::SYS_READ, read_syscall)
         .register(constants::SYS_WRITE, write_syscall)
         .register(constants::SYS_OPEN, open_syscall)
         .register(constants::SYS_CLOSE, close_syscall)
-        .register(constants::SYS_MMAP, mmap_syscall)
         .register(constants::SYS_XSTAT, stat_syscall)
         .register(constants::SYS_FXSTAT, fstat_syscall)
         .register(constants::SYS_POLL, poll_syscall)
@@ -119,6 +119,7 @@ fn main() {
         .register(constants::SYS_IOCTL, ioctl_syscall)
         .register(constants::SYS_PREAD, pread_syscall)
         .register(constants::SYS_PWRITE, pwrite_syscall)
+        .register(constants::SYS_READV, readv_syscall)
         .register(constants::SYS_WRITEV, writev_syscall)
         .register(constants::SYS_ACCESS, access_syscall)
         .register(constants::SYS_PIPE, pipe_syscall)
@@ -188,8 +189,8 @@ fn main() {
         .register(constants::SYS_PIPE2, pipe2_syscall)
         .register(constants::SYS_GETRANDOM, getrandom_syscall)
         .teardown(|result: Result<i32, GrateError>| {
-            println!("Result: {:#?}", result);
-        }); 
+            println!("\nResult: {:#?}", result);
+        });
     let argv = std::env::args().skip(1).collect::<Vec<_>>();
 
     builder.run(argv);
