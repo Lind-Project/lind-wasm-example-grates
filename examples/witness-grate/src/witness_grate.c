@@ -11,6 +11,8 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <semaphore.h>
+#include <sys/mman.h>
 
 #include "ed25519.h"
 
@@ -524,7 +526,7 @@ static void init_witness_runtime(void) {
  * ============================================================ */
 
 int main(int argc, char *argv[]) {
-    int sync_pipe[2];
+    sem_t *start_sem;
     int grateid;
     pid_t pid;
     int status;
@@ -540,8 +542,18 @@ int main(int argc, char *argv[]) {
     grateid = getpid();
     printf("[WitnessGrate] Start grate pid=%d\n", grateid);
 
-    if (pipe(sync_pipe) < 0) {
-        perror("[WitnessGrate] pipe failed");
+    /* shared unnamed semaphore for parent-child sync after fork */
+    start_sem = mmap(NULL, sizeof(sem_t),
+                     PROT_READ | PROT_WRITE,
+                     MAP_SHARED | MAP_ANONYMOUS,
+                     -1, 0);
+    if (start_sem == MAP_FAILED) {
+        perror("[WitnessGrate] mmap failed");
+        assert(0);
+    }
+
+    if (sem_init(start_sem, 1, 0) != 0) {
+        perror("[WitnessGrate] sem_init failed");
         assert(0);
     }
 
@@ -553,16 +565,10 @@ int main(int argc, char *argv[]) {
 
     if (pid == 0) {
         /* child: wait until parent finishes ctx init + registration */
-        char ready = 0;
-
-        close(sync_pipe[1]);
-
-        if (read(sync_pipe[0], &ready, 1) != 1) {
-            perror("[WitnessGrate] child sync read failed");
+        if (sem_wait(start_sem) != 0) {
+            perror("[WitnessGrate] child sem_wait failed");
             assert(0);
         }
-
-        close(sync_pipe[0]);
 
         if (execv(argv[1], &argv[1]) == -1) {
             perror("[WitnessGrate] execv failed");
@@ -573,8 +579,6 @@ int main(int argc, char *argv[]) {
     }
 
     /* parent: initialize per-cage witness state and register handlers */
-    close(sync_pipe[0]);
-
     {
         int cageid = pid;
 
@@ -586,12 +590,10 @@ int main(int argc, char *argv[]) {
 
         register_witness_handlers(cageid, grateid);
 
-        if (write(sync_pipe[1], "R", 1) != 1) {
-            perror("[WitnessGrate] parent sync write failed");
+        if (sem_post(start_sem) != 0) {
+            perror("[WitnessGrate] parent sem_post failed");
             assert(0);
         }
-
-        close(sync_pipe[1]);
     }
 
     while (wait(&status) > 0) {
@@ -600,6 +602,13 @@ int main(int argc, char *argv[]) {
             assert(0);
         }
     }
+
+    if (sem_destroy(start_sem) != 0) {
+        perror("[WitnessGrate] sem_destroy failed");
+        assert(0);
+    }
+
+    munmap(start_sem, sizeof(sem_t));
 
     log_line("=== witness grate finished successfully ===");
     printf("[WitnessGrate] PASS\n");
