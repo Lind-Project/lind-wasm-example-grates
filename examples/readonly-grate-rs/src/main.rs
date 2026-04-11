@@ -1,5 +1,5 @@
 // readonly-grate blocks all writes unconditionally
-// by returning EPERM (operation not permitted).
+// by returning -EPERM (operation not permitted).
 
 use grate_rs::{
     GrateBuilder, GrateError,
@@ -32,16 +32,16 @@ extern "C" fn open_syscall(
 ) -> i32 {
     let access_mode = flags & O_ACCMODE;
 
-    // return EPERM (Operation not permitted) if
+    // return -EPERM (Operation not permitted) if
     // access mode is O_WRONLY or O_RDWR
     if access_mode != O_RDONLY {
-        return EPERM;
+        return -EPERM;
     }
 
-    // return EPERM (Operation not permitted) if
+    // return -EPERM (Operation not permitted) if
     // access mode is O_WRONLY or O_RDWR
     if flags & (O_TRUNC | O_APPEND) != 0 {
-        return EPERM;
+        return -EPERM;
     }
 
     let ret = match make_threei_call(
@@ -69,7 +69,7 @@ extern "C" fn open_syscall(
                 "[readonly-grate]: make_threei_call() failed for SYS_OPEN with: {:?}",
                 e
             );
-            return -1;
+            return -EPERM;
         }
     };
 
@@ -92,7 +92,7 @@ extern "C" fn write_syscall(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    EPERM // return EPERM (Operation not permitted);
+    -EPERM // return -EPERM (Operation not permitted);
 }
 
 // writev() syscall handler
@@ -111,7 +111,7 @@ extern "C" fn writev_syscall(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    EPERM // return EPERM (Operation not permitted);
+    -EPERM // return -EPERM (Operation not permitted);
 }
 
 // pwrite() syscall handler
@@ -130,7 +130,7 @@ extern "C" fn pwrite_syscall(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    EPERM // return EPERM (Operation not permitted);
+    -EPERM // return -EPERM (Operation not permitted);
 }
 
 fn main() {

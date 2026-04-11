@@ -6,17 +6,44 @@
 #include <sys/uio.h>
 
 int main(void) {
-  int fd = open("testfile.txt", O_WRONLY | O_CREAT, 0666);
+  int fd;
+  ssize_t ret;
+
+  // --- OPEN TESTS ---
+
+  // O_WRONLY should fail
+  errno = 0;
+  fd = open("testfile.txt", O_WRONLY | O_CREAT, 0666);
+  assert(fd == -1 && errno == EPERM);
+
+  // O_RDWR should fail
+  errno = 0;
+  fd = open("testfile.txt", O_RDWR | O_CREAT, 0666);
+  assert(fd == -1 && errno == EPERM);
+
+  // O_TRUNC should fail
+  errno = 0;
+  fd = open("testfile.txt", O_RDONLY | O_TRUNC);
+  assert(fd == -1 && errno == EPERM);
+
+  // O_APPEND should fail
+  errno = 0;
+  fd = open("testfile.txt", O_RDONLY | O_APPEND);
+  assert(fd == -1 && errno == EPERM);
+
+  // O_RDONLY should succeed
+  errno = 0;
+  fd = open("testfile.txt", O_RDONLY | O_CREAT, 0666);
   assert(fd >= 0);
 
-  // --- write() test ---
+  // --- WRITE TESTS ---
+
+  // write()
   errno = 0;
-  ssize_t ret = write(fd, "hello", 5);
+  ret = write(1, "hello", 5);
+  assert(ret == -1 && errno == EPERM);
 
-  // write() must fail
-  assert(ret == EPERM);
-
-  // --- writev() test ---
+  // writev()
   struct iovec iov[2];
   iov[0].iov_base = "he";
   iov[0].iov_len  = 2;
@@ -25,20 +52,15 @@ int main(void) {
 
   errno = 0;
   ret = writev(fd, iov, 2);
+  assert(ret == -1 && errno == EPERM);
 
-  // writev() must fail
-  assert(ret == EPERM);
-
-  // --- pwrite() test ---
+  // pwrite()
   errno = 0;
   ret = pwrite(fd, "hello", 5, 0);
+  assert(ret == -1 && errno == EPERM);
 
-  // pwrite() must fail
-  assert(ret == EPERM);
-
+  // --- CLEANUP ---
   close(fd);
-
-  // remove testfile
   unlink("testfile.txt");
 
   return 0;
