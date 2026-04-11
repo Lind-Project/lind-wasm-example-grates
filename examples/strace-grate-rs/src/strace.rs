@@ -1,14 +1,14 @@
 use grate_rs::{copy_data_between_cages, getcageid};
 
 pub enum Arg {
-    Int(u64),
+    Num(u64),
     CString { addr: u64, cage: u64 },
 }
 
 // function to facilitate argument parsing
 pub fn parse_arg(arg: Arg) -> String {
     match arg {
-        Arg::Int(v) => format!("{v}"),
+        Arg::Num(v) => format!("{v}"),
         Arg::CString { addr, cage } => copy_string_from_cage(cage, addr, 256)
             .map(|s| format!("{:?}", s))
             .unwrap_or("<bad_ptr>".into()),
@@ -68,7 +68,7 @@ macro_rules! define_syscall_handler {
             $(
                 let (val, cage) = _all_vals[_arg_index];
                 let arg = match stringify!($arg_type) {
-                    "Int" => Arg::Int(val),
+                    "Num" => Arg::Num(val),
                     "CString" => Arg::CString { addr: val, cage },
                     _ => unreachable!(),
                 };

@@ -1,11 +1,10 @@
 #!/bin/bash
 
 # Configuration
-BASE_DIR="$HOME/lind-wasm"
-SCRIPTS_DIR="$BASE_DIR/scripts"
-LINDFS_DIR="$BASE_DIR/lindfs"
-TEST_ROOT_DIR="$BASE_DIR/tests/unit-tests"
-LOG_FILE="$BASE_DIR/test_suite_$(date +%Y%m%d_%H%M%S).log"
+SCRIPTS_DIR="LIND_WASM_ROOT/scripts"
+LINDFS_DIR="LIND_WASM_ROOT/lindfs"
+TEST_ROOT_DIR="LIND_WASM_ROOT/tests/unit-tests"
+LOG_FILE="LIND_WASM_ROOT/test_suite_$(date +%Y%m%d_%H%M%S).log"
 TIMEOUT_VAL="5s" # Adjust if some tests are naturally slow
 
 # Setup
