@@ -10,4 +10,3 @@ lind_compile --compile-grate \
   src/witness_grate.c \
   "$LIND_WASM_APPS"/ed25519/*.c \
   -I"$LIND_WASM_APPS"/
-  
