@@ -1,5 +1,8 @@
 use grate_rs::constants::*;
+use grate_rs::constants::error::{EACCES, EAGAIN, EMFILE};
 use grate_rs::constants::fs::*;
+use grate_rs::constants::net::AF_INET;
+use grate_rs::constants::process::CLONE_VM;
 use grate_rs::{copy_data_between_cages, getcageid, make_threei_call, GrateError};
 
 use crate::NANNY;
@@ -16,16 +19,6 @@ pub const FD_SOCKET: u32 = 2;
 // perfdinfo bit flags for sockets
 const SOCK_LOOPBACK: u64 = 1 << 0;
 const SOCK_LISTENING: u64 = 1 << 1;
-
-// errnos
-const EMFILE: i32 = 24;
-const EACCES: i32 = 13;
-
-// clone flags
-const CLONE_VM: u64 = 0x100;
-
-// AF_INET
-const AF_INET: u16 = 2;
 
 // =====================================================================
 //  Helpers
@@ -74,13 +67,14 @@ fn block_charge(bytes: i32) -> f64 {
 }
 
 /// Copy a sockaddr_in (16 bytes) from cage memory and extract the port.
+/// No lock needed: operates entirely on a stack-local buffer.
 fn extract_port(addr_ptr: u64, addr_cage: u64) -> Option<u16> {
-    let buf = [0u8; 16];
+    let mut buf = [0u8; 16];
     let gid = getcageid();
     if copy_data_between_cages(
         gid, gid,
         addr_ptr, addr_cage,
-        &buf as *const _ as u64, gid,
+        buf.as_mut_ptr() as u64, gid,
         16, 0,
     ).is_err() {
         return None;
@@ -94,13 +88,14 @@ fn extract_port(addr_ptr: u64, addr_cage: u64) -> Option<u16> {
 }
 
 /// Check whether a sockaddr_in points to 127.x.x.x.
+/// No lock needed: operates entirely on a stack-local buffer.
 fn is_loopback_addr(addr_ptr: u64, addr_cage: u64) -> bool {
-    let buf = [0u8; 16];
+    let mut buf = [0u8; 16];
     let gid = getcageid();
     if copy_data_between_cages(
         gid, gid,
         addr_ptr, addr_cage,
-        &buf as *const _ as u64, gid,
+        buf.as_mut_ptr() as u64, gid,
         16, 0,
     ).is_err() {
         return false;
@@ -765,7 +760,7 @@ pub extern "C" fn handle_clone(
 
     if is_thread {
         if nanny.tattle_add_item("events").is_err() {
-            return -11; // EAGAIN
+            return -EAGAIN;
         }
     }
 

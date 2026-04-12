@@ -17,35 +17,62 @@ fn lind_sleep(dur: Duration) {
 
 // ---------------------------------------------------------------------------
 // Renewable resource: token-bucket rate limiter
+//
+// Rate-limited resources (e.g. filewrite, netrecv, random) that refill over
+// time.  Each resource tracks a token bucket: consumption accumulates and
+// drains at `allowed_per_sec`.  When consumption exceeds the per-second
+// budget the caller is blocked until it drains back below the threshold.
 // ---------------------------------------------------------------------------
 
 struct RenewableInner {
+    /// Accumulated consumption that hasn't yet drained.
     consumed: f64,
+    /// Timestamp of the last drain calculation.
     last_update: Instant,
 }
 
 struct RenewableResource {
+    /// Maximum tokens per second (refill rate and burst cap).
     allowed_per_sec: f64,
+    /// Mutable accounting state, protected by a mutex so concurrent
+    /// callers on the same resource are serialized (matches repy behaviour).
     inner: Mutex<RenewableInner>,
 }
 
 // ---------------------------------------------------------------------------
 // Fungible resource: counted cap
+//
+// Resources with a fixed concurrent limit (e.g. filesopened, events).
+// Acquiring increments the count; releasing decrements it.  Requests
+// that would exceed the limit are denied immediately.
 // ---------------------------------------------------------------------------
 
 struct FungibleResource {
+    /// Maximum number of concurrent slots.
     limit: usize,
+    /// Current number of acquired slots.
     count: Mutex<usize>,
 }
 
 // ---------------------------------------------------------------------------
 // NannyState: all resource accounting for the cage
+//
+// Central accounting struct that holds every configured resource.
+// Handlers call `tattle_quantity` (renewable), `tattle_add_item` /
+// `tattle_remove_item` (fungible), or `is_item_allowed` (individual)
+// to enforce limits before forwarding syscalls.
 // ---------------------------------------------------------------------------
 
 pub struct NannyState {
+    /// Token-bucket rate limiters keyed by resource name
+    /// (e.g. "filewrite", "netrecv", "random").
     renewable: HashMap<String, RenewableResource>,
+    /// Counted caps keyed by resource name (e.g. "filesopened", "events").
     fungible: HashMap<String, FungibleResource>,
+    /// Per-item allowlists keyed by resource name (e.g. "messport",
+    /// "connport").  The `HashSet<u16>` contains the permitted port numbers.
     individual: HashMap<String, HashSet<u16>>,
+    /// Hard byte caps (currently unused, reserved for future enforcement).
     #[allow(dead_code)]
     hard_caps: HashMap<String, u64>,
 }
