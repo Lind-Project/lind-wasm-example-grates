@@ -1,0 +1,197 @@
+mod strace;
+
+use grate_rs::constants;
+use grate_rs::{GrateBuilder, GrateError, make_threei_call};
+use strace::{Arg, parse_arg};
+
+// invoking macros to register syscall handler
+//
+// ARGS:
+// 1. handler_name      - syscall handler name
+// 2. syscall_number    - syscall number passed via "Syscall" enum
+// 3. [arg_type]        - argument types passed sequentially in a tuple
+
+define_syscall_handler!(read_syscall, constants::SYS_READ, [Num, Num, Num]);
+define_syscall_handler!(write_syscall, constants::SYS_WRITE, [Num, CString, Num]);
+define_syscall_handler!(open_syscall, constants::SYS_OPEN, [CString, Num, Num]);
+define_syscall_handler!(close_syscall, constants::SYS_CLOSE, [Num]);
+define_syscall_handler!(stat_syscall, constants::SYS_XSTAT, [CString, Num]);
+define_syscall_handler!(fstat_syscall, constants::SYS_FXSTAT, [Num, Num]);
+define_syscall_handler!(poll_syscall, constants::SYS_POLL, [Num, Num, Num]);
+define_syscall_handler!(lseek_syscall, constants::SYS_LSEEK, [Num, Num, Num]);
+define_syscall_handler!(mmap_syscall, constants::SYS_MMAP, [Num, Num, Num, Num, Num, Num]);
+define_syscall_handler!(mprotect_syscall, constants::SYS_MPROTECT, [Num, Num, Num]);
+define_syscall_handler!(munmap_syscall, constants::SYS_MUNMAP, [Num, Num]);
+define_syscall_handler!(brk_syscall, constants::SYS_BRK, [Num]);
+define_syscall_handler!(sigaction_syscall, constants::SYS_SIGACTION, [Num, Num, Num]);
+define_syscall_handler!(sigprocmask_syscall, constants::SYS_SIGPROCMASK, [Num, Num, Num]);
+define_syscall_handler!(ioctl_syscall, constants::SYS_IOCTL, [Num, Num, Num]);
+define_syscall_handler!(pread_syscall, constants::SYS_PREAD, [Num, Num, Num, Num]);
+define_syscall_handler!(readv_syscall, constants::SYS_READV, [Num, Num, Num]);
+define_syscall_handler!(pwrite_syscall, constants::SYS_PWRITE, [Num, Num, Num, Num]);
+define_syscall_handler!(writev_syscall, constants::SYS_WRITEV, [Num, Num, Num]);
+define_syscall_handler!(access_syscall, constants::SYS_ACCESS, [CString, Num]);
+define_syscall_handler!(pipe_syscall, constants::SYS_PIPE, [Num]);
+define_syscall_handler!(select_syscall, constants::SYS_SELECT, [Num, Num, Num, Num, Num]);
+define_syscall_handler!(sched_yield_syscall, constants::SYS_SCHED_YIELD, []);
+define_syscall_handler!(shmget_syscall, constants::SYS_SHMGET, [Num, Num, Num]);
+define_syscall_handler!(shmat_syscall, constants::SYS_SHMAT, [Num, Num, Num]);
+define_syscall_handler!(shmctl_syscall, constants::SYS_SHMCTL, [Num, Num, Num]);
+define_syscall_handler!(dup_syscall, constants::SYS_DUP, [Num]);
+define_syscall_handler!(dup2_syscall, constants::SYS_DUP2, [Num, Num]);
+define_syscall_handler!(nanosleep_syscall, constants::SYS_NANOSLEEP_TIME64, [Num, Num]);
+define_syscall_handler!(setitimer_syscall, constants::SYS_SETITIMER, [Num, Num, Num]);
+define_syscall_handler!(getpid_syscall, constants::SYS_GETPID, []);
+define_syscall_handler!(socket_syscall, constants::SYS_SOCKET, [Num, Num, Num]);
+define_syscall_handler!(connect_syscall, constants::SYS_CONNECT, [Num, Num, Num]);
+define_syscall_handler!(accept_syscall, constants::SYS_ACCEPT, [Num, Num, Num]);
+define_syscall_handler!(sendto_syscall, constants::SYS_SENDTO, [Num, Num, Num, Num, Num, Num]);
+define_syscall_handler!(recvfrom_syscall, constants::SYS_RECVFROM, [Num, Num, Num, Num, Num, Num]);
+define_syscall_handler!(shutdown_syscall, constants::SYS_SHUTDOWN, [Num, Num]);
+define_syscall_handler!(bind_syscall, constants::SYS_BIND, [Num, Num, Num]);
+define_syscall_handler!(listen_syscall, constants::SYS_LISTEN, [Num, Num]);
+define_syscall_handler!(getsockname_syscall, constants::SYS_GETSOCKNAME, [Num, Num, Num]);
+define_syscall_handler!(getpeername_syscall, constants::SYS_GETPEERNAME, [Num, Num, Num]);
+define_syscall_handler!(socketpair_syscall, constants::SYS_SOCKETPAIR, [Num, Num, Num, Num]);
+define_syscall_handler!(setsockopt_syscall, constants::SYS_SETSOCKOPT, [Num, Num, Num, Num, Num]);
+define_syscall_handler!(getsockopt_syscall, constants::SYS_GETSOCKOPT, [Num, Num, Num, Num, Num]);
+define_syscall_handler!(clone_syscall, constants::SYS_CLONE, [Num, Num, Num, Num, Num]);
+define_syscall_handler!(fork_syscall, constants::SYS_FORK, []);
+define_syscall_handler!(exec_syscall, constants::SYS_EXEC, [CString, Num, Num]);
+define_syscall_handler!(exit_syscall, constants::SYS_EXIT, [Num]);
+define_syscall_handler!(waitpid_syscall, constants::SYS_WAITPID, [Num, Num, Num]);
+define_syscall_handler!(kill_syscall, constants::SYS_KILL, [Num, Num]);
+define_syscall_handler!(shmdt_syscall, constants::SYS_SHMDT, [Num]);
+define_syscall_handler!(fcntl_syscall, constants::SYS_FCNTL, [Num, Num, Num]);
+define_syscall_handler!(flock_syscall, constants::SYS_FLOCK, [Num, Num]);
+define_syscall_handler!(fsync_syscall, constants::SYS_FSYNC, [Num]);
+define_syscall_handler!(fdatasync_syscall, constants::SYS_FDATASYNC, [Num]);
+define_syscall_handler!(truncate_syscall, constants::SYS_TRUNCATE, [CString, Num]);
+define_syscall_handler!(ftruncate_syscall, constants::SYS_FTRUNCATE, [Num, Num]);
+define_syscall_handler!(getdents_syscall, constants::SYS_GETDENTS, [Num, Num, Num]);
+define_syscall_handler!(getcwd_syscall, constants::SYS_GETCWD, [Num, Num]);
+define_syscall_handler!(chdir_syscall, constants::SYS_CHDIR, [CString]);
+define_syscall_handler!(fchdir_syscall, constants::SYS_FCHDIR, [Num]);
+define_syscall_handler!(rename_syscall, constants::SYS_RENAME, [CString, CString]);
+define_syscall_handler!(unlink_syscall, constants::SYS_UNLINK, [CString]);
+define_syscall_handler!(readlink_syscall, constants::SYS_READLINK, [CString, Num, Num]);
+define_syscall_handler!(chmod_syscall, constants::SYS_CHMOD, [CString, Num]);
+define_syscall_handler!(fchmod_syscall, constants::SYS_FCHMOD, [Num, Num]);
+define_syscall_handler!(getuid_syscall, constants::SYS_GETUID, []);
+define_syscall_handler!(getgid_syscall, constants::SYS_GETGID, []);
+define_syscall_handler!(geteuid_syscall, constants::SYS_GETEUID, []);
+define_syscall_handler!(getegid_syscall, constants::SYS_GETEGID, []);
+define_syscall_handler!(getppid_syscall, constants::SYS_GETPPID, []);
+define_syscall_handler!(statfs_syscall, constants::SYS_STATFS, [CString, Num]);
+define_syscall_handler!(fstatfs_syscall, constants::SYS_FSTATFS, [Num, Num]);
+define_syscall_handler!(gethostname_syscall, constants::SYS_GETHOSTNAME, [Num, Num]);
+define_syscall_handler!(futex_syscall, constants::SYS_FUTEX, [Num, Num, Num, Num, Num, Num]);
+define_syscall_handler!(epoll_create_syscall, constants::SYS_EPOLL_CREATE, [Num]);
+define_syscall_handler!(clock_gettime_syscall, constants::SYS_CLOCK_GETTIME,[Num, Num]);
+define_syscall_handler!(epoll_wait_syscall, constants::SYS_EPOLL_WAIT, [Num, Num, Num, Num]);
+define_syscall_handler!(epoll_ctl_syscall, constants::SYS_EPOLL_CTL, [Num, Num, Num, Num]);
+define_syscall_handler!(unlinkat_syscall, constants::SYS_UNLINKAT, [Num, CString, Num]);
+define_syscall_handler!(readlinkat_syscall, constants::SYS_READLINKAT, [Num, CString, Num, Num]);
+define_syscall_handler!(sync_file_range_syscall, constants::SYS_SYNC_FILE_RANGE, [Num, Num, Num, Num]);
+define_syscall_handler!(epoll_create1_syscall, constants::SYS_EPOLL_CREATE1, [Num]);
+define_syscall_handler!(dup3_syscall, constants::SYS_DUP3, [Num, Num, Num]);
+define_syscall_handler!(pipe2_syscall, constants::SYS_PIPE2, [Num, Num]);
+define_syscall_handler!(getrandom_syscall, constants::SYS_GETRANDOM, [Num, Num, Num]);
+fn main() {
+    println!("[Grate Init]: Initializing Strace Grate");
+
+    // register syscall handlers
+    let builder = GrateBuilder::new()
+        .register(constants::SYS_READ, read_syscall)
+        .register(constants::SYS_WRITE, write_syscall)
+        .register(constants::SYS_OPEN, open_syscall)
+        .register(constants::SYS_CLOSE, close_syscall)
+        .register(constants::SYS_XSTAT, stat_syscall)
+        .register(constants::SYS_FXSTAT, fstat_syscall)
+        .register(constants::SYS_POLL, poll_syscall)
+        .register(constants::SYS_LSEEK, lseek_syscall)
+        .register(constants::SYS_MMAP, mmap_syscall)
+        .register(constants::SYS_MPROTECT, mprotect_syscall)
+        .register(constants::SYS_MUNMAP, munmap_syscall)
+        .register(constants::SYS_BRK, brk_syscall)
+        .register(constants::SYS_SIGACTION, sigaction_syscall)
+        .register(constants::SYS_SIGPROCMASK, sigprocmask_syscall)
+        .register(constants::SYS_IOCTL, ioctl_syscall)
+        .register(constants::SYS_PREAD, pread_syscall)
+        .register(constants::SYS_PWRITE, pwrite_syscall)
+        .register(constants::SYS_READV, readv_syscall)
+        .register(constants::SYS_WRITEV, writev_syscall)
+        .register(constants::SYS_ACCESS, access_syscall)
+        .register(constants::SYS_PIPE, pipe_syscall)
+        .register(constants::SYS_SELECT, select_syscall)
+        .register(constants::SYS_SCHED_YIELD, sched_yield_syscall)
+        .register(constants::SYS_SHMGET, shmget_syscall)
+        .register(constants::SYS_SHMAT, shmat_syscall)
+        .register(constants::SYS_SHMCTL, shmctl_syscall)
+        .register(constants::SYS_DUP, dup_syscall)
+        .register(constants::SYS_DUP2, dup2_syscall)
+        .register(constants::SYS_NANOSLEEP_TIME64, nanosleep_syscall)
+        .register(constants::SYS_SETITIMER, setitimer_syscall)
+        .register(constants::SYS_GETPID, getpid_syscall)
+        .register(constants::SYS_SOCKET, socket_syscall)
+        .register(constants::SYS_CONNECT, connect_syscall)
+        .register(constants::SYS_ACCEPT, accept_syscall)
+        .register(constants::SYS_SENDTO, sendto_syscall)
+        .register(constants::SYS_RECVFROM, recvfrom_syscall)
+        .register(constants::SYS_SHUTDOWN, shutdown_syscall)
+        .register(constants::SYS_BIND, bind_syscall)
+        .register(constants::SYS_LISTEN, listen_syscall)
+        .register(constants::SYS_GETSOCKNAME, getsockname_syscall)
+        .register(constants::SYS_GETPEERNAME, getpeername_syscall)
+        .register(constants::SYS_SOCKETPAIR, socketpair_syscall)
+        .register(constants::SYS_SETSOCKOPT, setsockopt_syscall)
+        .register(constants::SYS_GETSOCKOPT, getsockopt_syscall)
+        .register(constants::SYS_CLONE, clone_syscall)
+        .register(constants::SYS_FORK, fork_syscall)
+        .register(constants::SYS_EXEC, exec_syscall)
+        .register(constants::SYS_EXIT, exit_syscall)
+        .register(constants::SYS_WAITPID, waitpid_syscall)
+        .register(constants::SYS_KILL, kill_syscall)
+        .register(constants::SYS_SHMDT, shmdt_syscall)
+        .register(constants::SYS_FCNTL, fcntl_syscall)
+        .register(constants::SYS_FLOCK, flock_syscall)
+        .register(constants::SYS_FSYNC, fsync_syscall)
+        .register(constants::SYS_FDATASYNC, fdatasync_syscall)
+        .register(constants::SYS_TRUNCATE, truncate_syscall)
+        .register(constants::SYS_FTRUNCATE, ftruncate_syscall)
+        .register(constants::SYS_GETDENTS, getdents_syscall)
+        .register(constants::SYS_GETCWD, getcwd_syscall)
+        .register(constants::SYS_CHDIR, chdir_syscall)
+        .register(constants::SYS_FCHDIR, fchdir_syscall)
+        .register(constants::SYS_RENAME, rename_syscall)
+        .register(constants::SYS_UNLINK, unlink_syscall)
+        .register(constants::SYS_READLINK, readlink_syscall)
+        .register(constants::SYS_CHMOD, chmod_syscall)
+        .register(constants::SYS_FCHMOD, fchmod_syscall)
+        .register(constants::SYS_GETUID, getuid_syscall)
+        .register(constants::SYS_GETGID, getgid_syscall)
+        .register(constants::SYS_GETEUID, geteuid_syscall)
+        .register(constants::SYS_GETEGID, getegid_syscall)
+        .register(constants::SYS_GETPPID, getppid_syscall)
+        .register(constants::SYS_STATFS, statfs_syscall)
+        .register(constants::SYS_FSTATFS, fstatfs_syscall)
+        .register(constants::SYS_GETHOSTNAME, gethostname_syscall)
+        .register(constants::SYS_FUTEX, futex_syscall)
+        .register(constants::SYS_EPOLL_CREATE, epoll_create_syscall)
+        .register(constants::SYS_CLOCK_GETTIME, clock_gettime_syscall)
+        .register(constants::SYS_EPOLL_WAIT, epoll_wait_syscall)
+        .register(constants::SYS_EPOLL_CTL, epoll_ctl_syscall)
+        .register(constants::SYS_UNLINKAT, unlinkat_syscall)
+        .register(constants::SYS_READLINKAT, readlinkat_syscall)
+        .register(constants::SYS_SYNC_FILE_RANGE, sync_file_range_syscall)
+        .register(constants::SYS_EPOLL_CREATE1, epoll_create1_syscall)
+        .register(constants::SYS_DUP3, dup3_syscall)
+        .register(constants::SYS_PIPE2, pipe2_syscall)
+        .register(constants::SYS_GETRANDOM, getrandom_syscall)
+        .teardown(|result: Result<i32, GrateError>| {
+            println!("\nResult: {:#?}", result);
+        });
+    let argv = std::env::args().skip(1).collect::<Vec<_>>();
+
+    builder.run(argv);
+}
