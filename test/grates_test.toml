@@ -12,11 +12,12 @@
 #   skip      - (optional) skip this grate entirely
 #
 # Test fields:
-#   test_src  - C source file to compile (relative to grate dir)
+#   test_src   - C source file to compile (relative to grate dir)
 #   grate_args - (optional) extra args between grate and test binary
-#   files     - (optional) extra files to copy into lindfs
-#   timeout   - (optional) timeout in seconds (default: 30)
-#   skip      - (optional) skip this test
+#   files      - (optional) extra files to copy into lindfs
+#   lindfs_dir - (optional) also copy test cwasm into this lindfs subdirectory
+#   timeout    - (optional) timeout in seconds (default: 30)
+#   skip       - (optional) skip this test
 
 # ── Minimal example ──────────────────────────────────────────────────
 
@@ -109,6 +110,7 @@ type = "rust"
 [[grate.tests]]
 test_src = "test/chroot-test.c"
 grate_args = ["--chroot-dir", "/tmp"]
+lindfs_dir = "tmp"
 
 # ── Race test ────────────────────────────────────────────────────────
 

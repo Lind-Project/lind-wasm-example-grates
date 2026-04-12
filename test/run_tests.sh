@@ -61,6 +61,7 @@ T_ARGS=()
 T_FILES=()
 T_TIMEOUT=()
 T_SKIPS=()
+T_LINDFS_DIR=()
 
 parse_config() {
     local config_file="$1"
@@ -96,6 +97,7 @@ parse_config() {
             T_FILES+=("")
             T_TIMEOUT+=("$DEFAULT_TIMEOUT")
             T_SKIPS+=("false")
+            T_LINDFS_DIR+=("")
             in_test=1
             continue
         fi
@@ -115,6 +117,7 @@ parse_config() {
                     files)       T_FILES[$test_idx]="$val" ;;
                     timeout)     T_TIMEOUT[$test_idx]="$val" ;;
                     skip)        T_SKIPS[$test_idx]="$val" ;;
+                    lindfs_dir)  T_LINDFS_DIR[$test_idx]="$val" ;;
                 esac
             elif [[ $in_grate -eq 1 && $grate_idx -ge 0 ]]; then
                 case "$key" in
@@ -283,6 +286,12 @@ for gi in "${!G_NAMES[@]}"; do
         test_cwasm="$(find "$(dirname "$test_src_path")" -name "${test_basename}.cwasm" 2>/dev/null | head -1)"
         if [[ -n "$test_cwasm" && -f "$test_cwasm" ]]; then
             cp "$test_cwasm" "$LINDFS/"
+            # Also copy into lindfs subdirectory if specified (e.g. for chroot tests)
+            local tdir="${T_LINDFS_DIR[$ti]}"
+            if [[ -n "$tdir" ]]; then
+                mkdir -p "$LINDFS/$tdir"
+                cp "$test_cwasm" "$LINDFS/$tdir/"
+            fi
         fi
 
         # Copy extra files to lindfs
