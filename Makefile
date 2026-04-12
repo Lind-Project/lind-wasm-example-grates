@@ -64,15 +64,20 @@ list:
 
 # Clean
 clean:
+	@echo "Cleaning Rust grate targets..."
 	@for g in $(RUST_GRATES); do \
 		if [ -d "$$g/target" ]; then \
-			echo "Cleaning $$g..."; \
-			cd "$$g" && cargo clean && cd -; \
+			echo "  $$g"; \
+			(cd "$$g" && cargo clean 2>/dev/null); \
 		fi; \
 	done
+	@echo "Cleaning C grate outputs..."
 	@for g in $(C_GRATES); do \
 		if [ -d "$$g/output" ]; then \
-			echo "Cleaning $$g..."; \
+			echo "  $$g"; \
 			rm -rf "$$g/output"; \
 		fi; \
 	done
+	@echo "Cleaning .cwasm/.wasm files from examples..."
+	@find $(EXAMPLES_DIR) \( -name "*.cwasm" -o -name "*.wasm" \) -not -path "*/target/*" -delete 2>/dev/null || true
+	@echo "Done."

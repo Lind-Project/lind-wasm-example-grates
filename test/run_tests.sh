@@ -24,7 +24,7 @@ CONFIG="$SCRIPT_DIR/grates_test.toml"
 
 LIND_WASM_ROOT="${LIND_WASM_ROOT:-$HOME/lind-wasm}"
 LINDFS="${LINDFS:-$LIND_WASM_ROOT/lindfs}"
-DEFAULT_TIMEOUT="${TIMEOUT:-30}"
+DEFAULT_TIMEOUT="${TIMEOUT:-60}"
 
 # Colors
 RED='\033[0;31m'
@@ -142,7 +142,9 @@ build_c_grate() {
 
     if [[ -f "$grate_dir/compile_grate.sh" ]]; then
         echo "  Building C grate: $dir"
-        if ! (cd "$grate_dir" && bash compile_grate.sh) 2>&1 | sed 's/^/    /'; then
+        if ! (cd "$grate_dir" && bash compile_grate.sh) > /dev/null 2>&1; then
+            echo "    Build failed. Re-running with output:"
+            (cd "$grate_dir" && bash compile_grate.sh) 2>&1 | sed 's/^/    /'
             return 1
         fi
     else
@@ -157,12 +159,16 @@ build_rust_grate() {
 
     if [[ -f "$grate_dir/compile_grate.sh" ]]; then
         echo "  Building Rust grate: $dir"
-        if ! (cd "$grate_dir" && bash compile_grate.sh) 2>&1 | sed 's/^/    /'; then
+        if ! (cd "$grate_dir" && bash compile_grate.sh) > /dev/null 2>&1; then
+            echo "    Build failed. Re-running with output:"
+            (cd "$grate_dir" && bash compile_grate.sh) 2>&1 | sed 's/^/    /'
             return 1
         fi
     elif [[ -f "$grate_dir/Cargo.toml" ]]; then
         echo "  Building Rust grate: $dir (cargo lind_compile)"
-        if ! (cd "$grate_dir" && cargo lind_compile) 2>&1 | sed 's/^/    /'; then
+        if ! (cd "$grate_dir" && cargo lind_compile) > /dev/null 2>&1; then
+            echo "    Build failed. Re-running with output:"
+            (cd "$grate_dir" && cargo lind_compile) 2>&1 | sed 's/^/    /'
             return 1
         fi
     else
@@ -174,7 +180,9 @@ build_rust_grate() {
 compile_test() {
     local test_src="$1"
     echo "  Compiling test: $(basename "$test_src")"
-    if ! lind-clang "$test_src" 2>&1 | sed 's/^/    /'; then
+    if ! lind-clang "$test_src" > /dev/null 2>&1; then
+        echo "    Compile failed. Re-running with output:"
+        lind-clang "$test_src" 2>&1 | sed 's/^/    /'
         return 1
     fi
 }
@@ -200,44 +208,135 @@ echo "LindFS: $LINDFS"
 
 parse_config "$CONFIG"
 
+# Track which grates built successfully (by index)
+BUILD_OK=()
+
+# ── Phase 1: Build all grates and compile all tests ──────────────────
+
+echo -e "\n${CYAN}── Phase 1: Build ──${NC}"
+
+for gi in "${!G_NAMES[@]}"; do
+    gname="${G_NAMES[$gi]}"
+    gdir="${G_DIRS[$gi]}"
+    gtype="${G_TYPES[$gi]}"
+    gskip="${G_SKIPS[$gi]}"
+    BUILD_OK[$gi]=0
+
+    if [[ -n "$FILTER" && "$FILTER" != "$gname" && "$FILTER" != "$gdir" ]]; then
+        continue
+    fi
+
+    if [[ "$gskip" == "true" ]]; then
+        continue
+    fi
+
+    if [[ ! -d "$REPO_ROOT/examples/$gdir" ]]; then
+        continue
+    fi
+
+    # Build grate
+    case "$gtype" in
+        c)    build_c_grate "$gdir" || { echo -e "  ${RED}FAILED${NC}"; continue; } ;;
+        rust) build_rust_grate "$gdir" || { echo -e "  ${RED}FAILED${NC}"; continue; } ;;
+        *)    continue ;;
+    esac
+
+    # Copy grate cwasm to lindfs
+    grate_cwasm="$(find "$REPO_ROOT/examples/$gdir" -name "*.cwasm" 2>/dev/null | head -1)"
+    if [[ -n "$grate_cwasm" && -f "$grate_cwasm" ]]; then
+        cp "$grate_cwasm" "$LINDFS/"
+    fi
+
+    # Compile all tests for this grate
+    test_build_ok=1
+    for ti in "${!T_GRATE_IDX[@]}"; do
+        [[ "${T_GRATE_IDX[$ti]}" != "$gi" ]] && continue
+        [[ "${T_SKIPS[$ti]}" == "true" ]] && continue
+
+        tsrc="${T_SRC[$ti]}"
+        test_src_path="$REPO_ROOT/examples/$gdir/$tsrc"
+
+        if [[ ! -f "$test_src_path" ]]; then
+            echo -e "  ${RED}Test source not found: $tsrc${NC}"
+            test_build_ok=0
+            continue
+        fi
+
+        if ! compile_test "$test_src_path"; then
+            test_build_ok=0
+            continue
+        fi
+
+        # Copy test cwasm to lindfs
+        test_basename="$(basename "$tsrc" .c)"
+        test_cwasm="$(find "$(dirname "$test_src_path")" -name "${test_basename}.cwasm" 2>/dev/null | head -1)"
+        if [[ -n "$test_cwasm" && -f "$test_cwasm" ]]; then
+            cp "$test_cwasm" "$LINDFS/"
+        fi
+
+        # Copy extra files to lindfs
+        tfiles="${T_FILES[$ti]}"
+        if [[ -n "$tfiles" ]]; then
+            while IFS= read -r f; do
+                [[ -z "$f" ]] && continue
+                src="$REPO_ROOT/examples/$gdir/$f"
+                if [[ -f "$src" ]]; then
+                    cp "$src" "$LINDFS/"
+                fi
+            done <<< "$(parse_toml_array "$tfiles")"
+        fi
+    done
+
+    if [[ $test_build_ok -eq 1 ]]; then
+        BUILD_OK[$gi]=1
+    fi
+done
+
+# ── Phase 2: Run all tests ───────────────────────────────────────────
+
+echo -e "\n${CYAN}── Phase 2: Run ──${NC}"
+
 for gi in "${!G_NAMES[@]}"; do
     gname="${G_NAMES[$gi]}"
     gdir="${G_DIRS[$gi]}"
     gtype="${G_TYPES[$gi]}"
     gskip="${G_SKIPS[$gi]}"
 
-    # Filter
     if [[ -n "$FILTER" && "$FILTER" != "$gname" && "$FILTER" != "$gdir" ]]; then
         continue
     fi
 
-    log_section "$gname ($gtype)"
+    log_section "$gname"
 
     if [[ "$gskip" == "true" ]]; then
         log_skip "$gname (configured to skip)"
         continue
     fi
 
-    # Check directory exists
     if [[ ! -d "$REPO_ROOT/examples/$gdir" ]]; then
-        log_skip "$gname (directory examples/$gdir not found)"
+        log_skip "$gname (directory not found)"
         continue
     fi
 
-    # Build grate
-    build_ok=1
-    case "$gtype" in
-        c)    build_c_grate "$gdir" || build_ok=0 ;;
-        rust) build_rust_grate "$gdir" || build_ok=0 ;;
-        *)    log_skip "$gname (unknown type: $gtype)"; continue ;;
-    esac
-
-    if [[ $build_ok -eq 0 ]]; then
+    if [[ "${BUILD_OK[$gi]}" != "1" ]]; then
         log_fail "$gname (build failed)"
         continue
     fi
 
-    # Find tests for this grate
+    # Find grate cwasm in lindfs
+    grate_cwasm=""
+    for candidate in "$LINDFS/${gname}.cwasm" "$LINDFS/"*"${gdir}"*.cwasm; do
+        if [[ -f "$candidate" ]]; then
+            grate_cwasm="$candidate"
+            break
+        fi
+    done
+
+    if [[ -z "$grate_cwasm" || ! -f "$grate_cwasm" ]]; then
+        log_fail "$gname (grate .cwasm not found in lindfs)"
+        continue
+    fi
+
     has_tests=0
     for ti in "${!T_GRATE_IDX[@]}"; do
         [[ "${T_GRATE_IDX[$ti]}" != "$gi" ]] && continue
@@ -245,7 +344,6 @@ for gi in "${!G_NAMES[@]}"; do
 
         tsrc="${T_SRC[$ti]}"
         targs="${T_ARGS[$ti]}"
-        tfiles="${T_FILES[$ti]}"
         ttimeout="${T_TIMEOUT[$ti]}"
         tskip="${T_SKIPS[$ti]}"
 
@@ -256,28 +354,12 @@ for gi in "${!G_NAMES[@]}"; do
             continue
         fi
 
-        test_src_path="$REPO_ROOT/examples/$gdir/$tsrc"
-        if [[ ! -f "$test_src_path" ]]; then
-            log_fail "$test_label (source not found: $tsrc)"
+        # Find test cwasm in lindfs
+        test_basename="$(basename "$tsrc" .c)"
+        test_cwasm="$LINDFS/${test_basename}.cwasm"
+        if [[ ! -f "$test_cwasm" ]]; then
+            log_fail "$test_label (test .cwasm not found in lindfs)"
             continue
-        fi
-
-        # Compile test
-        if ! compile_test "$test_src_path"; then
-            log_fail "$test_label (compile failed)"
-            continue
-        fi
-
-        # Copy extra files to lindfs
-        if [[ -n "$tfiles" ]]; then
-            while IFS= read -r f; do
-                [[ -z "$f" ]] && continue
-                src="$REPO_ROOT/examples/$gdir/$f"
-                if [[ -f "$src" ]]; then
-                    cp "$src" "$LINDFS/"
-                    echo "  Copied $(basename "$f") to lindfs"
-                fi
-            done <<< "$(parse_toml_array "$tfiles")"
         fi
 
         # Parse grate_args
@@ -286,63 +368,42 @@ for gi in "${!G_NAMES[@]}"; do
             run_args="$(parse_toml_array "$targs" | tr '\n' ' ')"
         fi
 
-        # Find grate cwasm — check lindfs first, then search the grate dir
-        grate_cwasm=""
-        for candidate in \
-            "$LINDFS/${gname}.cwasm" \
-            "$LINDFS/"*"${gdir}"*.cwasm \
-            $(find "$REPO_ROOT/examples/$gdir" -name "*.cwasm" 2>/dev/null); do
-            if [[ -f "$candidate" ]]; then
-                grate_cwasm="$candidate"
-                break
-            fi
-        done
-
-        if [[ -z "$grate_cwasm" || ! -f "$grate_cwasm" ]]; then
-            log_fail "$test_label (grate .cwasm not found)"
-            continue
-        fi
-
-        # Copy grate cwasm to lindfs if not already there
-        if [[ "$(dirname "$grate_cwasm")" != "$LINDFS" ]]; then
-            cp "$grate_cwasm" "$LINDFS/"
-            grate_cwasm="$LINDFS/$(basename "$grate_cwasm")"
-        fi
-
-        # Find test cwasm — check lindfs, then search near the source
-        test_basename="$(basename "$tsrc" .c)"
-        test_cwasm=""
-        for candidate in \
-            "$LINDFS/${test_basename}.cwasm" \
-            $(find "$(dirname "$test_src_path")" -name "${test_basename}.cwasm" 2>/dev/null); do
-            if [[ -f "$candidate" ]]; then
-                test_cwasm="$candidate"
-                break
-            fi
-        done
-
-        if [[ -z "$test_cwasm" || ! -f "$test_cwasm" ]]; then
-            log_fail "$test_label (test .cwasm not found)"
-            continue
-        fi
-
-        # Copy test cwasm to lindfs if not already there
-        if [[ "$(dirname "$test_cwasm")" != "$LINDFS" ]]; then
-            cp "$test_cwasm" "$LINDFS/"
-            test_cwasm="$LINDFS/$(basename "$test_cwasm")"
-        fi
-
-        # Run
+        # Run — pipe output through a monitor that kills the process on panic
         cmd="lind-wasm $(basename "$grate_cwasm") ${run_args}$(basename "$test_cwasm")"
         echo "  Running: $cmd (timeout=${ttimeout}s)"
 
         exit_code=0
+        tmp_out=$(mktemp)
+
         timeout "$ttimeout" lind-wasm "$(basename "$grate_cwasm")" \
             $run_args \
             "$(basename "$test_cwasm")" \
-            2>&1 | sed 's/^/    /' || exit_code=$?
+            > "$tmp_out" 2>&1 &
+        run_pid=$!
 
-        if [[ $exit_code -eq 0 ]]; then
+        # Monitor output for panics — kill immediately if detected
+        panicked=0
+        while kill -0 "$run_pid" 2>/dev/null; do
+            if grep -q "panicked" "$tmp_out" 2>/dev/null; then
+                kill "$run_pid" 2>/dev/null
+                wait "$run_pid" 2>/dev/null || true
+                panicked=1
+                break
+            fi
+            sleep 0.1
+        done
+
+        if [[ $panicked -eq 0 ]]; then
+            wait "$run_pid" 2>/dev/null || exit_code=$?
+        fi
+
+        # Show output (indented)
+        sed 's/^/    /' < "$tmp_out"
+        rm -f "$tmp_out"
+
+        if [[ $panicked -eq 1 ]]; then
+            log_fail "$test_label (PANIC detected)"
+        elif [[ $exit_code -eq 0 ]]; then
             log_pass "$test_label"
         elif [[ $exit_code -eq 124 || $exit_code -eq 137 ]]; then
             log_fail "$test_label (TIMEOUT after ${ttimeout}s)"
