@@ -52,6 +52,7 @@ log_section() { echo -e "\n${CYAN}── $1 ──${NC}"; }
 G_NAMES=()
 G_DIRS=()
 G_TYPES=()
+G_BINARIES=()
 G_SKIPS=()
 
 T_GRATE_IDX=()
@@ -80,6 +81,7 @@ parse_config() {
             G_NAMES+=("")
             G_DIRS+=("")
             G_TYPES+=("")
+            G_BINARIES+=("")
             G_SKIPS+=("false")
             in_grate=1
             in_test=0
@@ -116,10 +118,11 @@ parse_config() {
                 esac
             elif [[ $in_grate -eq 1 && $grate_idx -ge 0 ]]; then
                 case "$key" in
-                    name) G_NAMES[$grate_idx]="$val" ;;
-                    dir)  G_DIRS[$grate_idx]="$val" ;;
-                    type) G_TYPES[$grate_idx]="$val" ;;
-                    skip) G_SKIPS[$grate_idx]="$val" ;;
+                    name)   G_NAMES[$grate_idx]="$val" ;;
+                    dir)    G_DIRS[$grate_idx]="$val" ;;
+                    type)   G_TYPES[$grate_idx]="$val" ;;
+                    binary) G_BINARIES[$grate_idx]="$val" ;;
+                    skip)   G_SKIPS[$grate_idx]="$val" ;;
                 esac
             fi
         fi
@@ -241,21 +244,18 @@ for gi in "${!G_NAMES[@]}"; do
         *)    continue ;;
     esac
 
-    # Copy grate cwasm to lindfs — search grate dir and common output locations
-    grate_cwasm=""
-    for candidate in \
-        $(find "$REPO_ROOT/examples/$gdir" -name "*.cwasm" -not -path "*/test*" -not -path "*/tests*" 2>/dev/null) \
-        $(find "$REPO_ROOT/examples/$gdir" -path "*/target/wasm32-wasip1/*/deps" -prune -o -name "*.cwasm" -print 2>/dev/null); do
-        if [[ -f "$candidate" ]]; then
-            grate_cwasm="$candidate"
-            break
-        fi
-    done
-    if [[ -n "$grate_cwasm" ]]; then
-        cp "$grate_cwasm" "$LINDFS/"
-        echo "    -> $(basename "$grate_cwasm") copied to lindfs"
+    # Verify grate cwasm landed in lindfs (compile scripts put it there directly)
+    if ls "$LINDFS/"*"${gdir}"*.cwasm &>/dev/null || ls "$LINDFS/${gname}.cwasm" &>/dev/null; then
+        echo "    -> found in lindfs"
     else
-        echo -e "  ${YELLOW}Warning: no .cwasm found for $gname after build${NC}"
+        # Fallback: search grate dir and copy if found
+        grate_cwasm="$(find "$REPO_ROOT/examples/$gdir" -name "*.cwasm" -not -path "*/test*" -not -path "*/tests*" 2>/dev/null | head -1)"
+        if [[ -n "$grate_cwasm" ]]; then
+            cp "$grate_cwasm" "$LINDFS/"
+            echo "    -> $(basename "$grate_cwasm") copied to lindfs"
+        else
+            echo -e "  ${YELLOW}Warning: no .cwasm found for $gname after build${NC}"
+        fi
     fi
 
     # Compile all tests for this grate
@@ -334,9 +334,12 @@ for gi in "${!G_NAMES[@]}"; do
         continue
     fi
 
-    # Find grate cwasm in lindfs
+    # Find grate cwasm in lindfs — use binary name if specified, else grate name
+    gbin="${G_BINARIES[$gi]}"
+    [[ -z "$gbin" ]] && gbin="$gname"
+
     grate_cwasm=""
-    for candidate in "$LINDFS/${gname}.cwasm" "$LINDFS/"*"${gdir}"*.cwasm; do
+    for candidate in "$LINDFS/${gbin}.cwasm" "$LINDFS/${gname}.cwasm"; do
         if [[ -f "$candidate" ]]; then
             grate_cwasm="$candidate"
             break

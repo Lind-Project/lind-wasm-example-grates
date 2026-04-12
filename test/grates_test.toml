@@ -6,6 +6,8 @@
 #   name      - display name
 #   dir       - directory under examples/
 #   type      - "rust" or "c"
+#   binary    - (optional) cwasm filename in lindfs (without .cwasm)
+#               defaults to name
 #   tests     - list of test entries
 #   skip      - (optional) skip this grate entirely
 #
@@ -22,6 +24,7 @@
 name = "geteuid-grate"
 dir = "geteuid-grate"
 type = "c"
+binary = "geteuid_grate"
 
 [[grate.tests]]
 test_src = "test/geteuid.c"
@@ -42,6 +45,7 @@ test_src = "test/strace_test.c"
 name = "strace-grate"
 dir = "strace-grate"
 type = "c"
+binary = "strace_grate"
 
 [[grate.tests]]
 test_src = "test/strace_test.c"
@@ -52,6 +56,7 @@ test_src = "test/strace_test.c"
 name = "imfs-grate"
 dir = "imfs-grate"
 type = "c"
+binary = "imfs_grate"
 
 [[grate.tests]]
 test_src = "tests/imfs-test.c"
@@ -82,6 +87,7 @@ test_src = "test/readonly-grate-test.c"
 name = "seccomp-grate"
 dir = "seccomp-grate"
 type = "c"
+binary = "seccomp_grate"
 
 [[grate.tests]]
 test_src = "test/seccomp_chmod_test.c"
@@ -102,6 +108,7 @@ type = "rust"
 
 [[grate.tests]]
 test_src = "test/chroot-test.c"
+grate_args = ["--chroot-dir", "/tmp"]
 
 # ── Race test ────────────────────────────────────────────────────────
 
