@@ -287,7 +287,7 @@ for gi in "${!G_NAMES[@]}"; do
         if [[ -n "$test_cwasm" && -f "$test_cwasm" ]]; then
             cp "$test_cwasm" "$LINDFS/"
             # Also copy into lindfs subdirectory if specified (e.g. for chroot tests)
-            local tdir="${T_LINDFS_DIR[$ti]}"
+            tdir="${T_LINDFS_DIR[$ti]:-}"
             if [[ -n "$tdir" ]]; then
                 mkdir -p "$LINDFS/$tdir"
                 cp "$test_cwasm" "$LINDFS/$tdir/"
