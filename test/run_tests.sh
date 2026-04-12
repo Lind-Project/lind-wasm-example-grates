@@ -241,10 +241,21 @@ for gi in "${!G_NAMES[@]}"; do
         *)    continue ;;
     esac
 
-    # Copy grate cwasm to lindfs
-    grate_cwasm="$(find "$REPO_ROOT/examples/$gdir" -name "*.cwasm" 2>/dev/null | head -1)"
-    if [[ -n "$grate_cwasm" && -f "$grate_cwasm" ]]; then
+    # Copy grate cwasm to lindfs — search grate dir and common output locations
+    grate_cwasm=""
+    for candidate in \
+        $(find "$REPO_ROOT/examples/$gdir" -name "*.cwasm" -not -path "*/test*" -not -path "*/tests*" 2>/dev/null) \
+        $(find "$REPO_ROOT/examples/$gdir" -path "*/target/wasm32-wasip1/*/deps" -prune -o -name "*.cwasm" -print 2>/dev/null); do
+        if [[ -f "$candidate" ]]; then
+            grate_cwasm="$candidate"
+            break
+        fi
+    done
+    if [[ -n "$grate_cwasm" ]]; then
         cp "$grate_cwasm" "$LINDFS/"
+        echo "    -> $(basename "$grate_cwasm") copied to lindfs"
+    else
+        echo -e "  ${YELLOW}Warning: no .cwasm found for $gname after build${NC}"
     fi
 
     # Compile all tests for this grate
@@ -368,37 +379,29 @@ for gi in "${!G_NAMES[@]}"; do
             run_args="$(parse_toml_array "$targs" | tr '\n' ' ')"
         fi
 
-        # Run — pipe output through a monitor that kills the process on panic
+        # Run with timeout; capture output and check for panics
         cmd="lind-wasm $(basename "$grate_cwasm") ${run_args}$(basename "$test_cwasm")"
         echo "  Running: $cmd (timeout=${ttimeout}s)"
 
-        exit_code=0
         tmp_out=$(mktemp)
-
-        timeout "$ttimeout" lind-wasm "$(basename "$grate_cwasm")" \
+        exit_code=0
+        timeout -k 5 "$ttimeout" lind-wasm "$(basename "$grate_cwasm")" \
             $run_args \
             "$(basename "$test_cwasm")" \
-            > "$tmp_out" 2>&1 &
-        run_pid=$!
+            > "$tmp_out" 2>&1 || exit_code=$?
 
-        # Monitor output for panics — kill immediately if detected
-        panicked=0
-        while kill -0 "$run_pid" 2>/dev/null; do
-            if grep -q "panicked" "$tmp_out" 2>/dev/null; then
-                kill "$run_pid" 2>/dev/null
-                wait "$run_pid" 2>/dev/null || true
-                panicked=1
-                break
-            fi
-            sleep 0.1
-        done
-
-        if [[ $panicked -eq 0 ]]; then
-            wait "$run_pid" 2>/dev/null || exit_code=$?
+        # Show output (indented, truncate if huge)
+        head -50 "$tmp_out" | sed 's/^/    /'
+        line_count=$(wc -l < "$tmp_out")
+        if [[ $line_count -gt 50 ]]; then
+            echo "    ... ($line_count lines total, truncated)"
         fi
 
-        # Show output (indented)
-        sed 's/^/    /' < "$tmp_out"
+        # Check for panic in output
+        panicked=0
+        if grep -q "panicked" "$tmp_out" 2>/dev/null; then
+            panicked=1
+        fi
         rm -f "$tmp_out"
 
         if [[ $panicked -eq 1 ]]; then
