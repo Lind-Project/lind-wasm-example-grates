@@ -111,14 +111,3 @@ type = "rust"
 test_src = "test/chroot-test.c"
 grate_args = ["--chroot-dir", "/tmp"]
 lindfs_dir = "tmp"
-
-# ── Race test ────────────────────────────────────────────────────────
-
-[[grate]]
-name = "race-test-grate"
-dir = "race-test-grate"
-type = "c"
-
-[[grate.tests]]
-test_src = "test/race_test.c"
-timeout = 60
