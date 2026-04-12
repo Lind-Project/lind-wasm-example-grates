@@ -16,7 +16,7 @@ For each intercepted syscall, `WitnessGrate`:
 3. derives the cage's keypair,
 4. assigns a monotonically increasing sequence number,
 5. signs a structured syscall record, and
-6. logs the signed evidence before forwarding the syscall through 3i. :contentReference[oaicite:1]{index=1}
+6. logs the signed evidence before forwarding the syscall through 3i.
 
 ## Overview
 
@@ -35,7 +35,7 @@ Each intercepted syscall is converted into a `syscall_record_t`:
 - 6 syscall arguments
 - 6 argument-cage identifiers
 
-That record is signed with Ed25519 and emitted into the witness log. :contentReference[oaicite:2]{index=2}
+That record is signed with Ed25519 and emitted into the witness log.
 
 ---
 
@@ -46,14 +46,14 @@ The following syscall numbers are currently handled:
 - `SYS_READ = 0`
 - `SYS_WRITE = 1`
 - `SYS_EXECVE = 59`
-- `SYS_OPENAT = 257` :contentReference[oaicite:3]{index=3}
+- `SYS_OPENAT = 257`
 
 Each one is registered through `register_handler(...)` so that 3i routes matching calls to the corresponding witness handler:
 
 - `read_witness`
 - `write_witness`
 - `openat_witness`
-- `execve_witness` :contentReference[oaicite:4]{index=4}
+- `execve_witness`
 
 ---
 
@@ -65,7 +65,7 @@ When `WitnessGrate` starts, it:
 
 - initializes logging,
 - initializes the in-memory witness context table,
-- records its own process ID as the grate ID. :contentReference[oaicite:5]{index=5}
+- records its own process ID as the grate ID.
 
 ### 2. Parent/child setup
 
