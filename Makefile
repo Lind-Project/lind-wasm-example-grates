@@ -43,7 +43,7 @@ $(notdir $(1)):
 	@if [ -f "$(1)/compile_grate.sh" ]; then \
 		cd "$(1)" && bash compile_grate.sh; \
 	elif [ -f "$(1)/Cargo.toml" ]; then \
-		cd "$(1)" && cargo build --target wasm32-wasip1; \
+		cd "$(1)" && cargo lind_compile; \
 	else \
 		echo "ERROR: No build file for $(1)"; exit 1; \
 	fi

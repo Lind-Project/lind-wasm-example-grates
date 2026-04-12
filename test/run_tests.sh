@@ -161,8 +161,8 @@ build_rust_grate() {
             return 1
         fi
     elif [[ -f "$grate_dir/Cargo.toml" ]]; then
-        echo "  Building Rust grate: $dir (cargo)"
-        if ! (cd "$grate_dir" && cargo build --target wasm32-wasip1) 2>&1 | sed 's/^/    /'; then
+        echo "  Building Rust grate: $dir (cargo lind_compile)"
+        if ! (cd "$grate_dir" && cargo lind_compile) 2>&1 | sed 's/^/    /'; then
             return 1
         fi
     else
@@ -286,10 +286,12 @@ for gi in "${!G_NAMES[@]}"; do
             run_args="$(parse_toml_array "$targs" | tr '\n' ' ')"
         fi
 
-        # Find grate cwasm in lindfs
+        # Find grate cwasm — check lindfs first, then search the grate dir
         grate_cwasm=""
-        # Try exact name match, then glob
-        for candidate in "$LINDFS/${gname}.cwasm" "$LINDFS/"*"${gdir}"*.cwasm; do
+        for candidate in \
+            "$LINDFS/${gname}.cwasm" \
+            "$LINDFS/"*"${gdir}"*.cwasm \
+            $(find "$REPO_ROOT/examples/$gdir" -name "*.cwasm" 2>/dev/null); do
             if [[ -f "$candidate" ]]; then
                 grate_cwasm="$candidate"
                 break
@@ -297,16 +299,37 @@ for gi in "${!G_NAMES[@]}"; do
         done
 
         if [[ -z "$grate_cwasm" || ! -f "$grate_cwasm" ]]; then
-            log_fail "$test_label (grate .cwasm not found in lindfs)"
+            log_fail "$test_label (grate .cwasm not found)"
             continue
         fi
 
-        # Find test cwasm
+        # Copy grate cwasm to lindfs if not already there
+        if [[ "$(dirname "$grate_cwasm")" != "$LINDFS" ]]; then
+            cp "$grate_cwasm" "$LINDFS/"
+            grate_cwasm="$LINDFS/$(basename "$grate_cwasm")"
+        fi
+
+        # Find test cwasm — check lindfs, then search near the source
         test_basename="$(basename "$tsrc" .c)"
-        test_cwasm="$LINDFS/${test_basename}.cwasm"
-        if [[ ! -f "$test_cwasm" ]]; then
-            log_fail "$test_label (test .cwasm not found in lindfs)"
+        test_cwasm=""
+        for candidate in \
+            "$LINDFS/${test_basename}.cwasm" \
+            $(find "$(dirname "$test_src_path")" -name "${test_basename}.cwasm" 2>/dev/null); do
+            if [[ -f "$candidate" ]]; then
+                test_cwasm="$candidate"
+                break
+            fi
+        done
+
+        if [[ -z "$test_cwasm" || ! -f "$test_cwasm" ]]; then
+            log_fail "$test_label (test .cwasm not found)"
             continue
+        fi
+
+        # Copy test cwasm to lindfs if not already there
+        if [[ "$(dirname "$test_cwasm")" != "$LINDFS" ]]; then
+            cp "$test_cwasm" "$LINDFS/"
+            test_cwasm="$LINDFS/$(basename "$test_cwasm")"
         fi
 
         # Run
