@@ -3,5 +3,11 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
-lind_compile --compile-grate src/witness_grate.c /home/lind/lind-wasm-apps/ed25519/*.c -I/home/lind/lind-wasm-apps/
 
+: "${LIND_WASM_APPS:?LIND_WASM_APPS is not set}"
+
+lind_compile --compile-grate \
+  src/witness_grate.c \
+  "$LIND_WASM_APPS"/ed25519/*.c \
+  -I"$LIND_WASM_APPS"/
+  

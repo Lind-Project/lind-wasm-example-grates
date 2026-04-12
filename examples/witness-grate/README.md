@@ -74,7 +74,7 @@ When `WitnessGrate` starts, it:
 To ensure the child does **not** start executing before the parent has finished registration, the parent and child synchronize through a **shared unnamed semaphore** allocated with:
 
 - `mmap(..., MAP_SHARED | MAP_ANONYMOUS, ...)`
-- `sem_init(start_sem, 1, 0)` :contentReference[oaicite:6]{index=6}
+- `sem_init(start_sem, 1, 0)` 
 
 The child blocks on:
 
