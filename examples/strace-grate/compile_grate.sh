@@ -3,4 +3,4 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
-lind_compile --compile-grate src/strace_grate.c src/strace.c
+lind_compile -s --compile-grate src/strace_grate.c src/strace.c
