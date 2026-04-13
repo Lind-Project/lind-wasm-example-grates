@@ -325,13 +325,17 @@ impl GrateBuilder {
     /// - This is a terminal function.
     /// - Must always be called from the parent grate.
     fn run_teardown(callback: Option<GrateTeardownCallback>, result: Result<i32, GrateError>) -> ! {
+        let exit_code = match &result {
+            Ok(status) => *status,
+            Err(_) => 1,
+        };
         match callback {
             Some(f) => {
                 f(result);
-                clean_exit(0);
+                clean_exit(exit_code);
             }
             None => {
-                clean_exit(0);
+                clean_exit(exit_code);
             }
         }
     }
