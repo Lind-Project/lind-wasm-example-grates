@@ -330,22 +330,35 @@ int test_rate_recovery(void) {
  *  PREAD / PWRITE / READV / WRITEV TESTS
  * ================================================================= */
 
-/* Test 11: pwrite charges filewrite */
+/* Test 11: pwrite charges filewrite — verify via timing.
+ * Config: filewrite = 50000 (50 KB/sec).
+ * 30 pwrite calls of 4KB each = 120KB.  At 50KB/sec burst of 50KB,
+ * the excess 70KB should take ~1.4s to drain.  We check that the
+ * total time is > 0.5s to confirm the grate is actually charging. */
 int test_pwrite(void) {
 	int fd = open("/tmp/res_pwrite.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
 	if (fd < 0)
 		FAIL("open");
 
-	char buf[100];
+	char buf[4096];
 	memset(buf, 'P', sizeof(buf));
 
-	ssize_t n = pwrite(fd, buf, sizeof(buf), 0);
-	if (n != (ssize_t)sizeof(buf))
-		FAIL("pwrite");
+	struct timespec start, end;
+	clock_gettime(CLOCK_MONOTONIC, &start);
 
-	/* Verify data with pread. */
-	char rbuf[100] = {0};
-	n = pread(fd, rbuf, sizeof(rbuf), 0);
+	for (int i = 0; i < 30; i++) {
+		ssize_t n = pwrite(fd, buf, sizeof(buf), (off_t)(i * sizeof(buf)));
+		if (n != (ssize_t)sizeof(buf))
+			FAIL("pwrite");
+	}
+
+	clock_gettime(CLOCK_MONOTONIC, &end);
+	double dt = elapsed_sec(&start, &end);
+	printf("  30 pwrite(4KB) in %.2fs (expect > 0.5s)\n", dt);
+
+	/* Verify data round-trip with pread. */
+	char rbuf[4096] = {0};
+	ssize_t n = pread(fd, rbuf, sizeof(rbuf), 0);
 	if (n != (ssize_t)sizeof(rbuf))
 		FAIL("pread");
 	if (memcmp(buf, rbuf, sizeof(buf)) != 0)
@@ -353,65 +366,99 @@ int test_pwrite(void) {
 
 	close(fd);
 	unlink("/tmp/res_pwrite.txt");
+
+	if (dt < 0.5)
+		FAIL("too fast — pwrite not charging filewrite");
 	PASS();
 	return 0;
 }
 
-/* Test 12: writev charges filewrite */
+/* Test 12: writev charges filewrite — verify via timing.
+ * Each writev scatters two 2KB buffers (4KB total).  30 calls = 120KB.
+ * At 50KB/sec this should take > 0.5s. */
 int test_writev(void) {
 	int fd = open("/tmp/res_writev.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
 	if (fd < 0)
 		FAIL("open");
 
-	char a[] = "hello ";
-	char b[] = "writev";
+	char a[2048], b[2048];
+	memset(a, 'W', sizeof(a));
+	memset(b, 'V', sizeof(b));
 	struct iovec iov[2];
 	iov[0].iov_base = a;
-	iov[0].iov_len = strlen(a);
+	iov[0].iov_len = sizeof(a);
 	iov[1].iov_base = b;
-	iov[1].iov_len = strlen(b);
+	iov[1].iov_len = sizeof(b);
 
-	ssize_t n = writev(fd, iov, 2);
-	if (n != (ssize_t)(strlen(a) + strlen(b)))
-		FAIL("writev");
+	struct timespec start, end;
+	clock_gettime(CLOCK_MONOTONIC, &start);
 
-	/* Read back. */
+	for (int i = 0; i < 30; i++) {
+		ssize_t n = writev(fd, iov, 2);
+		if (n != (ssize_t)(sizeof(a) + sizeof(b)))
+			FAIL("writev");
+	}
+
+	clock_gettime(CLOCK_MONOTONIC, &end);
+	double dt = elapsed_sec(&start, &end);
+	printf("  30 writev(4KB) in %.2fs (expect > 0.5s)\n", dt);
+
+	/* Verify data round-trip. */
 	lseek(fd, 0, SEEK_SET);
-	char rbuf[32] = {0};
+	char rbuf[4096] = {0};
 	read(fd, rbuf, sizeof(rbuf));
-	if (strcmp(rbuf, "hello writev") != 0)
+	if (memcmp(rbuf, a, sizeof(a)) != 0)
 		FAIL("data mismatch");
 
 	close(fd);
 	unlink("/tmp/res_writev.txt");
+
+	if (dt < 0.5)
+		FAIL("too fast — writev not charging filewrite");
 	PASS();
 	return 0;
 }
 
-/* Test 13: readv charges fileread */
+/* Test 13: readv charges fileread — verify via timing.
+ * Write 120KB to a file, then readv it back in 30 calls of two 2KB
+ * iovecs (4KB each).  At 50KB/sec this should take > 0.5s. */
 int test_readv(void) {
 	int fd = open("/tmp/res_readv.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
 	if (fd < 0)
 		FAIL("open");
 
-	write(fd, "ABCDEFGHIJ", 10);
+	/* Populate file with 120KB. */
+	char wbuf[4096];
+	memset(wbuf, 'R', sizeof(wbuf));
+	for (int i = 0; i < 30; i++)
+		write(fd, wbuf, sizeof(wbuf));
 	lseek(fd, 0, SEEK_SET);
 
-	char a[5] = {0}, b[5] = {0};
+	char a[2048], b[2048];
 	struct iovec iov[2];
 	iov[0].iov_base = a;
-	iov[0].iov_len = 5;
+	iov[0].iov_len = sizeof(a);
 	iov[1].iov_base = b;
-	iov[1].iov_len = 5;
+	iov[1].iov_len = sizeof(b);
 
-	ssize_t n = readv(fd, iov, 2);
-	if (n != 10)
-		FAIL("readv");
-	if (memcmp(a, "ABCDE", 5) != 0 || memcmp(b, "FGHIJ", 5) != 0)
-		FAIL("data mismatch");
+	struct timespec start, end;
+	clock_gettime(CLOCK_MONOTONIC, &start);
+
+	for (int i = 0; i < 30; i++) {
+		ssize_t n = readv(fd, iov, 2);
+		if (n != (ssize_t)(sizeof(a) + sizeof(b)))
+			FAIL("readv");
+	}
+
+	clock_gettime(CLOCK_MONOTONIC, &end);
+	double dt = elapsed_sec(&start, &end);
+	printf("  30 readv(4KB) in %.2fs (expect > 0.5s)\n", dt);
 
 	close(fd);
 	unlink("/tmp/res_readv.txt");
+
+	if (dt < 0.5)
+		FAIL("too fast — readv not charging fileread");
 	PASS();
 	return 0;
 }
@@ -751,9 +798,6 @@ int main(void) {
 	test_basic_write_read();
 	test_multiple_writes();
 	test_large_read();
-	test_pwrite();
-	test_writev();
-	test_readv();
 	test_open_write_flags();
 	test_zero_write();
 
@@ -780,6 +824,9 @@ int main(void) {
 	/* Timed rate limiting (these are slow — run last). */
 	test_timed_write();
 	test_timed_read();
+	test_pwrite();
+	test_writev();
+	test_readv();
 	test_burst_window();
 	test_rate_recovery();
 	test_timed_getrandom();
