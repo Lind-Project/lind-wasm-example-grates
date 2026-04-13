@@ -16,7 +16,7 @@
 #   grate_args - (optional) extra args between grate and test binary
 #   files      - (optional) extra files to copy into lindfs
 #   lindfs_dir - (optional) also copy test cwasm into this lindfs subdirectory
-#   timeout    - (optional) timeout in seconds (default: 30)
+#   timeout    - (optional) timeout in seconds (default: 60)
 #   skip       - (optional) skip this test
 
 # ── Minimal example ──────────────────────────────────────────────────

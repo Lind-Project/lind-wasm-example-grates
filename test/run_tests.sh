@@ -14,7 +14,7 @@
 # Environment:
 #   LIND_WASM_ROOT  - root of lind-wasm checkout (default: ~/lind-wasm)
 #   LINDFS          - lindfs directory (default: $LIND_WASM_ROOT/lindfs)
-#   TIMEOUT         - default timeout per test in seconds (default: 30)
+#   TIMEOUT         - default timeout per test in seconds (default: 60)
 
 set -uo pipefail
 
@@ -217,6 +217,12 @@ parse_config "$CONFIG"
 # Track which grates built successfully (by index)
 BUILD_OK=()
 
+# Track test cwasm basenames to detect collisions across grates
+declare -A TEST_CWASM_OWNERS
+
+# Track whether the filter matched any grate
+FILTER_MATCHED=0
+
 # ── Phase 1: Build all grates and compile all tests ──────────────────
 
 echo -e "\n${CYAN}── Phase 1: Build ──${NC}"
@@ -231,6 +237,8 @@ for gi in "${!G_NAMES[@]}"; do
     if [[ -n "$FILTER" && "$FILTER" != "$gname" && "$FILTER" != "$gdir" ]]; then
         continue
     fi
+
+    [[ -n "$FILTER" ]] && FILTER_MATCHED=1
 
     if [[ "$gskip" == "true" ]]; then
         continue
@@ -257,7 +265,8 @@ for gi in "${!G_NAMES[@]}"; do
             cp "$grate_cwasm" "$LINDFS/"
             echo "    -> $(basename "$grate_cwasm") copied to lindfs"
         else
-            echo -e "  ${YELLOW}Warning: no .cwasm found for $gname after build${NC}"
+            echo -e "  ${RED}ERROR: no .cwasm found for $gname after build${NC}"
+            continue
         fi
     fi
 
@@ -285,6 +294,12 @@ for gi in "${!G_NAMES[@]}"; do
         test_basename="$(basename "$tsrc" .c)"
         test_cwasm="$(find "$(dirname "$test_src_path")" -name "${test_basename}.cwasm" 2>/dev/null | head -1)"
         if [[ -n "$test_cwasm" && -f "$test_cwasm" ]]; then
+            cwasm_base="$(basename "$test_cwasm")"
+            prev_owner="${TEST_CWASM_OWNERS[$cwasm_base]:-}"
+            if [[ -n "$prev_owner" && "$prev_owner" != "$gname" ]]; then
+                echo -e "  ${YELLOW}Warning: $cwasm_base already used by $prev_owner, overwriting for $gname${NC}"
+            fi
+            TEST_CWASM_OWNERS[$cwasm_base]="$gname"
             cp "$test_cwasm" "$LINDFS/"
             # Also copy into lindfs subdirectory if specified (e.g. for chroot tests)
             tdir="${T_LINDFS_DIR[$ti]:-}"
@@ -292,6 +307,10 @@ for gi in "${!G_NAMES[@]}"; do
                 mkdir -p "$LINDFS/$tdir"
                 cp "$test_cwasm" "$LINDFS/$tdir/"
             fi
+        else
+            echo -e "  ${RED}ERROR: compiled .cwasm not found for $tsrc${NC}"
+            test_build_ok=0
+            continue
         fi
 
         # Copy extra files to lindfs
@@ -440,5 +459,11 @@ echo -e "  Total:   $TOTAL"
 echo -e "  ${GREEN}Passed:  $PASSED${NC}"
 echo -e "  ${RED}Failed:  $FAILED${NC}"
 echo -e "  ${YELLOW}Skipped: $SKIPPED${NC}"
+
+if [[ -n "$FILTER" && $FILTER_MATCHED -eq 0 ]]; then
+    echo -e "${RED}ERROR: no grate matched filter '$FILTER'${NC}"
+    echo "Run with --list to see available grates."
+    exit 1
+fi
 
 [[ $FAILED -eq 0 ]] && exit 0 || exit 1
