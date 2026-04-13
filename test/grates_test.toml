@@ -111,3 +111,16 @@ type = "rust"
 test_src = "test/chroot-test.c"
 grate_args = ["--chroot-dir", "/tmp"]
 lindfs_dir = "tmp"
+
+# ── Resource (Rust) ──────────────────────────────────────────────────
+
+[[grate]]
+name = "resource-grate-rs"
+dir = "resource-grate-rs"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/resource_test.c"
+grate_args = ["test_resources.cfg"]
+files = ["test/test_resources.cfg"]
+timeout = 120
