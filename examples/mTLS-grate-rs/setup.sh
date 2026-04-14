@@ -25,8 +25,8 @@ openssl verify -CAfile "$CERT_DIR/ca.crt" "$CERT_DIR/cert.pem"
 
 # 7. Execution Commands
 # Running the server
-#lind mtls-grate --cert "$CERT_DIR/cert.pem" --key "$CERT_DIR/key.pem" --ca "$CERT_DIR/ca.crt" -- echo_server.wasm
+# lind_run mTLS-grate.cwasm --cert ./certs/cert.pem --key ./certs/key.pem --ca ./certs/ca.crt -- mtls_test.cwasm
 
 # Client connection test
 # Note: Ensure the paths match where the client is running from
-#openssl s_client -connect 127.0.0.1:443 -cert "$CERT_DIR/cert.pem" -key "$CERT_DIR/key.pem" -CAfile "$CERT_DIR/ca.crt"
+# openssl s_client -connect 127.0.0.1:443 -cert "$CERT_DIR/cert.pem" -key "$CERT_DIR/key.pem" -CAfile "$CERT_DIR/ca.crt"
