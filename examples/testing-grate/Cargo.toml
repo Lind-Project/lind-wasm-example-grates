@@ -5,4 +5,4 @@ edition = "2024"
 build = "build.rs"
 
 [dependencies]
-grate-rs = { path = "../../lib/grate-rs" }
+grate-rs = { git = "https://github.com/Lind-Project/lind-wasm-example-grates/", branch = "main", subdir = "/lib/grate-rs" }

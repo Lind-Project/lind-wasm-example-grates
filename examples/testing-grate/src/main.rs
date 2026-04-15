@@ -1,8 +1,8 @@
 use grate_rs::{GrateBuilder, GrateError, make_threei_call};
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
-static RULES: OnceLock<Mutex<HashMap<u64, RuleAction>>> = OnceLock::new();
+static RULES: OnceLock<HashMap<u64, RuleAction>> = OnceLock::new();
 
 #[derive(Clone, Copy)]
 enum RuleAction {
@@ -23,13 +23,13 @@ fn parse_rules(spec: &str) -> Result<HashMap<u64, RuleAction>, String> {
 
     for raw in spec.split(',') {
         let token = raw.trim();
-        if token.is_empty() || token == "..." {
+        if token.is_empty() {
             continue;
         }
 
-        let (syscall_raw, value_raw) = token
-            .split_once(':')
-            .ok_or_else(|| format!("Invalid rule '{token}'; expected <syscall>:<constant|empty>"))?;
+        let (syscall_raw, value_raw) = token.split_once(':').ok_or_else(|| {
+            format!("Invalid rule '{token}'; expected <syscall>:<constant|empty>")
+        })?;
 
         let syscall_nr = syscall_raw
             .trim()
@@ -77,7 +77,7 @@ fn dispatch_handler(
 ) -> i32 {
     let action = RULES
         .get()
-        .and_then(|rules| rules.lock().ok().and_then(|map| map.get(&syscall_nr).copied()));
+        .and_then(|rules| rules.get(&syscall_nr).copied());
 
     match action {
         Some(RuleAction::ReturnConst(v)) => v,
@@ -163,7 +163,7 @@ fn main() {
         grate = grate.register(syscall_nr, handler);
     }
 
-    if RULES.set(Mutex::new(installed)).is_err() {
+    if RULES.set(installed).is_err() {
         eprintln!("[testing-grate] internal error while initializing syscall rules");
         std::process::exit(2);
     }
