@@ -124,3 +124,14 @@ test_src = "test/resource_test.c"
 grate_args = ["test_resources.cfg"]
 files = ["test/test_resources.cfg"]
 timeout = 120
+
+# Testing Grate (Rust)
+
+[[grate]]
+name = "testing-grate"
+dir = "testing-grate-rs"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/testing-grate-test.c"
+grate_args = ["-s", "0:100,1:"]
