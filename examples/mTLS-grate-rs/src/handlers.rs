@@ -191,7 +191,7 @@ pub extern "C" fn connect_syscall(
     // wrap and store the stream
     let socket = ThreeiSocket {
         real_fd: real_fd,
-        fd_owner_cage: this_cage,
+        fd_owner_cage: fd_cage,
     };
     let stream = StreamOwned::new(conn, socket);
 
@@ -283,7 +283,7 @@ pub extern "C" fn accept_syscall(
 
     let socket = ThreeiSocket {
         real_fd: real_new_fd,
-        fd_owner_cage: this_cage,
+        fd_owner_cage: fd_cage,
     };
 
     let stream = StreamOwned::new(conn, socket);
