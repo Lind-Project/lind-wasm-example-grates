@@ -62,6 +62,9 @@ fn main() {
 
     let builder = GrateBuilder::new()
         .register(SYS_READ, read_syscall)
+        .preexec(|child_cage: i32| {
+            println!("Cageid: {}", child_cage);
+        })
         .teardown(|result: Result<i32, GrateError>| {
             println!("Result: {:#?}", result);
         });
