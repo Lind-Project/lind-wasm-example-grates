@@ -36,7 +36,7 @@ impl Read for ThreeiSocket {
         let ret = make_threei_call(
             SYS_READ as u32,
             0,
-            self.fd_owner_cage,
+            this_cage,
             self.fd_owner_cage,
             self.real_fd,
             self.fd_owner_cage,
@@ -78,7 +78,7 @@ impl Write for ThreeiSocket {
         let ret = make_threei_call(
             SYS_WRITE as u32,
             0,
-            self.fd_owner_cage,
+            this_cage,
             self.fd_owner_cage,
             self.real_fd,
             self.fd_owner_cage,
