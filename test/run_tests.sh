@@ -137,7 +137,7 @@ parse_toml_array() {
     local raw="$1"
     raw="${raw#\[}"
     raw="${raw%\]}"
-    echo "$raw" | tr ',' '\n' | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//' | grep -v '^$'
+    echo "$raw" | sed -E 's/",[[:space:]]*"/\n/g; s/^[[:space:]]*"//; s/"[[:space:]]*$//' | grep -v '^$'
 }
 
 # ── Build functions ──────────────────────────────────────────────────
@@ -186,9 +186,9 @@ build_rust_grate() {
 compile_test() {
     local test_src="$1"
     echo "  Compiling test: $(basename "$test_src")"
-    if ! lind-clang "$test_src" > /dev/null 2>&1; then
+    if ! lind-clang -s "$test_src" > /dev/null 2>&1; then
         echo "    Compile failed. Re-running with output:"
-        lind-clang "$test_src" 2>&1 | sed 's/^/    /'
+        lind-clang -s "$test_src" 2>&1 | sed 's/^/    /'
         return 1
     fi
 }
