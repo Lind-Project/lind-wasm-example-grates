@@ -166,8 +166,9 @@ fn main() {
         child_cage_id, ns_cage_id
     );
 
-    // Mark the child cage as clamped.
+    // Mark the child cage as clamped, initialize fdtable entry.
     helpers::register_clamped_cage(child_cage_id);
+    fdtables::init_empty_cage(child_cage_id);
 
     // Register lifecycle handlers on the child cage.
     handlers::register_lifecycle_handlers(child_cage_id);

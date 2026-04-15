@@ -19,9 +19,6 @@ use grate_rs::{copy_data_between_cages, make_threei_call};
 /// When a clamped grate registers a handler, we store the alt number here.
 static ROUTES: Mutex<Option<HashMap<(u64, u64), u64>>> = Mutex::new(None);
 
-/// Whether we are still in the clamp phase (before `%}` is exec'd).
-static IN_CLAMP_PHASE: Mutex<bool> = Mutex::new(true);
-
 /// The namespace grate's own cage ID.
 static NS_CAGE_ID: Mutex<u64> = Mutex::new(0);
 
@@ -41,7 +38,6 @@ pub fn init_globals(ns_cage_id: u64, prefix: String) {
     *CLAMPED_CAGES.lock().unwrap() = Some(HashMap::new());
     *NS_CAGE_ID.lock().unwrap() = ns_cage_id;
     *ROUTING_PREFIX.lock().unwrap() = Some(prefix);
-    *IN_CLAMP_PHASE.lock().unwrap() = true;
 }
 
 // =====================================================================
@@ -61,14 +57,6 @@ pub fn get_routing_prefix() -> String {
         .unwrap_or_default()
 }
 
-pub fn is_in_clamp_phase() -> bool {
-    *IN_CLAMP_PHASE.lock().unwrap()
-}
-
-pub fn end_clamp_phase() {
-    *IN_CLAMP_PHASE.lock().unwrap() = false;
-}
-
 /// Allocate the next available alt syscall number.
 pub fn alloc_alt_syscall() -> u64 {
     let mut next = ALT_ALLOCATOR.lock().unwrap();
@@ -81,16 +69,16 @@ pub fn alloc_alt_syscall() -> u64 {
 //  Cage tracking
 // =====================================================================
 
-/// Record that this cage is inside the clamp. Also inits its fdtables entry.
+/// Record that this cage is inside the clamp.
 pub fn register_clamped_cage(cage_id: u64) {
-    println!("register_clamped_cage: {}", cage_id);
     let mut cages = CLAMPED_CAGES.lock().unwrap();
     cages.as_mut().unwrap().insert(cage_id, ());
+}
 
-    match fdtables::check_cage_exists(cage_id) {
-        false => fdtables::init_empty_cage(cage_id),
-        _ => {}
-    };
+/// Remove a cage's clamped status. Done when we hit %}
+pub fn deregister_clamped_cage(cage_id: u64) {
+    let mut cages = CLAMPED_CAGES.lock().unwrap();
+    cages.as_mut().unwrap().remove(&cage_id);
 }
 
 pub fn is_cage_clamped(cage_id: u64) -> bool {
@@ -124,23 +112,6 @@ pub fn get_route(cage_id: u64, syscall_nr: u64) -> Option<u64> {
         .unwrap()
         .as_ref()
         .and_then(|r| r.get(&(cage_id, syscall_nr)).copied())
-}
-
-/// Clone routing state from parent cage to child cage.
-pub fn clone_cage_state(parent_cage_id: u64, child_cage_id: u64) {
-    {
-        let mut routes = ROUTES.lock().unwrap();
-        let routes = routes.as_mut().unwrap();
-        let parent_routes: Vec<_> = routes
-            .iter()
-            .filter(|&(&(cid, _), _)| cid == parent_cage_id)
-            .map(|(&(_, syscall_nr), &alt_nr)| ((child_cage_id, syscall_nr), alt_nr))
-            .collect();
-        for (key, val) in parent_routes {
-            routes.insert(key, val);
-        }
-    }
-    register_clamped_cage(child_cage_id);
 }
 
 /// Remove all state for a cage (routes + clamped status).
