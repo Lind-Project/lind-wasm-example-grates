@@ -110,8 +110,10 @@ fn dispatch_handler(
             }
         },
         None => {
-            eprintln!("[testing-grate] no rule found for syscall {}", syscall_nr);
-            -1
+            unreachable!(
+                "[testin-grate] no rule for syscall {} but an entry exists.",
+                syscall_nr
+            );
         }
     }
 }
