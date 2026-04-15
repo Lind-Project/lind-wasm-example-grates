@@ -290,11 +290,13 @@ pub unsafe extern "C" fn pass_fptr_to_wt(
 }
 
 pub type GrateTeardownCallback = Box<dyn Fn(Result<i32, GrateError>)>;
+pub type PreExecCallback = Box<dyn Fn(i32)>;
 
 /// A builder for creating grates with customizable lifecycle hooks
 pub struct GrateBuilder {
     handlers: Vec<(u64, SyscallHandler)>,
     teardown: Option<GrateTeardownCallback>,
+    preexec: Option<PreExecCallback>,
 }
 
 impl GrateBuilder {
@@ -303,6 +305,7 @@ impl GrateBuilder {
         Self {
             handlers: Vec::new(),
             teardown: None,
+            preexec: None,
         }
     }
 
@@ -318,6 +321,15 @@ impl GrateBuilder {
         F: Fn(Result<i32, GrateError>) + 'static,
     {
         self.teardown = Some(Box::new(callback));
+        self
+    }
+
+    /// Register a pre-exec callback function. Run after fork, but before exec.
+    pub fn preexec<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(i32) + 'static,
+    {
+        self.preexec = Some(Box::new(callback));
         self
     }
 
@@ -406,6 +418,11 @@ impl GrateBuilder {
                         Ok(_) => {}
                         Err(ret) => GrateBuilder::run_teardown(teardown, Err(ret)),
                     };
+                }
+
+                // Call the pre-exec hook if specified.
+                if let Some(callback) = self.preexec.take() {
+                    callback(cageid);
                 }
 
                 // Indicate to the child that it can begin execution.
