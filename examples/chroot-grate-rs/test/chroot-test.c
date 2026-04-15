@@ -10,6 +10,7 @@
 #include <sys/statfs.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 
@@ -112,6 +113,27 @@ int main(int argc, char *argv[]) {
     errno = 0;
     int cr = chroot(".");
     CHECK("chroot: must be rejected inside cage", cr == -1);
+
+    // ---- exec outside chroot (should fail) ----
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            // Child: try to exec a path that doesn't exist inside the chroot.
+            // The grate rewrites this to <chroot>/outside_chroot_bin, which
+            // shouldn't exist, so execv must fail.
+            char *args[] = {"/outside_chroot_bin", NULL};
+            execv("/outside_chroot_bin", args);
+            // execv failed as expected — exit 0 to signal success to parent
+            _exit(0);
+        } else if (pid > 0) {
+            int wstatus;
+            waitpid(pid, &wstatus, 0);
+            CHECK("exec: path outside chroot is unreachable",
+                  WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 0);
+        } else {
+            FAIL("exec: fork failed");
+        }
+    }
 
     // ---- AF_UNIX stream ----
     const char *srvp = "sock_s";
