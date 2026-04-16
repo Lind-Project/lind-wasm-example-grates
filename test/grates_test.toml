@@ -1,0 +1,137 @@
+# Grate test suite configuration.
+#
+# Each [[grate]] entry defines a grate to build and test.
+#
+# Fields:
+#   name      - display name
+#   dir       - directory under examples/
+#   type      - "rust" or "c"
+#   binary    - (optional) cwasm filename in lindfs (without .cwasm)
+#               defaults to name
+#   tests     - list of test entries
+#   skip      - (optional) skip this grate entirely
+#
+# Test fields:
+#   test_src   - C source file to compile (relative to grate dir)
+#   grate_args - (optional) extra args between grate and test binary
+#   files      - (optional) extra files to copy into lindfs
+#   lindfs_dir - (optional) also copy test cwasm into this lindfs subdirectory
+#   timeout    - (optional) timeout in seconds (default: 60)
+#   skip       - (optional) skip this test
+
+# ── Minimal example ──────────────────────────────────────────────────
+
+[[grate]]
+name = "geteuid-grate"
+dir = "geteuid-grate"
+type = "c"
+binary = "geteuid_grate"
+
+[[grate.tests]]
+test_src = "test/geteuid.c"
+
+# ── Rust strace ──────────────────────────────────────────────────────
+
+[[grate]]
+name = "strace-grate-rs"
+dir = "strace-grate-rs"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/strace_test.c"
+
+# ── C strace ─────────────────────────────────────────────────────────
+
+[[grate]]
+name = "strace-grate"
+dir = "strace-grate"
+type = "c"
+binary = "strace_grate"
+
+[[grate.tests]]
+test_src = "test/strace_test.c"
+
+# ── IMFS (C) ─────────────────────────────────────────────────────────
+
+[[grate]]
+name = "imfs-grate"
+dir = "imfs-grate"
+type = "c"
+binary = "imfs_grate"
+
+[[grate.tests]]
+test_src = "tests/imfs-test.c"
+
+# ── IMFS (Rust) ──────────────────────────────────────────────────────
+
+[[grate]]
+name = "imfs-grate-rs"
+dir = "imfs-grate-rs"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/imfs_test.c"
+
+# ── Readonly (Rust) ──────────────────────────────────────────────────
+
+[[grate]]
+name = "readonly-grate-rs"
+dir = "readonly-grate-rs"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/readonly-grate-test.c"
+
+# ── Seccomp (C) — whitelist config ───────────────────────────────────
+
+[[grate]]
+name = "seccomp-grate"
+dir = "seccomp-grate"
+type = "c"
+binary = "seccomp_grate"
+
+[[grate.tests]]
+test_src = "test/seccomp_chmod_test.c"
+grate_args = ["seccomp_whitelist_test.conf"]
+files = ["policies/seccomp_whitelist_test.conf"]
+
+[[grate.tests]]
+test_src = "test/seccomp_chmod_test.c"
+grate_args = ["seccomp_blacklist_test.conf"]
+files = ["policies/seccomp_blacklist_test.conf"]
+
+# ── Chroot (Rust) ────────────────────────────────────────────────────
+
+[[grate]]
+name = "chroot-grate-rs"
+dir = "chroot-grate-rs"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/chroot-test.c"
+grate_args = ["--chroot-dir", "/tmp"]
+lindfs_dir = "tmp"
+
+# ── Resource (Rust) ──────────────────────────────────────────────────
+
+[[grate]]
+name = "resource-grate-rs"
+dir = "resource-grate-rs"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/resource_test.c"
+grate_args = ["test_resources.cfg"]
+files = ["test/test_resources.cfg"]
+timeout = 120
+
+# Testing Grate (Rust)
+
+[[grate]]
+name = "testing-grate"
+dir = "testing-grate-rs"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/testing-grate-test.c"
+grate_args = ["-s", "0:100,1:"]
