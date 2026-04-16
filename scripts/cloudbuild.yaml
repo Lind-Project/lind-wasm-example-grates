@@ -16,7 +16,7 @@ steps:
       - DOCKER_PASSWORD
 
   - name: "gcr.io/cloud-builders/docker"
-    id: Test Gate And Push Dev Image
+    id: Test Grates And Push Dev Image
     entrypoint: bash
     env:
       - "BRANCH_NAME=$BRANCH_NAME"
@@ -78,7 +78,7 @@ steps:
           --cache-to=type=registry,ref="${cache_ref}",mode=max \
           --output type=local,dest=/workspace/test-results \
           .; then
-          echo "Artifact build failed before the test gate."
+          echo "Artifact build failed before the test grate."
           print_failure_context
           exit 1
         fi
