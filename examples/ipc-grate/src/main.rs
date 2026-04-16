@@ -502,9 +502,7 @@ pub extern "C" fn fcntl_handler(
 /// (which causes "Unknown cageid" panics) or closing an fd before its
 /// refcount is bumped (which causes premature pipe EOF / EPIPE), we:
 ///
-///   1. Pre-collect parent's pipe Arc refs via with_ipc (needs IPC_STATE,
-///      so must happen BEFORE acquiring CAGE_INIT_LOCK to avoid deadlock
-///      with create_pipe → ensure_cage_exists path).
+///   1. Pre-collect parent's pipe Arc refs via with_ipc (needs IPC_STATE).
 ///   2. Acquire CAGE_INIT_LOCK, then fork, copy fdtable, bump refcounts,
 ///      and release.  The child's first handler call goes through
 ///      lookup_ipc_fd which also acquires CAGE_INIT_LOCK — so the child
@@ -619,11 +617,6 @@ pub extern "C" fn exec_handler(
 ) -> i32 {
     let cage_id = arg1cage;
 
-    // The first exec may arrive before the cage has an fdtable entry
-    // (e.g. right after fork).  Use the lock-protected helper to avoid
-    // the TOCTOU race in the raw check + init pattern.
-    ipc::ensure_cage_exists(cage_id);
-
     // Close cloexec fds.
     fdtables::empty_fds_for_exec(cage_id);
 
@@ -672,7 +665,6 @@ pub extern "C" fn socket_handler(
 
     if domain == socket::AF_UNIX {
         // AF_UNIX: entirely ours. Create in registry, register in fdtables.
-        ensure_cage_exists(cage_id);
         let socket_id = with_ipc(|s| s.sockets.create_socket(domain, socktype, 0));
 
         return match fdtables::get_unused_virtual_fd(
@@ -723,8 +715,6 @@ pub extern "C" fn socketpair_handler(
     if domain != socket::AF_UNIX {
         return -97; // EAFNOSUPPORT
     }
-
-    ensure_cage_exists(cage_id);
 
     // Create connected pair with swapped pipes.
     let (sid1, sid2) = with_ipc(|s| {
@@ -1209,6 +1199,13 @@ fn main() {
         // Lifecycle
         .register(SYS_CLONE, fork_handler)
         .register(SYS_EXEC, exec_handler)
+        .preexec(|child_cage: i32| {
+            let cage_id = child_cage as u64;
+            fdtables::init_empty_cage(cage_id);
+            for fd in 0..3u64 {
+                let _ = fdtables::get_specific_virtual_fd(cage_id, fd, 0, fd, false, 0);
+            }
+        })
         .teardown(|result: Result<i32, GrateError>| {
             println!("[ipc-grate] exited: {:?}", result);
         })
