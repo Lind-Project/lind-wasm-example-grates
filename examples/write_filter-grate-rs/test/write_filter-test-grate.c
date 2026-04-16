@@ -24,7 +24,7 @@ int main(void) {
   assert(fd >= 0);
 
   ret = write(fd, "Hello, txt!\n", 11);
-  assert(ret == EPERM);
+  assert(ret == -1 && errno == EPERM);
 
   close(fd);
   unlink("filetest.txt");
@@ -46,7 +46,7 @@ int main(void) {
   assert(fd >= 0);
 
   ret = pwrite(fd, "Hello, txt!\n", 11, 0);
-  assert(ret == EPERM);
+  assert(ret == -1 && errno == EPERM);
 
   close(fd);
   unlink("filetest.txt");
@@ -80,7 +80,7 @@ int main(void) {
   iov[1].iov_len = 5;
 
   ret = writev(fd, iov, 2);
-  assert(ret == EPERM);
+  assert(ret == -1 && errno == EPERM);
 
   close(fd);
   unlink("filetest.txt");
