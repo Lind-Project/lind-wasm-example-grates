@@ -1,0 +1,124 @@
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_32
+
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    id: Docker Login
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        docker login --username="$$DOCKER_USERNAME" --password="$$DOCKER_PASSWORD"
+    secretEnv:
+      - DOCKER_USERNAME
+      - DOCKER_PASSWORD
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: Test Gate And Push Dev Image
+    entrypoint: bash
+    env:
+      - "BRANCH_NAME=$BRANCH_NAME"
+      - "COMMIT_SHA=$COMMIT_SHA"
+      - "SHORT_SHA=$SHORT_SHA"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+
+        branch_name="${BRANCH_NAME:-main}"
+        commit_sha="${COMMIT_SHA:-}"
+        short_sha="${SHORT_SHA:-manual}"
+        image_repo="docker.io/securesystemslab/lind-wasm-grates-examples"
+        cache_ref="${image_repo}:buildcache"
+
+        mkdir -p /workspace/artifacts /workspace/test-results
+        build_log=/workspace/artifacts/buildx.log
+        exec > >(tee -a "${build_log}") 2>&1
+
+        print_failure_context() {
+          if [[ -f /workspace/test-results/e2e_status ]]; then
+            echo "== e2e_status =="
+            cat /workspace/test-results/e2e_status
+          else
+            echo "== e2e_status missing =="
+          fi
+
+          if [[ -f /workspace/test-results/test-artifacts/revision.txt ]]; then
+            echo "== revision.txt =="
+            cat /workspace/test-results/test-artifacts/revision.txt
+          else
+            echo "== revision.txt missing =="
+          fi
+
+          if [[ -f /workspace/test-results/test-artifacts/make-test.log ]]; then
+            echo "== make-test.log tail =="
+            tail -n 200 /workspace/test-results/test-artifacts/make-test.log
+          else
+            echo "== make-test.log missing =="
+          fi
+        }
+
+        docker buildx create --use --name cbuilder || docker buildx use cbuilder
+        docker buildx inspect --bootstrap
+
+        echo "Running tests for branch=${branch_name} commit=${commit_sha:-<none>}"
+        rm -rf /workspace/test-results
+        mkdir -p /workspace/test-results
+
+        if ! docker buildx build \
+          --platform=linux/amd64 \
+          --progress=plain \
+          --pull \
+          --target artifacts \
+          --build-arg BRANCH_NAME="${branch_name}" \
+          --build-arg COMMIT_SHA="${commit_sha}" \
+          --cache-from=type=registry,ref="${cache_ref}" \
+          --cache-to=type=registry,ref="${cache_ref}",mode=max \
+          --output type=local,dest=/workspace/test-results \
+          .; then
+          echo "Artifact build failed before the test gate."
+          print_failure_context
+          exit 1
+        fi
+
+        if [[ ! -f /workspace/test-results/e2e_status ]]; then
+          echo "Missing /workspace/test-results/e2e_status after test build."
+          print_failure_context
+          exit 1
+        fi
+
+        status_value="$(tr -d '\r\n' < /workspace/test-results/e2e_status)"
+        echo "Test status: ${status_value}"
+        if [[ "${status_value}" != "E2E_STATUS=pass" ]]; then
+          echo "Tests failed; dev image will not be pushed."
+          print_failure_context
+          exit 1
+        fi
+
+        tag_args=(
+          -t "${image_repo}:sha-${short_sha}"
+          -t "${image_repo}:latest"
+        )
+
+        echo "Tests passed; pushing dev image ${image_repo}:sha-${short_sha} and ${image_repo}:latest"
+        docker buildx build \
+          --platform=linux/amd64 \
+          --progress=plain \
+          --pull \
+          --target dev \
+          --build-arg BRANCH_NAME="${branch_name}" \
+          --build-arg COMMIT_SHA="${commit_sha}" \
+          --cache-from=type=registry,ref="${cache_ref}" \
+          --cache-to=type=registry,ref="${cache_ref}",mode=max \
+          "${tag_args[@]}" \
+          --push \
+          .
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/x-micron-451502-m7/secrets/docker-username/versions/latest
+      env: DOCKER_USERNAME
+    - versionName: projects/x-micron-451502-m7/secrets/docker-password/versions/latest
+      env: DOCKER_PASSWORD
