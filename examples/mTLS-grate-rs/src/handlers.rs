@@ -38,6 +38,9 @@ impl Read for ThreeiSocket {
 
         println!("[ThreeiSocket]: This cageid: {:#?}", this_cage);
 
+        eprintln!("[ThreeiSocket::read] fd={} owner={} buf_len={} buf_ptr={:#x}",
+            self.real_fd, self.fd_owner_cage, buf.len(), buf.as_mut_ptr() as u64);
+
         let ret = make_threei_call(
             SYS_READ as u32,
             0,
@@ -57,6 +60,8 @@ impl Read for ThreeiSocket {
             0,
             0,
         );
+
+        eprintln!("[ThreeiSocket::read] returned: {:?}", ret);
         match ret {
             Ok(bytes) if bytes >= 0 => Ok(bytes as usize),
             Ok(err_code) => {
