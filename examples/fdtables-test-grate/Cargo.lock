@@ -50,7 +50,7 @@ dependencies = [
 [[package]]
 name = "grate-rs"
 version = "0.1.0"
-source = "git+https://github.com/Lind-Project/lind-wasm-example-grates?branch=main#e6a908bcd2cc2cd89b186e42b018f2c121aae462"
+source = "git+https://github.com/Lind-Project/lind-wasm-example-grates?branch=main#124ecb8092d363864af93b3c2319715de2fcec6d"
 dependencies = [
  "libc",
 ]
