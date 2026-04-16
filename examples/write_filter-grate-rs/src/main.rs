@@ -6,7 +6,7 @@ mod handlers;
 use grate_rs::{
     GrateBuilder, GrateError,
     constants::{
-        SYS_CLONE, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_OPEN, SYS_PWRITE, SYS_WRITE, SYS_WRITEV,
+        SYS_CLONE, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_OPEN, SYS_PWRITE, SYS_WRITE, SYS_WRITEV, SYS_CLOSE
     },
 };
 
@@ -24,6 +24,7 @@ fn main() {
         .register(SYS_EXECVE, handlers::exec_handler)
         .register(SYS_DUP, handlers::dup_handler)
         .register(SYS_DUP2, handlers::dup2_handler)
+        .register(SYS_CLOSE, handlers::close_handler)
         .preexec(|cageid: i32| {
             fdtables::init_empty_cage(cageid as u64);
             for fd in 0..3u64 {

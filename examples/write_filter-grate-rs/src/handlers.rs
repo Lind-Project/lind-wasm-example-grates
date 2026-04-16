@@ -74,11 +74,12 @@ pub extern "C" fn open_handler(
         arg6cage,
         0,
     ) {
-        Ok(ret) => ret,
+        Ok(ret) => {
+            let _ = fdtables::get_specific_virtual_fd(cage_id, ret as u64, 0, ret as u64, false, 0);
+            ret
+        },
         Err(_) => -1,
     };
-
-    let _ = fdtables::get_specific_virtual_fd(cage_id, ret as u64, 0, ret as u64, false, 0);
 
     if !is_log {
         let _ = fdtables::set_perfdinfo(cage_id, ret as u64, 1);
@@ -196,7 +197,7 @@ pub extern "C" fn pwrite_handler(
     let this_cage = getcageid();
 
     if is_fd_blocked(fd_cage, fd) {
-        return -EPERM; // Return positive EPERM
+        return -EPERM;
     }
 
     match make_threei_call(
@@ -434,6 +435,48 @@ pub extern "C" fn dup2_handler(
                 entry.perfdinfo,
             );
         }
+    }
+    ret
+}
+
+pub extern "C" fn close_handler(
+    _cageid: u64,
+    arg1: u64, arg1cage: u64, arg2: u64, arg2cage: u64,
+    arg3: u64, arg3cage: u64, arg4: u64, arg4cage: u64,
+    arg5: u64, arg5cage: u64, arg6: u64, arg6cage: u64,
+) -> i32 {
+    let this_cage = getcageid();
+    let cage_id = arg1cage;
+    let fd = arg1;
+
+    if fdtables::check_cage_exists(cage_id) {
+        let _ = fdtables::translate_virtual_fd(cage_id, fd);
+    }
+    let ret = match make_threei_call(
+        SYS_DUP2 as u32,
+        0,
+        this_cage,
+        cage_id,
+        arg1,
+        arg1cage,
+        arg2,
+        arg2cage,
+        arg3,
+        arg3cage,
+        arg4,
+        arg4cage,
+        arg5,
+        arg5cage,
+        arg6,
+        arg6cage,
+        0,
+    ) {
+        Ok(ret) => ret,
+        Err(_) => -1,
+    };
+
+    if ret >= 0 && fdtables::check_cage_exists(cage_id) {
+        let _ = fdtables::close_virtualfd(cage_id, fd);
     }
     ret
 }
