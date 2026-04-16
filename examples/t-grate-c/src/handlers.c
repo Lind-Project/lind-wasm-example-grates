@@ -32,7 +32,7 @@ int exec_handler(
 		} else {
 			TEESTATE.secondary_target = arg1cage;
 			sem_post(TEESTATE.secondary_done);
-			printf("[t-grate] primary_target init'd. %d\n", TEESTATE.primary_target);
+			printf("[t-grate] secondary_target init'd. %d\n", TEESTATE.secondary_target);
 		}
 
 		while(1) {}

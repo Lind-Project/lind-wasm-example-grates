@@ -73,11 +73,19 @@ char **rewrite_argv(char **argv, int argc, int *primary_start, int *secondary_st
 // argv: t-grate %{ primary %} %{   secondary %}               test
 // newv: -       -  ps         NULL ss          NULL(inserted) ts 
 int main(int argc, char *argv[]) {
-    int ps, ss, ts;
-    char **newv_p = rewrite_argv(argv, argc, &ps, &ss, &ts);
+    static int ps, ss, ts;
+    static int tee_cageid;
+    static char **newv_p;
+    newv_p = rewrite_argv(argv, argc, &ps, &ss, &ts);
     
+    printf("[dbg] ps=%d ss=%d ts=%d\n", ps, ss, ts);
+    for (int k = 0; newv_p[k] != NULL || k < 10; k++) {
+        printf("[dbg] newv_p[%d] = %p", k, (void*)newv_p[k]);
+        if (newv_p[k]) printf(" -> %s", newv_p[k]);
+        printf("\n");
+    }
 
-    int tee_cageid = getpid();
+    tee_cageid = getpid();
     // int *tee_cageid = malloc(sizeof(int)); *tee_cageid = getpid();
 
     TEESTATE.primary_done = mmap(NULL, sizeof(*TEESTATE.primary_done),
@@ -120,6 +128,12 @@ int main(int argc, char *argv[]) {
     printf("[t-grate] waitedfor primary stack.\n");
   
     printf("\nps=%d ss=%d ts=%d\n", ps, ss, ts);
+    // printf("[dbg] ps=%d ss=%d ts=%d\n", ps, ss, ts);
+    // for (int k = 0; newv_p[k] != NULL || k < 10; k++) {
+    //     printf("[dbg] newv_p[%d] = %p", k, (void*)newv_p[k]);
+    //     if (newv_p[k]) printf(" -> %s", newv_p[k]);
+    //     printf("\n");
+    // }
 
     int secondary_stack = fork();
     if (secondary_stack  < 0) {
