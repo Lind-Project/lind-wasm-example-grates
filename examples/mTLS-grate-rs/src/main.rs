@@ -4,7 +4,9 @@ use clap::Parser;
 use fdtables::init_empty_cage;
 use grate_rs::{
     GrateBuilder, GrateError,
-    constants::{SYS_ACCEPT, SYS_CONNECT, SYS_READ, SYS_WRITE},
+    constants::{
+        SYS_ACCEPT, SYS_CLONE, SYS_CONNECT, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_READ, SYS_WRITE,
+    },
 };
 use handlers::*;
 use rustls::{ClientConfig, ServerConfig};
@@ -79,6 +81,16 @@ fn main() {
         .register(SYS_ACCEPT, accept_syscall)
         .register(SYS_READ, read_syscall)
         .register(SYS_WRITE, write_syscall)
+        .register(SYS_CLONE, fork_syscall)
+        .register(SYS_EXECVE, exec_syscall)
+        .register(SYS_DUP, dup_syscall)
+        .register(SYS_DUP2, dup2_syscall)
+        .preexec(|cageid: i32| {
+            fdtables::init_empty_cage(cageid as u64);
+            for fd in 0..3u64 {
+                let _ = fdtables::get_specific_virtual_fd(cageid as u64, fd, 0, fd, false, 0);
+            }
+        })
         .teardown(|result: Result<i32, GrateError>| println!("Result: {:#?}", result))
         .run(args.app_args);
 }

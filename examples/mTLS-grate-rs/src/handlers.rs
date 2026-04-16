@@ -1,5 +1,8 @@
 use grate_rs::{
-    constants::{SYS_ACCEPT, SYS_CONNECT, SYS_READ, SYS_WRITE, error::EIO},
+    constants::{
+        SYS_ACCEPT, SYS_CLONE, SYS_CONNECT, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_READ, SYS_WRITE,
+        error::EIO,
+    },
     copy_data_between_cages, getcageid, make_threei_call,
 };
 
@@ -32,7 +35,9 @@ pub static TLS_SESSIONS: Mutex<Option<HashMap<u64, TlsStream>>> = Mutex::new(Non
 impl Read for ThreeiSocket {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let this_cage = getcageid();
+
         println!("[ThreeiSocket]: This cageid: {:#?}", this_cage);
+
         let ret = make_threei_call(
             SYS_READ as u32,
             0,
@@ -75,6 +80,7 @@ impl Read for ThreeiSocket {
 impl Write for ThreeiSocket {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let this_cage = getcageid();
+
         let ret = make_threei_call(
             SYS_WRITE as u32,
             0,
@@ -548,4 +554,219 @@ pub extern "C" fn write_syscall(
     };
 
     bytes_written as i32
+}
+
+pub extern "C" fn fork_syscall(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let this_cage = getcageid();
+    let cage_id = arg1cage;
+
+    let ret = match make_threei_call(
+        SYS_CLONE as u32,
+        0,
+        this_cage,
+        cage_id,
+        arg1,
+        arg1cage,
+        arg2,
+        arg2cage,
+        arg3,
+        arg3cage,
+        arg4,
+        arg4cage,
+        arg5,
+        arg5cage,
+        arg6,
+        arg6cage,
+        0,
+    ) {
+        Ok(ret) => ret,
+        Err(_) => -1,
+    };
+
+    if ret <= 0 {
+        return ret;
+    }
+
+    let child_cageid = ret as u64;
+    let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cageid as u64);
+
+    child_cageid as i32
+}
+
+pub extern "C" fn exec_syscall(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let this_cage = getcageid();
+    let cage_id = arg1cage;
+
+    fdtables::empty_fds_for_exec(cage_id);
+
+    for fd in 0..3u64 {
+        let _ = fdtables::get_specific_virtual_fd(cage_id, fd, 0, fd, false, 0);
+    }
+
+    match make_threei_call(
+        SYS_EXECVE as u32,
+        0,
+        this_cage,
+        cage_id,
+        arg1,
+        arg1cage,
+        arg2,
+        arg2cage,
+        arg3,
+        arg3cage,
+        arg4,
+        arg4cage,
+        arg5,
+        arg5cage,
+        arg6,
+        arg6cage,
+        0,
+    ) {
+        Ok(ret) => ret,
+        Err(_) => -1,
+    }
+}
+
+pub extern "C" fn dup_syscall(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let this_cage = getcageid();
+    let cage_id = arg1cage;
+    let fd = arg1;
+
+    let ret = match make_threei_call(
+        SYS_DUP as u32,
+        0,
+        this_cage,
+        cage_id,
+        arg1,
+        arg1cage,
+        arg2,
+        arg2cage,
+        arg3,
+        arg3cage,
+        arg4,
+        arg4cage,
+        arg5,
+        arg5cage,
+        arg6,
+        arg6cage,
+        0,
+    ) {
+        Ok(ret) => ret,
+        Err(_) => -1,
+    };
+
+    if ret >= 0 {
+        if let Ok(entry) = fdtables::translate_virtual_fd(cage_id, fd) {
+            let _ = fdtables::get_specific_virtual_fd(
+                cage_id,
+                ret as u64,
+                entry.fdkind,
+                entry.underfd,
+                entry.should_cloexec,
+                entry.perfdinfo,
+            );
+        }
+    }
+
+    ret
+}
+
+pub extern "C" fn dup2_syscall(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let this_cage = getcageid();
+    let cage_id = arg1cage;
+    let oldfd = arg1;
+    let newfd = arg2;
+
+    let ret = match make_threei_call(
+        SYS_DUP2 as u32,
+        0,
+        this_cage,
+        cage_id,
+        arg1,
+        arg1cage,
+        arg2,
+        arg2cage,
+        arg3,
+        arg3cage,
+        arg4,
+        arg4cage,
+        arg5,
+        arg5cage,
+        arg6,
+        arg6cage,
+        0,
+    ) {
+        Ok(ret) => ret,
+        Err(_) => -1,
+    };
+
+    if ret >= 0 {
+        if let Ok(entry) = fdtables::translate_virtual_fd(cage_id, oldfd) {
+            let _ = fdtables::get_specific_virtual_fd(
+                cage_id,
+                newfd,
+                entry.fdkind,
+                entry.underfd,
+                entry.should_cloexec,
+                entry.perfdinfo,
+            );
+        }
+    }
+    ret
 }
