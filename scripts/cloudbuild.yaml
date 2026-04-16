@@ -90,11 +90,11 @@ steps:
         fi
 
         status_value="$(tr -d '\r\n' < /workspace/test-results/e2e_status)"
+        tests_failed=0
         echo "Test status: ${status_value}"
         if [[ "${status_value}" != "E2E_STATUS=pass" ]]; then
-          echo "Tests failed; dev image will not be pushed."
-          print_failure_context
-          exit 1
+          tests_failed=1
+          echo "Tests failed; the dev image will still be pushed so users can inspect logs in-container."
         fi
 
         tag_args=(
@@ -102,7 +102,7 @@ steps:
           -t "${image_repo}:latest"
         )
 
-        echo "Tests passed; pushing dev image ${image_repo}:sha-${short_sha} and ${image_repo}:latest"
+        echo "Pushing dev image ${image_repo}:sha-${short_sha} and ${image_repo}:latest"
         docker buildx build \
           --platform=linux/amd64 \
           --progress=plain \
@@ -115,6 +115,12 @@ steps:
           "${tag_args[@]}" \
           --push \
           .
+
+        if [[ ${tests_failed} -ne 0 ]]; then
+          echo "Dev image pushed, but tests failed."
+          print_failure_context
+          exit 1
+        fi
 
 availableSecrets:
   secretManager:
