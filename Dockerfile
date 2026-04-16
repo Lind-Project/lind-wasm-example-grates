@@ -48,9 +48,10 @@ RUN mkdir -p /home/lind/e2e-artifacts && \
 
 FROM source AS test
 ENV LIND_WASM_ROOT=/home/lind/lind-wasm
-WORKDIR /home/lind
+WORKDIR /home/lind/lind-wasm-example-grates
 
-RUN make clean && \
+RUN cd /home/lind/lind-wasm && \
+    make clean && \
     make
 
 RUN repo_dir=/home/lind/lind-wasm-example-grates && \
@@ -76,7 +77,7 @@ RUN repo_dir=/home/lind/lind-wasm-example-grates && \
         printf '\nmake test was skipped because source checkout failed.\n' >> /home/lind/e2e-artifacts/make-test.log; \
     fi
 
-FROM test AS release
+FROM test AS dev
 ENV LIND_WASM_ROOT=/home/lind/lind-wasm
 WORKDIR /home/lind/lind-wasm-example-grates
 
