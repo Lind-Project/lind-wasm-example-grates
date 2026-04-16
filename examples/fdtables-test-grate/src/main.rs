@@ -75,12 +75,6 @@ fn forward(
     }
 }
 
-fn ensure_cage(cage_id: u64) {
-    if !fdtables::check_cage_exists(cage_id) {
-        fdtables::init_empty_cage(cage_id);
-    }
-}
-
 // =====================================================================
 //  Handlers — quiet fdtables bookkeeping + forward
 // =====================================================================
@@ -96,7 +90,6 @@ pub extern "C" fn open_handler(
         &[arg1, arg2, arg3, arg4, arg5, arg6],
         &[arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage]);
     if ret >= 0 {
-        ensure_cage(cage_id);
         let _ = fdtables::get_specific_virtual_fd(
             cage_id, ret as u64, FDT_KIND, ret as u64, false, arg2);
     }
@@ -136,7 +129,6 @@ pub extern "C" fn dup_handler(
         &[arg1, arg2, arg3, arg4, arg5, arg6],
         &[arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage]);
     if ret >= 0 {
-        ensure_cage(cage_id);
         if let Ok(entry) = fdtables::translate_virtual_fd(cage_id, fd) {
             let _ = fdtables::get_specific_virtual_fd(
                 cage_id, ret as u64, entry.fdkind, entry.underfd,
@@ -159,7 +151,6 @@ pub extern "C" fn dup2_handler(
         &[arg1, arg2, arg3, arg4, arg5, arg6],
         &[arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage]);
     if ret >= 0 {
-        ensure_cage(cage_id);
         if let Ok(entry) = fdtables::translate_virtual_fd(cage_id, oldfd) {
             let _ = fdtables::get_specific_virtual_fd(
                 cage_id, newfd, entry.fdkind, entry.underfd,
@@ -182,11 +173,7 @@ pub extern "C" fn fork_handler(
     if ret <= 0 { return ret; }
 
     let child_cage_id = ret as u64;
-    if fdtables::check_cage_exists(cage_id) {
-        let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id);
-    } else {
-        ensure_cage(child_cage_id);
-    }
+    let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id);
     child_cage_id as i32
 }
 
@@ -197,7 +184,6 @@ pub extern "C" fn exec_handler(
     arg5: u64, arg5cage: u64, arg6: u64, arg6cage: u64,
 ) -> i32 {
     let cage_id = arg1cage;
-    ensure_cage(cage_id);
     fdtables::empty_fds_for_exec(cage_id);
     for fd in 0..3u64 {
         let _ = fdtables::get_specific_virtual_fd(cage_id, fd, 0, fd, false, 0);
@@ -271,6 +257,13 @@ fn main() {
         .register(SYS_WRITE, write_handler)
         .register(SYS_CLONE, fork_handler)
         .register(SYS_EXEC, exec_handler)
+        .preexec(|child_cage: i32| {
+            let cage_id = child_cage as u64;
+            fdtables::init_empty_cage(cage_id);
+            for fd in 0..3u64 {
+                let _ = fdtables::get_specific_virtual_fd(cage_id, fd, 0, fd, false, 0);
+            }
+        })
         .teardown(|result: Result<i32, GrateError>| {
             if let Err(e) = result {
                 eprintln!("[fdt-test] error: {:?}", e);
