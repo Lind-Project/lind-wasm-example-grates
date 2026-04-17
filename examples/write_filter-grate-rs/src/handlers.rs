@@ -1,6 +1,6 @@
 use grate_rs::{
     constants::{
-        SYS_CLONE, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_OPEN, SYS_PWRITE, SYS_WRITE, SYS_WRITEV,
+        SYS_CLONE, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_OPEN, SYS_PWRITE, SYS_WRITE, SYS_WRITEV, SYS_CLOSE,
         error::EPERM,
     },
     copy_data_between_cages, getcageid, make_threei_call,
@@ -453,7 +453,7 @@ pub extern "C" fn close_handler(
         let _ = fdtables::translate_virtual_fd(cage_id, fd);
     }
     let ret = match make_threei_call(
-        SYS_DUP2 as u32,
+        SYS_CLOSE as u32,
         0,
         this_cage,
         cage_id,
@@ -475,8 +475,7 @@ pub extern "C" fn close_handler(
         Err(_) => -1,
     };
 
-    if ret >= 0 && fdtables::check_cage_exists(cage_id) {
-        let _ = fdtables::close_virtualfd(cage_id, fd);
-    }
+    let _ = fdtables::close_virtualfd(cage_id, fd);
+
     ret
 }
