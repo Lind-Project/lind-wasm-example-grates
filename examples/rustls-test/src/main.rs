@@ -1,6 +1,5 @@
 use rustls::{ClientConfig, ClientConnection, ServerConfig, ServerConnection};
-use rustls::server::WebPkiClientVerifier;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::sync::Arc;
 
 fn main() {
@@ -9,12 +8,11 @@ fn main() {
         .expect("failed to install crypto provider");
 
     println!("[2] Generating self-signed cert...");
+    let key_pair = rcgen::KeyPair::generate().unwrap();
     let cert_params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
-    let cert = cert_params.self_signed(&rcgen::KeyPair::generate().unwrap()).unwrap();
+    let cert = cert_params.self_signed(&key_pair).unwrap();
     let cert_der = rustls_pki_types::CertificateDer::from(cert.der().to_vec());
-    let key_der = rustls_pki_types::PrivateKeyDer::try_from(
-        cert.key_pair.serialize_der()
-    ).unwrap();
+    let key_der = rustls_pki_types::PrivateKeyDer::try_from(key_pair.serialize_der()).unwrap();
 
     println!("[3] Building root cert store...");
     let mut root_store = rustls::RootCertStore::empty();
@@ -45,65 +43,70 @@ fn main() {
     ).unwrap();
 
     println!("[8] Starting TLS handshake...");
-    let mut client_to_server = Vec::new();
-    let mut server_to_client = Vec::new();
+    let mut buf = Vec::new();
 
-    // Client writes client hello
-    println!("[8a] Client write_tls (client hello)...");
-    client_conn.write_tls(&mut client_to_server).unwrap();
-    println!("[8b] Client hello: {} bytes", client_to_server.len());
+    // Client hello
+    println!("[8a] Client write_tls...");
+    client_conn.write_tls(&mut buf).unwrap();
+    println!("[8b] Client hello: {} bytes", buf.len());
 
-    // Server reads client hello
     println!("[8c] Server read_tls...");
-    server_conn.read_tls(&mut &client_to_server[..]).unwrap();
-    client_to_server.clear();
+    server_conn.read_tls(&mut &buf[..]).unwrap();
+    buf.clear();
 
-    // Server processes client hello
     println!("[8d] Server process_new_packets...");
     server_conn.process_new_packets().unwrap();
 
-    // Server writes server hello
-    println!("[8e] Server write_tls (server hello)...");
-    server_conn.write_tls(&mut server_to_client).unwrap();
-    println!("[8f] Server hello: {} bytes", server_to_client.len());
+    // Server hello
+    println!("[8e] Server write_tls...");
+    server_conn.write_tls(&mut buf).unwrap();
+    println!("[8f] Server hello: {} bytes", buf.len());
 
-    // Client reads server hello
     println!("[8g] Client read_tls...");
-    client_conn.read_tls(&mut &server_to_client[..]).unwrap();
-    server_to_client.clear();
+    client_conn.read_tls(&mut &buf[..]).unwrap();
+    buf.clear();
 
     println!("[8h] Client process_new_packets...");
     client_conn.process_new_packets().unwrap();
 
-    // Continue handshake
-    println!("[8i] Client write_tls (finished)...");
-    client_conn.write_tls(&mut client_to_server).unwrap();
+    // Client finished
+    println!("[8i] Client write_tls...");
+    client_conn.write_tls(&mut buf).unwrap();
+    println!("[8j] {} bytes", buf.len());
 
-    println!("[8j] Server read_tls...");
-    server_conn.read_tls(&mut &client_to_server[..]).unwrap();
-    client_to_server.clear();
+    println!("[8k] Server read_tls...");
+    server_conn.read_tls(&mut &buf[..]).unwrap();
+    buf.clear();
 
-    println!("[8k] Server process_new_packets...");
+    println!("[8l] Server process_new_packets...");
     server_conn.process_new_packets().unwrap();
 
-    println!("[8l] Server write_tls...");
-    server_conn.write_tls(&mut server_to_client).unwrap();
+    // Server finished
+    println!("[8m] Server write_tls...");
+    server_conn.write_tls(&mut buf).unwrap();
+
+    println!("[8n] Client read_tls...");
+    client_conn.read_tls(&mut &buf[..]).unwrap();
+    buf.clear();
+
+    println!("[8o] Client process_new_packets...");
+    client_conn.process_new_packets().unwrap();
 
     println!("[9] TLS handshake complete!");
 
     // Send application data
-    println!("[10] Sending application data...");
-    let mut stream_client = rustls::Stream::new(&mut client_conn, &mut client_to_server);
-    stream_client.write_all(b"Hello from client!").unwrap();
-    drop(stream_client);
+    println!("[10] Writing application data...");
+    let mut writer = client_conn.writer();
+    writer.write_all(b"Hello from client!").unwrap();
+    drop(writer);
 
-    server_conn.read_tls(&mut &client_to_server[..]).unwrap();
+    client_conn.write_tls(&mut buf).unwrap();
+    server_conn.read_tls(&mut &buf[..]).unwrap();
     server_conn.process_new_packets().unwrap();
 
-    let mut buf = [0u8; 128];
-    let n = server_conn.reader().read(&mut buf).unwrap();
-    let msg = std::str::from_utf8(&buf[..n]).unwrap();
-    println!("[11] Server received: {}", msg);
+    let mut plaintext = [0u8; 128];
+    let n = server_conn.reader().read(&mut plaintext).unwrap();
+    println!("[11] Server received: {}", std::str::from_utf8(&plaintext[..n]).unwrap());
 
-    println!("[12] PASS — rustls works in this environment");
+    println!("[12] PASS");
 }
