@@ -2,6 +2,7 @@ use grate_rs::{
     constants::{
         SYS_ACCEPT, SYS_CLONE, SYS_CONNECT, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_READ, SYS_WRITE,
         error::EIO,
+        lind::GRATE_MEMORY_FLAG,
     },
     copy_data_between_cages, getcageid, make_threei_call,
 };
@@ -49,7 +50,7 @@ impl Read for ThreeiSocket {
             self.real_fd,
             self.fd_owner_cage,
             buf.as_mut_ptr() as u64,
-            this_cage | (1u64 << 63),
+            this_cage | GRATE_MEMORY_FLAG,
             buf.len() as u64,
             this_cage,
             0,
@@ -97,7 +98,7 @@ impl Write for ThreeiSocket {
             self.real_fd,
             self.fd_owner_cage,
             buf.as_ptr() as u64,
-            this_cage | (1u64 << 63),
+            this_cage | GRATE_MEMORY_FLAG,
             buf.len() as u64,
             this_cage,
             0,
