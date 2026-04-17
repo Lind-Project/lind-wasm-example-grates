@@ -129,9 +129,19 @@ timeout = 120
 
 [[grate]]
 name = "testing-grate"
-dir = "testing-grate-rs"
+dir = "testing-grate"
 type = "rust"
 
 [[grate.tests]]
 test_src = "test/testing-grate-test.c"
 grate_args = ["-s", "0:100,1:"]
+
+# ── Write Filter (Rust) ─────────────────────────────────────────────
+
+[[grate]]
+name = "write_filter-grate"
+dir = "write_filter-grate-rs"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/write_filter-test-grate.c"
