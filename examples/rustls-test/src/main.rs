@@ -1,5 +1,5 @@
 use rustls::{ClientConfig, ClientConnection, ServerConfig, ServerConnection};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::sync::Arc;
 
 fn main() {
