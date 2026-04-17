@@ -86,6 +86,9 @@ impl Write for ThreeiSocket {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let this_cage = getcageid();
 
+        eprintln!("[ThreeiSocket::write] fd={} owner={} buf_len={} buf_ptr={:#x}",
+            self.real_fd, self.fd_owner_cage, buf.len(), buf.as_ptr() as u64);
+
         let ret = make_threei_call(
             SYS_WRITE as u32,
             0,
@@ -105,6 +108,7 @@ impl Write for ThreeiSocket {
             0,
             0,
         );
+        eprintln!("[ThreeiSocket::write] returned: {:?}", ret);
         match ret {
             Ok(bytes) if bytes >= 0 => Ok(bytes as usize),
             Ok(err_code) => {
