@@ -1,0 +1,10 @@
+[package]
+name = "rustls-test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+rustls-rustcrypto = "0.0.2-alpha"
+rustls-pki-types = "1.4"
+rcgen = "0.13"
