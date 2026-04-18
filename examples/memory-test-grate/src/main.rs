@@ -188,6 +188,38 @@ fn test_nested_alloc() -> bool {
     true
 }
 
+fn test_getrandom() -> bool {
+    eprintln!("  [getrandom] calling getrandom for 32 bytes...");
+    let mut buf = [0u8; 32];
+    match getrandom::getrandom(&mut buf) {
+        Ok(()) => {
+            let all_zero = buf.iter().all(|&b| b == 0);
+            if all_zero {
+                eprintln!("  [getrandom] FAIL: all zeros (not random)");
+                return false;
+            }
+            eprintln!("  [getrandom] got: {:02x?}", &buf[..8]);
+        }
+        Err(e) => {
+            eprintln!("  [getrandom] FAIL: {:?}", e);
+            return false;
+        }
+    }
+
+    eprintln!("  [getrandom] calling getrandom for 1KB...");
+    let mut big = vec![0u8; 1024];
+    match getrandom::getrandom(&mut big) {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("  [getrandom] FAIL (1KB): {:?}", e);
+            return false;
+        }
+    }
+
+    eprintln!("  [getrandom] PASS");
+    true
+}
+
 fn run_all_tests(label: &str) -> bool {
     eprintln!("=== {} ===", label);
     let mut all_pass = true;
@@ -197,6 +229,7 @@ fn run_all_tests(label: &str) -> bool {
     all_pass &= test_box_trait_objects();
     all_pass &= test_large_alloc();
     all_pass &= test_nested_alloc();
+    all_pass &= test_getrandom();
     eprintln!("=== {} RESULT: {} ===\n", label, if all_pass { "ALL PASS" } else { "FAIL" });
     all_pass
 }

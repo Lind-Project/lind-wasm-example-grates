@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 grate-rs = { git = "https://github.com/Lind-Project/lind-wasm-example-grates", branch = "main", subdir = "lib/grate-rs" }
 libc = "0.2"
+getrandom = "0.2"
