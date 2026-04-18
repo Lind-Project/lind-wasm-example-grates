@@ -7,3 +7,7 @@ edition = "2024"
 grate-rs = { git = "https://github.com/Lind-Project/lind-wasm-example-grates", branch = "main", subdir = "lib/grate-rs" }
 libc = "0.2"
 getrandom = "0.2"
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+rustls-rustcrypto = "0.0.2-alpha"
+rustls-pki-types = "1.4"
+rcgen = "0.13"

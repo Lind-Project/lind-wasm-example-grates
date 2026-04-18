@@ -7,6 +7,7 @@
 use grate_rs::constants::*;
 use grate_rs::{GrateBuilder, GrateError, getcageid, make_threei_call};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 fn test_vec_alloc() -> bool {
     eprintln!("  [vec-alloc] allocating 200 vecs of 4096 bytes...");
@@ -220,6 +221,84 @@ fn test_getrandom() -> bool {
     true
 }
 
+fn make_server_config() -> Arc<rustls::ServerConfig> {
+    let key_pair = rcgen::KeyPair::generate().unwrap();
+    let cert_params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+    let cert = cert_params.self_signed(&key_pair).unwrap();
+    let cert_der = rustls_pki_types::CertificateDer::from(cert.der().to_vec());
+    let key_der = rustls_pki_types::PrivateKeyDer::try_from(key_pair.serialize_der()).unwrap();
+
+    let config = rustls::ServerConfig::builder_with_provider(rustls_rustcrypto::provider().into())
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], key_der)
+        .unwrap();
+    Arc::new(config)
+}
+
+fn test_rustls_empty() -> bool {
+    eprintln!("  [rustls-empty] ServerConnection::new + process_new_packets (no data)...");
+    let config = make_server_config();
+    let mut server = match rustls::ServerConnection::new(config) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("  [rustls-empty] FAIL: ServerConnection::new: {:?}", e);
+            return false;
+        }
+    };
+    match server.process_new_packets() {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("  [rustls-empty] FAIL: process_new_packets: {:?}", e);
+            return false;
+        }
+    }
+    eprintln!("  [rustls-empty] PASS");
+    true
+}
+
+fn test_rustls_handshake() -> bool {
+    eprintln!("  [rustls-handshake] full in-memory TLS handshake...");
+    let server_config = make_server_config();
+
+    let key_pair = rcgen::KeyPair::generate().unwrap();
+    let cert_params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+    let cert = cert_params.self_signed(&key_pair).unwrap();
+    let cert_der = rustls_pki_types::CertificateDer::from(cert.der().to_vec());
+    let key_der = rustls_pki_types::PrivateKeyDer::try_from(key_pair.serialize_der()).unwrap();
+
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.add(cert_der).unwrap();
+
+    let client_config = Arc::new(
+        rustls::ClientConfig::builder_with_provider(rustls_rustcrypto::provider().into())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(root_store)
+            .with_no_client_auth(),
+    );
+
+    let mut server = rustls::ServerConnection::new(server_config).unwrap();
+    let mut client = rustls::ClientConnection::new(client_config, "localhost".try_into().unwrap()).unwrap();
+
+    let mut buf = Vec::new();
+
+    eprintln!("    client write_tls...");
+    client.write_tls(&mut buf).unwrap();
+    eprintln!("    client hello: {} bytes", buf.len());
+
+    eprintln!("    server read_tls...");
+    server.read_tls(&mut &buf[..]).unwrap();
+    buf.clear();
+
+    eprintln!("    server process_new_packets...");
+    server.process_new_packets().unwrap();
+
+    eprintln!("  [rustls-handshake] PASS");
+    true
+}
+
 fn run_all_tests(label: &str) -> bool {
     eprintln!("=== {} ===", label);
     let mut all_pass = true;
@@ -230,6 +309,8 @@ fn run_all_tests(label: &str) -> bool {
     all_pass &= test_large_alloc();
     all_pass &= test_nested_alloc();
     all_pass &= test_getrandom();
+    all_pass &= test_rustls_empty();
+    all_pass &= test_rustls_handshake();
     eprintln!("=== {} RESULT: {} ===\n", label, if all_pass { "ALL PASS" } else { "FAIL" });
     all_pass
 }
@@ -260,6 +341,9 @@ pub extern "C" fn write_handler(
 }
 
 fn main() {
+    rustls::crypto::CryptoProvider::install_default(rustls_rustcrypto::provider())
+        .expect("failed to install crypto provider");
+
     // Run tests in main context first
     run_all_tests("MAIN CONTEXT");
 
