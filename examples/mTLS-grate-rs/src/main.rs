@@ -46,6 +46,9 @@ fn load_private_key(filename: &str) -> PrivateKeyDer<'static> {
 }
 
 fn main() {
+    rustls::crypto::CryptoProvider::install_default(rustls_rustcrypto::provider())
+        .expect("failed to install crypto provider");
+
     let args = Args::parse();
     init_empty_cage(grate_rs::getcageid());
 
@@ -60,7 +63,9 @@ fn main() {
 
     let server_certs = load_certs(&args.cert);
     let server_key = load_private_key(&args.key);
-    let server_config = ServerConfig::builder()
+    let server_config = ServerConfig::builder_with_provider(rustls_rustcrypto::provider().into())
+        .with_safe_default_protocol_versions()
+        .unwrap()
         .with_client_cert_verifier(verifier)
         .with_single_cert(server_certs, server_key)
         .expect("bad client certificate/key");
@@ -68,7 +73,9 @@ fn main() {
 
     let client_certs = load_certs(&args.cert);
     let client_key = load_private_key(&args.key);
-    let client_config = ClientConfig::builder()
+    let client_config = ClientConfig::builder_with_provider(rustls_rustcrypto::provider().into())
+        .with_safe_default_protocol_versions()
+        .unwrap()
         .with_root_certificates(root_cert_store)
         .with_client_auth_cert(client_certs, client_key)
         .expect("bad client certificate/key");
