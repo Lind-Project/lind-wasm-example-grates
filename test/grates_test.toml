@@ -145,3 +145,13 @@ type = "rust"
 
 [[grate.tests]]
 test_src = "test/write_filter-test-grate.c"
+
+# ── Devnull (Rust) ───────────────────────────────────────────────────
+
+[[grate]]
+name = "devnull-grate-rs"
+dir = "devnull-grate-rs"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/devnull_test.c"

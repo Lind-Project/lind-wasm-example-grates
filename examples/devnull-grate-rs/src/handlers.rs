@@ -1,3 +1,10 @@
+//! /dev/null emulation grate handlers.
+//!
+//! Intercepts open, read, write, and close. Opens to `/dev/null` return a
+//! virtual fd backed by no real file. Writes to these fds succeed immediately
+//! returning the byte count. Reads return 0 (EOF). All other fds are forwarded
+//! to the kernel via make_threei_call.
+
 use grate_rs::{
     constants::{
         SYS_CLONE, SYS_CLOSE, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_OPEN,
