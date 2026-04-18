@@ -309,8 +309,9 @@ fn run_all_tests(label: &str) -> bool {
     all_pass &= test_large_alloc();
     all_pass &= test_nested_alloc();
     all_pass &= test_getrandom();
-    all_pass &= test_rustls_empty();
-    all_pass &= test_rustls_handshake();
+    // rustls linked but not called — testing if binary size/layout affects getrandom
+    // all_pass &= test_rustls_empty();
+    // all_pass &= test_rustls_handshake();
     eprintln!("=== {} RESULT: {} ===\n", label, if all_pass { "ALL PASS" } else { "FAIL" });
     all_pass
 }
