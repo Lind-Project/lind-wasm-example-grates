@@ -20,6 +20,26 @@ pub struct sem_t {
     __size: [c_char; 16],
 }
 
+// Lind-compatible stat struct.
+#[repr(C)]
+#[derive(Eq, PartialEq, Default, Debug)]
+pub struct stat {
+    pub st_dev: u64,
+    pub st_ino: usize,
+    pub st_nlink: u32,
+    pub st_mode: u32,
+    pub st_uid: u32,
+    pub st_gid: u32,
+    pub st_rdev: u64,
+    pub st_size: usize,
+    pub st_blksize: i32,
+    pub st_blocks: u32,
+    //currently we don't populate or care about the time bits here
+    pub st_atim: [u64; 2],
+    pub st_mtim: [u64; 2],
+    pub st_ctim: [u64; 2],
+}
+
 /// Flush stdio streams and terminate the process.
 ///
 /// This helper is shared by both the public library logic (`lib.rs`) and
@@ -101,4 +121,7 @@ unsafe extern "C" {
     pub fn sem_destroy(sem: *mut sem_t) -> c_int;
     pub fn sem_post(sem: *mut sem_t) -> c_int;
     pub fn sem_wait(sem: *mut sem_t) -> c_int;
+
+    // Stat
+    pub fn stat(path: *const c_char, buf: *mut stat) -> c_int;
 }

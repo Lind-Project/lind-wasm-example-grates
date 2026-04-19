@@ -22,3 +22,5 @@ pub const F_GETFL: i32 = 3;
 
 pub const S_IRUSR: u32 = 0o400;
 pub const S_IWUSR: u32 = 0o200;
+
+pub const S_IFDIR: u32 = 0o4_0000;

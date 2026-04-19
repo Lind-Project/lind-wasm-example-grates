@@ -290,11 +290,13 @@ pub unsafe extern "C" fn pass_fptr_to_wt(
 }
 
 pub type GrateTeardownCallback = Box<dyn Fn(Result<i32, GrateError>)>;
+pub type PreExecCallback = Box<dyn Fn(i32)>;
 
 /// A builder for creating grates with customizable lifecycle hooks
 pub struct GrateBuilder {
     handlers: Vec<(u64, SyscallHandler)>,
     teardown: Option<GrateTeardownCallback>,
+    preexec: Option<PreExecCallback>,
 }
 
 impl GrateBuilder {
@@ -303,6 +305,7 @@ impl GrateBuilder {
         Self {
             handlers: Vec::new(),
             teardown: None,
+            preexec: None,
         }
     }
 
@@ -321,17 +324,30 @@ impl GrateBuilder {
         self
     }
 
+    /// Register a pre-exec callback function. Run after fork, but before exec.
+    pub fn preexec<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(i32) + 'static,
+    {
+        self.preexec = Some(Box::new(callback));
+        self
+    }
+
     /// Run a GrateTeardownCallback with the Result from `run`
     /// - This is a terminal function.
     /// - Must always be called from the parent grate.
     fn run_teardown(callback: Option<GrateTeardownCallback>, result: Result<i32, GrateError>) -> ! {
+        let exit_code = match &result {
+            Ok(status) => *status,
+            Err(_) => 1,
+        };
         match callback {
             Some(f) => {
                 f(result);
-                clean_exit(0);
+                clean_exit(exit_code);
             }
             None => {
-                clean_exit(0);
+                clean_exit(exit_code);
             }
         }
     }
@@ -402,6 +418,11 @@ impl GrateBuilder {
                         Ok(_) => {}
                         Err(ret) => GrateBuilder::run_teardown(teardown, Err(ret)),
                     };
+                }
+
+                // Call the pre-exec hook if specified.
+                if let Some(callback) = self.preexec.take() {
+                    callback(cageid);
                 }
 
                 // Indicate to the child that it can begin execution.
