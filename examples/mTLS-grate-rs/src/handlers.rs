@@ -36,12 +36,6 @@ pub static TLS_SESSIONS: Mutex<Option<HashMap<u64, TlsStream>>> = Mutex::new(Non
 impl Read for ThreeiSocket {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let this_cage = getcageid();
-
-        println!("[ThreeiSocket]: This cageid: {:#?}", this_cage);
-
-        eprintln!("[ThreeiSocket::read] fd={} owner={} buf_len={} buf_ptr={:#x}",
-            self.real_fd, self.fd_owner_cage, buf.len(), buf.as_mut_ptr() as u64);
-
         let ret = make_threei_call(
             SYS_READ as u32,
             0,
@@ -61,8 +55,6 @@ impl Read for ThreeiSocket {
             0,
             0,
         );
-
-        eprintln!("[ThreeiSocket::read] returned: {:?}", ret);
         match ret {
             Ok(bytes) if bytes >= 0 => Ok(bytes as usize),
             Ok(err_code) => {
@@ -86,10 +78,6 @@ impl Read for ThreeiSocket {
 impl Write for ThreeiSocket {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let this_cage = getcageid();
-
-        eprintln!("[ThreeiSocket::write] fd={} owner={} buf_len={} buf_ptr={:#x}",
-            self.real_fd, self.fd_owner_cage, buf.len(), buf.as_ptr() as u64);
-
         let ret = make_threei_call(
             SYS_WRITE as u32,
             0,
@@ -109,7 +97,6 @@ impl Write for ThreeiSocket {
             0,
             0,
         );
-        eprintln!("[ThreeiSocket::write] returned: {:?}", ret);
         match ret {
             Ok(bytes) if bytes >= 0 => Ok(bytes as usize),
             Ok(err_code) => {
@@ -249,7 +236,7 @@ pub extern "C" fn accept_syscall(
     arg6cage: u64,
 ) -> i32 {
     let this_cage = getcageid();
-    println!("[Accept call]: this cage: {:#?}", this_cage);
+
     let real_listen_fd = fd;
 
     let real_new_fd = match make_threei_call(
