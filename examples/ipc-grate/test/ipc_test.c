@@ -228,16 +228,22 @@ static void test_unix_connect_accept(void) {
     CHECK("listen()", ret == 0);
 
     pid_t pid = fork();
+    printf("  fork() returned %d\n", pid);
     if (pid == 0) {
+        printf("  [child] about to close(server)\n");
         close(server);
 
+        printf("  [child] about to socket()\n");
         int client = socket(AF_UNIX, SOCK_STREAM, 0);
+        printf("  [child] socket() = %d\n", client);
         struct sockaddr_un caddr;
         memset(&caddr, 0, sizeof(caddr));
         caddr.sun_family = AF_UNIX;
         strcpy(caddr.sun_path, "/tmp/ipc_test.sock");
 
+        printf("  [child] about to connect()\n");
         int cret = connect(client, (struct sockaddr *)&caddr, sizeof(caddr));
+        printf("  [child] connect() = %d\n", cret);
         if (cret < 0) { _exit(1); }
 
         write(client, "from child", 10);
@@ -249,7 +255,9 @@ static void test_unix_connect_accept(void) {
         _exit(0);
     }
 
+    printf("  [parent] about to accept()\n");
     int conn = accept(server, NULL, NULL);
+    printf("  [parent] accept() = %d\n", conn);
     CHECK("accept() returns valid fd", conn >= 0);
 
     if (conn >= 0) {
