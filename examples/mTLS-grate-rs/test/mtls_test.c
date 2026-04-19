@@ -48,10 +48,6 @@ int main() {
     
     printf("[App] Connection accepted! Waiting for data...\n");
 
-    // Read data (Grate decrypts this)
-    int valread = read(new_socket, buffer, BUFFER_SIZE);
-    printf("[App] Received %d bytes: %s\n", valread, buffer);
-
     // Send response (Grate encrypts this)
     write(new_socket, hello, strlen(hello));
     printf("[App] Response message sent\n");
