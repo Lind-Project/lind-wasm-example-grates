@@ -1,6 +1,6 @@
 use grate_rs::{
     constants::{
-        SYS_ACCEPT, SYS_CLONE, SYS_CONNECT, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_READ, SYS_WRITE,
+        SYS_ACCEPT, SYS_CLONE, SYS_CLOSE, SYS_CONNECT, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_READ, SYS_WRITE,
         error::EIO,
         lind::GRATE_MEMORY_FLAG,
     },
@@ -779,4 +779,62 @@ pub extern "C" fn dup2_syscall(
         }
     }
     ret
+}
+
+pub extern "C" fn close_syscall(
+    _cageid: u64,
+    fd: u64,
+    fd_cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let this_cage = getcageid();
+    let cage_id = fd_cage;
+
+    // Check if this fd has a TLS session and tear it down.
+    if let Ok(entry) = fdtables::translate_virtual_fd(cage_id, fd) {
+        let session_id = entry.perfdinfo;
+        if session_id != 0 {
+            let mut guard = TLS_SESSIONS.lock().unwrap();
+            if let Some(sessions) = guard.as_mut() {
+                // Removing the entry drops the StreamOwned, which sends
+                // close_notify and releases the TLS state.
+                sessions.remove(&session_id);
+            }
+        }
+    }
+
+    let _ = fdtables::close_virtualfd(cage_id, fd);
+
+    // Forward close to the underlying socket.
+    match make_threei_call(
+        SYS_CLOSE as u32,
+        0,
+        this_cage,
+        cage_id,
+        fd,
+        fd_cage,
+        arg2,
+        arg2cage,
+        arg3,
+        arg3cage,
+        arg4,
+        arg4cage,
+        arg5,
+        arg5cage,
+        arg6,
+        arg6cage,
+        0,
+    ) {
+        Ok(ret) => ret,
+        Err(_) => -1,
+    }
 }

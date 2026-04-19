@@ -5,7 +5,7 @@ use fdtables::init_empty_cage;
 use grate_rs::{
     GrateBuilder, GrateError,
     constants::{
-        SYS_ACCEPT, SYS_CLONE, SYS_CONNECT, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_READ, SYS_WRITE,
+        SYS_ACCEPT, SYS_CLONE, SYS_CLOSE, SYS_CONNECT, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_READ, SYS_WRITE,
     },
 };
 use handlers::*;
@@ -92,6 +92,7 @@ fn main() {
         .register(SYS_EXECVE, exec_syscall)
         .register(SYS_DUP, dup_syscall)
         .register(SYS_DUP2, dup2_syscall)
+        .register(SYS_CLOSE, close_syscall)
         .preexec(|cageid: i32| {
             fdtables::init_empty_cage(cageid as u64);
             for fd in 0..3u64 {
