@@ -145,10 +145,7 @@ pub extern "C" fn ns_open_handler(
         .map(|p| helpers::path_matches_prefix(&p))
         .unwrap_or(false);
 
-    let _p = helpers::read_path_from_cage(arg1, arg1cage);
-
     // Route to alt if prefix matches, otherwise passthrough.
-
     let nr = match helpers::get_route(arg1cage, SYS_OPEN) {
         Some(alt) if matches => alt,
         _ => SYS_OPEN,
