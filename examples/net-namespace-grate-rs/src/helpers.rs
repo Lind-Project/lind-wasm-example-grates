@@ -156,6 +156,28 @@ pub fn extract_port_from_sockaddr(buf: &[u8]) -> Option<u16> {
     }
 }
 
+const MAX_PATH_LEN: usize = 4096;
+
+/// Read a null-terminated path string from a cage's address space.
+/// Used by exec_handler to detect the %} boundary.
+pub fn read_path_from_cage(path_ptr: u64, path_cage: u64) -> Option<String> {
+    let ns_cage = get_ns_cage_id();
+    let mut buf = vec![0u8; MAX_PATH_LEN];
+
+    match copy_data_between_cages(
+        ns_cage, path_cage,
+        path_ptr, path_cage,
+        buf.as_mut_ptr() as u64, ns_cage,
+        MAX_PATH_LEN as u64, 0,
+    ) {
+        Ok(_) => {}
+        Err(_) => return None,
+    }
+
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(MAX_PATH_LEN);
+    String::from_utf8(buf[..len].to_vec()).ok()
+}
+
 /// Read a sockaddr from cage memory and extract the port.
 pub fn read_port_from_cage(addr_ptr: u64, addr_cage: u64, addrlen: u64) -> Option<u16> {
     let ns_cage = get_ns_cage_id();

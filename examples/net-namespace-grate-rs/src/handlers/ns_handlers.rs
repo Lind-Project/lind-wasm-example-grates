@@ -238,7 +238,7 @@ pub extern "C" fn ns_sendto_handler(
 //  RECVFROM — fd-based routing
 // =====================================================================
 
-/// recvfrom(fd, buf, len, flags, addr, addrlen): route based on fd.
+// recvfrom: route based on fd.
 fd_route_handler!(ns_recvfrom_handler, SYS_RECVFROM);
 
 // =====================================================================
