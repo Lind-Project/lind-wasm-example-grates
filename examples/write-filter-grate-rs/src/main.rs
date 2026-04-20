@@ -1,4 +1,4 @@
-// write_filter-grate blocks all write related calls unconditionally
+// write-filter-grate blocks all write related calls unconditionally
 // for files with .log extension by returning EPERM (operation not permitted).
 
 mod handlers;

@@ -94,7 +94,7 @@ This design avoids centralized process coordination. Once `execv` is called, fur
 
 This also allows multiple grates to be interposed. For example:
 
-```lind_run geteuid_grate.wasm getuid_grate.wasm example.wasm```
+```lind_run geteuid-grate.wasm getuid-grate.wasm example.wasm```
 
 
 ## Compiling a Grate
@@ -111,5 +111,4 @@ Grates are executed like standard Lind programs, that expect cage binaries to be
 
 Example usage:
 
-```lind_run geteuid_grate.wasm example.wasm```
-
+```lind_run geteuid-grate.wasm example.wasm```
