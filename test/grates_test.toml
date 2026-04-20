@@ -60,7 +60,7 @@ type = "c"
 binary = "imfs-grate"
 
 [[grate.tests]]
-test_src = "tests/imfs-test.c"
+test_src = "test/imfs-test.c"
 
 # ── IMFS (Rust) ──────────────────────────────────────────────────────
 
