@@ -1,0 +1,9 @@
+[package]
+name = "namespace-grate"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+grate-rs = { git = "https://github.com/Lind-Project/lind-wasm-example-grates", branch= "main", subdir = "lib/grate-rs"  }
+fdtables = { git = "https://github.com/Lind-Project/lind-wasm", branch = "main", subdir = "src/fdtables" }
+libc = "0.2"

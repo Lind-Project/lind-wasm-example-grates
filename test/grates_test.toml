@@ -155,3 +155,14 @@ type = "rust"
 
 [[grate.tests]]
 test_src = "test/devnull_test.c"
+
+# FS Namespace Grate (Rust)
+
+[[grate]]
+name = "namespace-grate-rs"
+dir = "namespace-grate-rs"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/namespace_test.c"
+grate_args = "--prefix /tmp %{ testing-grate.cwasm -s 0:166,1:166,2:166,4:166,21:166,83:166,84:166,87:166 %}"
