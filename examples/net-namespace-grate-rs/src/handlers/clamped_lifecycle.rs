@@ -126,18 +126,13 @@ pub extern "C" fn fork_handler(
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
+    eprintln!("[net-ns] fork: parent={} clamped={}", arg1cage, helpers::is_cage_clamped(arg1cage));
     let child_cage_id = helpers::do_syscall(arg1cage, SYS_CLONE, &args, &arg_cages) as u64;
+    eprintln!("[net-ns] fork: child={}", child_cage_id);
 
     if helpers::is_cage_clamped(arg1cage) {
         let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
         helpers::clone_cage_routes(arg1cage, child_cage_id);
-    } else {
-        // Even if the parent isn't clamped, the child needs an fdtables
-        // entry so handlers don't panic on translate_virtual_fd.
-        fdtables::init_empty_cage(child_cage_id);
-        for fd in 0..3u64 {
-            let _ = fdtables::get_specific_virtual_fd(child_cage_id, fd, 0, fd, false, 0);
-        }
     }
 
     register_lifecycle_handlers(child_cage_id);

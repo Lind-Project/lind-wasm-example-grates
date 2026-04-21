@@ -71,11 +71,14 @@ pub extern "C" fn ns_socket_handler(
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
+    eprintln!("[net-ns] socket: cage={} exists={}", arg1cage, fdtables::check_cage_exists(arg1cage));
+
     // Route through alt if child grate registered for SYS_SOCKET.
     let nr = helpers::get_route(arg1cage, SYS_SOCKET).unwrap_or(SYS_SOCKET);
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
 
     if ret >= 0 {
+        eprintln!("[net-ns] socket: registering fd {} for cage {}", ret, arg1cage);
         let _ = fdtables::get_specific_virtual_fd(
             arg1cage, ret as u64, 0, ret as u64, false, 0,
         );
