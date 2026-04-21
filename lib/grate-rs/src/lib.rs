@@ -242,6 +242,26 @@ pub fn getcageid() -> u64 {
     unsafe { getpid_impl() as u64 }
 }
 
+/// Check whether a SYS_CLONE call is a thread creation (not a process fork).
+///
+/// In Lind, `arg1` of SYS_CLONE is a pointer to `struct clone_args` in the
+/// calling cage's memory. The `flags` field is the first u64 in the struct.
+/// If `CLONE_VM` (0x100) is set, it's a thread; otherwise it's a process fork.
+///
+/// Grates should only copy fdtables on process forks, not thread clones
+/// (threads share the parent's fd table).
+pub fn is_thread_clone(clone_args_ptr: u64, clone_args_cage: u64) -> bool {
+    let grate_cage = getcageid();
+    let mut flags: u64 = 0;
+    let _ = copy_data_between_cages(
+        grate_cage, clone_args_cage,
+        clone_args_ptr, clone_args_cage,
+        &mut flags as *mut u64 as u64, grate_cage,
+        8, 0,
+    );
+    (flags & constants::process::CLONE_VM) != 0
+}
+
 /// Dispatch function required by 3i to invoke registered syscall handlers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pass_fptr_to_wt(
