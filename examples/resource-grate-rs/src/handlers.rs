@@ -748,22 +748,38 @@ pub extern "C" fn handle_clone(
     arg6: u64, arg6cage: u64,
 ) -> i32 {
     let nanny = NANNY.get().unwrap();
+    let grate_cage = getcageid();
 
-    if nanny.tattle_add_item("events").is_err() {
-        return -EAGAIN;
+    // arg1 is a pointer to clone_args in the cage's memory.
+    // Read the flags field (first u64) to distinguish fork from thread.
+    let mut clone_flags: u64 = 0;
+    let _ = copy_data_between_cages(
+        grate_cage, arg1cage,
+        arg1, arg1cage,
+        &mut clone_flags as *mut u64 as u64, grate_cage,
+        8, 0,
+    );
+    let is_thread = (clone_flags & CLONE_VM) != 0;
+
+    if is_thread {
+        if nanny.tattle_add_item("events").is_err() {
+            return -EAGAIN;
+        }
     }
 
     let ret = forward(
-        SYS_CLONE, grate_cageid,
+        SYS_CLONE, grate_cage,
         arg1, arg1cage, arg2, arg2cage, arg3, arg3cage,
         arg4, arg4cage, arg5, arg5cage, arg6, arg6cage,
     );
 
-    if ret < 0 {
+    if ret < 0 && is_thread {
         nanny.tattle_remove_item("events");
     }
 
-    if ret > 0 {
+    // On process fork, copy fdtables to the child.
+    // Threads share the parent's fd table, so skip for threads.
+    if ret > 0 && !is_thread {
         let _ = fdtables::copy_fdtable_for_cage(arg1cage, ret as u64);
     }
 
