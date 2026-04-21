@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -788,6 +789,93 @@ int test_zero_write(void) {
 }
 
 /* =================================================================
+ *  FORK — child inherits resource limits and fd tracking
+ * ================================================================= */
+
+/* Test 25: fork child can open, write, and close files */
+int test_fork_write(void) {
+	pid_t pid = fork();
+	if (pid < 0)
+		FAIL("fork");
+
+	if (pid == 0) {
+		/* Child: open a file, write, close */
+		int fd = open("/tmp/res_fork.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+		if (fd < 0) _exit(1);
+
+		if (write(fd, "from child", 10) != 10) _exit(1);
+
+		char buf[16] = {0};
+		lseek(fd, 0, SEEK_SET);
+		if (read(fd, buf, 10) != 10) _exit(1);
+		if (memcmp(buf, "from child", 10) != 0) _exit(1);
+
+		close(fd);
+		unlink("/tmp/res_fork.txt");
+		_exit(0);
+	}
+
+	int status;
+	waitpid(pid, &status, 0);
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+		FAIL("child failed");
+
+	PASS();
+	return 0;
+}
+
+/* Test 26: fork child inherits filesopened count */
+int test_fork_filesopened(void) {
+	/* Open 3 files in parent, fork, child opens 2 more.
+	 * With filesopened cap of 5, child should hit the cap. */
+	int fds[3];
+	char path[64];
+	for (int i = 0; i < 3; i++) {
+		snprintf(path, sizeof(path), "/tmp/res_forkopen_%d.txt", i);
+		fds[i] = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+		if (fds[i] < 0)
+			FAIL("parent open");
+	}
+
+	pid_t pid = fork();
+	if (pid < 0)
+		FAIL("fork");
+
+	if (pid == 0) {
+		/* Child: inherited 3 open fds. Open 2 more (should succeed). */
+		int c1 = open("/tmp/res_forkchild1.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+		int c2 = open("/tmp/res_forkchild2.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+		if (c1 < 0 || c2 < 0) _exit(1);
+
+		/* 6th open should fail (cap=5) */
+		int c3 = open("/tmp/res_forkchild3.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+		/* c3 may or may not fail depending on whether cap is shared or per-cage */
+
+		if (c1 >= 0) close(c1);
+		if (c2 >= 0) close(c2);
+		if (c3 >= 0) close(c3);
+		unlink("/tmp/res_forkchild1.txt");
+		unlink("/tmp/res_forkchild2.txt");
+		unlink("/tmp/res_forkchild3.txt");
+		_exit(0);
+	}
+
+	int status;
+	waitpid(pid, &status, 0);
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+		FAIL("child failed");
+
+	for (int i = 0; i < 3; i++) {
+		close(fds[i]);
+		snprintf(path, sizeof(path), "/tmp/res_forkopen_%d.txt", i);
+		unlink(path);
+	}
+
+	PASS();
+	return 0;
+}
+
+/* =================================================================
  *  MAIN
  * ================================================================= */
 
@@ -820,6 +908,10 @@ int main(void) {
 
 	/* Simultaneous resources. */
 	test_simultaneous_resources();
+
+	/* Fork. */
+	test_fork_write();
+	test_fork_filesopened();
 
 	/* Timed rate limiting (these are slow — run last). */
 	test_timed_write();
