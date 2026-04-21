@@ -751,6 +751,7 @@ pub extern "C" fn handle_clone(
 ) -> i32 {
     let nanny = NANNY.get().unwrap();
     let is_thread = (arg1 & CLONE_VM) != 0;
+    eprintln!("[resource] handle_clone ENTERED: cage={} is_thread={} arg1={:#x}", arg1cage, is_thread, arg1);
 
     if is_thread {
         if nanny.tattle_add_item("events").is_err() {
