@@ -205,8 +205,6 @@ pub extern "C" fn handle_open(
     let flags = arg2 as u32;
     let nanny = NANNY.get().unwrap();
 
-    eprintln!("[resource] open: cage={} exists={}", cage_id, fdtables::check_cage_exists(cage_id));
-
     // Check filesopened cap before the syscall.
     if nanny.tattle_add_item("filesopened").is_err() {
         return -EMFILE;
@@ -750,13 +748,9 @@ pub extern "C" fn handle_clone(
     arg6: u64, arg6cage: u64,
 ) -> i32 {
     let nanny = NANNY.get().unwrap();
-    let is_thread = (arg1 & CLONE_VM) != 0;
-    eprintln!("[resource] handle_clone ENTERED: cage={} is_thread={} arg1={:#x}", arg1cage, is_thread, arg1);
 
-    if is_thread {
-        if nanny.tattle_add_item("events").is_err() {
-            return -EAGAIN;
-        }
+    if nanny.tattle_add_item("events").is_err() {
+        return -EAGAIN;
     }
 
     let ret = forward(
@@ -765,14 +759,12 @@ pub extern "C" fn handle_clone(
         arg4, arg4cage, arg5, arg5cage, arg6, arg6cage,
     );
 
-    if ret < 0 && is_thread {
+    if ret < 0 {
         nanny.tattle_remove_item("events");
     }
 
-    if ret > 0 && !is_thread {
-        eprintln!("[resource] clone: parent={} child={} parent_exists={}", arg1cage, ret, fdtables::check_cage_exists(arg1cage));
+    if ret > 0 {
         let _ = fdtables::copy_fdtable_for_cage(arg1cage, ret as u64);
-        eprintln!("[resource] clone: child_exists={}", fdtables::check_cage_exists(ret as u64));
     }
 
     ret
