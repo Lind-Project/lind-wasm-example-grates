@@ -4,7 +4,7 @@ use grate_rs::{
         error::EIO,
         lind::GRATE_MEMORY_FLAG,
     },
-    copy_data_between_cages, getcageid, make_threei_call,
+    copy_data_between_cages, getcageid, is_thread_clone, make_threei_call,
 };
 
 use rustls::{ClientConfig, ClientConnection, ServerConfig, ServerConnection, StreamOwned};
@@ -599,7 +599,9 @@ pub extern "C" fn fork_syscall(
     }
 
     let child_cageid = ret as u64;
-    let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cageid as u64);
+    if !is_thread_clone(arg1, arg1cage) {
+        let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cageid);
+    }
 
     child_cageid as i32
 }
