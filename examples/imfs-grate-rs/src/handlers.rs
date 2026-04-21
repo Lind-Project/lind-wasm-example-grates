@@ -6,7 +6,7 @@
 //! copy data to/from the cage similarly.
 
 use grate_rs::constants::*;
-use grate_rs::{copy_data_between_cages, getcageid, make_threei_call};
+use grate_rs::{copy_data_between_cages, getcageid, is_thread_clone, make_threei_call};
 
 use crate::imfs;
 
@@ -495,12 +495,14 @@ pub extern "C" fn fork_handler(
 
     let child_cage_id = ret as u64;
 
-    // Clone the fdtables for the child — inherits all open fds.
-    let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
+    if !is_thread_clone(arg1, arg1cage) {
+        // Clone the fdtables for the child — inherits all open fds.
+        let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
 
-    imfs::with_imfs(|state| {
-        state.fork(arg1cage, child_cage_id);
-    });
+        imfs::with_imfs(|state| {
+            state.fork(arg1cage, child_cage_id);
+        });
+    }
 
     child_cage_id as i32
 }

@@ -29,7 +29,7 @@ DEFINE_HANDLER(read, 0, ARG_INT, ARG_PTR, ARG_INT)
 
 Uses [lind_compile](https://github.com/Lind-Project/lind-wasm/blob/main/scripts/lind_compile) script with `--compile-grate` flag.
 
-`lind_compile --compile-grate src/strace_grate.c src/strace.c`
+`lind_compile --compile-grate src/strace-grate.c src/strace.c`
 
 or use the `compile_grate.sh` script to build strace grate.
 
@@ -55,7 +55,7 @@ To validate the implementation, a script is provided that runs Lind's unit test 
 
 ## Example Usage:
 
-`lind_run strace_grate.cwasm app.cwasm`
+`lind_run strace-grate.cwasm app.cwasm`
 
 ## Future Work
 

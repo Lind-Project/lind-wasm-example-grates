@@ -39,7 +39,7 @@ find "$TEST_ROOT_DIR" -type f -name "*.c" | while read -r TEST_PATH; do
     # -k 2: Sends a SIGKILL (kill -9) 2 seconds after the initial signal if still alive
     # We removed --foreground to ensure the script doesn't hang on the sub-thread panic
     export RUST_BACKTRACE=1
-    timeout -k 2 "$TIMEOUT_VAL" "$SCRIPTS_DIR/lind_run" strace_grate.cwasm "${BASENAME}.cwasm" >> "$LOG_FILE" 2>&1
+    timeout -k 2 "$TIMEOUT_VAL" "$SCRIPTS_DIR/lind_run" strace-grate.cwasm "${BASENAME}.cwasm" >> "$LOG_FILE" 2>&1
 
     EXIT_STATUS=$?
 

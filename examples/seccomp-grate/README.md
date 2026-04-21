@@ -76,13 +76,13 @@ SYS_socket
 
 Uses [lind_compile](https://github.com/Lind-Project/lind-wasm/blob/main/scripts/lind_compile) script with `--compile-grate` flag.
 
-`lind_compile --compile-grate src/seccomp_grate.c src/seccomp.c`
+`lind_compile --compile-grate src/seccomp-grate.c src/seccomp.c`
 
 or use the `compile_grate.sh` script to build seccomp grate. Compile script copies `src/seccomp-config.ini` file to `lindfs/`.
 
 ## Example Usage:
 
-`lind_run seccomp_grate.cwasm <seccomp_configuration> <app.cwasm> ...`
+`lind_run seccomp-grate.cwasm <seccomp_configuration> <app.cwasm> ...`
 
 ## Testing
 
@@ -98,8 +98,8 @@ To verify the grate's functionality, you can execute the provided `tests/seccomp
 
 ### Executing Test:
 
-- `lind_run seccomp_grate.cwasm seccomp_whitelist_test.conf seccomp_chmod_test.c`
-- `lind_run seccomp_grate.cwasm seccomp_blacklist_test.conf seccomp_chmod_test.c`
+- `lind_run seccomp-grate.cwasm seccomp_whitelist_test.conf seccomp_chmod_test.c`
+- `lind_run seccomp-grate.cwasm seccomp_blacklist_test.conf seccomp_chmod_test.c`
 
 ## Future Work
 

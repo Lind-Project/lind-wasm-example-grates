@@ -3,7 +3,7 @@ use grate_rs::{
         SYS_CLONE, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_OPEN, SYS_PWRITE, SYS_WRITE, SYS_WRITEV, SYS_CLOSE,
         error::EPERM,
     },
-    copy_data_between_cages, getcageid, make_threei_call,
+    copy_data_between_cages, getcageid, is_thread_clone, make_threei_call,
 };
 use std::path::Path;
 
@@ -270,7 +270,9 @@ pub extern "C" fn fork_handler(
     }
 
     let child_cageid = ret as u64;
-    let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cageid as u64);
+    if !is_thread_clone(arg1, arg1cage) {
+        let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cageid);
+    }
 
     child_cageid as i32
 }
