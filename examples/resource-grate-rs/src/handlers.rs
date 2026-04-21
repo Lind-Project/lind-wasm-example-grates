@@ -2,8 +2,7 @@ use grate_rs::constants::*;
 use grate_rs::constants::error::{EACCES, EAGAIN, EMFILE};
 use grate_rs::constants::fs::*;
 use grate_rs::constants::net::AF_INET;
-use grate_rs::constants::process::CLONE_VM;
-use grate_rs::{copy_data_between_cages, getcageid, make_threei_call, GrateError};
+use grate_rs::{copy_data_between_cages, getcageid, is_thread_clone, make_threei_call, GrateError};
 
 use crate::NANNY;
 
@@ -24,12 +23,6 @@ const SOCK_LISTENING: u64 = 1 << 1;
 //  Helpers
 // =====================================================================
 
-/// Ensure a cage's fdtable exists (lazy init on first encounter).
-fn ensure_cage(cage_id: u64) {
-    if !fdtables::check_cage_exists(cage_id) {
-        fdtables::init_empty_cage(cage_id);
-    }
-}
 
 /// Forward a syscall to the cage via make_threei_call.
 fn forward(
@@ -210,8 +203,6 @@ pub extern "C" fn handle_open(
     let cage_id = arg1cage;
     let flags = arg2 as u32;
     let nanny = NANNY.get().unwrap();
-
-    ensure_cage(cage_id);
 
     // Check filesopened cap before the syscall.
     if nanny.tattle_add_item("filesopened").is_err() {
@@ -445,7 +436,7 @@ pub extern "C" fn handle_socket(
     arg6: u64, arg6cage: u64,
 ) -> i32 {
     let cage_id = arg1cage;
-    ensure_cage(cage_id);
+
 
     let ret = forward(
         SYS_SOCKET, grate_cageid,
@@ -568,7 +559,7 @@ pub extern "C" fn handle_accept(
         let parent_flags = socket_flags(cage_id, arg1);
         let loopback = parent_flags & SOCK_LOOPBACK != 0;
 
-        ensure_cage(cage_id);
+    
         let _ = fdtables::get_specific_virtual_fd(
             cage_id, ret as u64, FD_SOCKET, 0, false,
             if loopback { SOCK_LOOPBACK } else { 0 },
@@ -756,7 +747,7 @@ pub extern "C" fn handle_clone(
     arg6: u64, arg6cage: u64,
 ) -> i32 {
     let nanny = NANNY.get().unwrap();
-    let is_thread = (arg1 & CLONE_VM) != 0;
+    let is_thread = is_thread_clone(arg1, arg1cage);
 
     if is_thread {
         if nanny.tattle_add_item("events").is_err() {
@@ -772,6 +763,12 @@ pub extern "C" fn handle_clone(
 
     if ret < 0 && is_thread {
         nanny.tattle_remove_item("events");
+    }
+
+    // On process fork, copy fdtables to the child.
+    // Threads share the parent's fd table, so skip for threads.
+    if ret > 0 && !is_thread {
+        let _ = fdtables::copy_fdtable_for_cage(arg1cage, ret as u64);
     }
 
     ret

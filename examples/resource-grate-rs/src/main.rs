@@ -77,6 +77,13 @@ fn main() {
         // Random
         .register(SYS_GETRANDOM, handlers::handle_getrandom)
         // Teardown
+        .preexec(|child_cage: i32| {
+            let cage_id = child_cage as u64;
+            fdtables::init_empty_cage(cage_id);
+            for fd in 0..3u64 {
+                let _ = fdtables::get_specific_virtual_fd(cage_id, fd, 0, fd, false, 0);
+            }
+        })
         .teardown(|result| {
             match result {
                 Ok(status) => println!("[ResourceGrate] Cage exited with status {}", status),

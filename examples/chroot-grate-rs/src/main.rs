@@ -1,6 +1,7 @@
 //! `chroot-grate-rs`
 
 use grate_rs::constants::fs::S_IFDIR;
+use grate_rs::constants::lind::GRATE_MEMORY_FLAG;
 use grate_rs::constants::{
     SYS_ACCEPT, SYS_ACCESS, SYS_BIND, SYS_CHDIR, SYS_CHMOD, SYS_CHROOT, SYS_CLONE, SYS_CONNECT,
     SYS_EXECVE, SYS_FCHDIR, SYS_GETCWD, SYS_GETPEERNAME, SYS_GETSOCKNAME, SYS_LINK, SYS_MKDIR,
@@ -73,7 +74,7 @@ fn call_with_rewrites(
             return -(libc::EINVAL as i32);
         }
         args[*idx] = *cstr;
-        arg_cages[*idx] = thiscage | (1u64 << 63);
+        arg_cages[*idx] = thiscage | GRATE_MEMORY_FLAG;
     }
 
     match make_threei_call(
@@ -218,9 +219,9 @@ extern "C" fn readlink_handler(
         cageid,
         path_cage,
         c_path.as_ptr() as u64,
-        thiscage | (1u64 << 63),
+        thiscage | GRATE_MEMORY_FLAG,
         result_buf.as_mut_ptr() as u64,
-        thiscage | (1u64 << 63),
+        thiscage | GRATE_MEMORY_FLAG,
         bufsiz,
         thiscage,
         0,
@@ -302,7 +303,7 @@ extern "C" fn readlinkat_handler(
         if use_chrooted { AT_FDCWD as u64 } else { dirfd },
         dirfd_cage,
         c_path.as_ptr() as u64,
-        thiscage | (1u64 << 63),
+        thiscage | GRATE_MEMORY_FLAG,
         result_buf.as_mut_ptr() as u64,
         thiscage,
         bufsiz,
@@ -417,7 +418,7 @@ extern "C" fn execve_handler(
         thiscage,
         arg1cage,
         rewritten_ptr,
-        thiscage | (1u64 << 63),
+        thiscage | GRATE_MEMORY_FLAG,
         arg2,
         arg2cage,
         arg3,

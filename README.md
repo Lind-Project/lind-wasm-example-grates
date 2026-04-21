@@ -18,7 +18,7 @@ For a grate written in `C`, the typical structure for an individual grate is:
 ```
 examples/<name>-grate
 ├── src/                // .c and .h source files.
-├── tests/              // Tests for this grate.
+├── test/               // Tests for this grate.
 ├── build.conf          // Configuration file to describe additional build flags, `--max-memory` for wasm, and entry point for the grate.
 ├── compile_grate.sh    // Compile script to generate *.wasm and *.cwasm binaries
 └── README.md
@@ -94,7 +94,7 @@ This design avoids centralized process coordination. Once `execv` is called, fur
 
 This also allows multiple grates to be interposed. For example:
 
-```lind_run geteuid_grate.wasm getuid_grate.wasm example.wasm```
+```lind_run geteuid-grate.wasm getuid-grate.wasm example.wasm```
 
 
 ## Compiling a Grate
@@ -111,5 +111,75 @@ Grates are executed like standard Lind programs, that expect cage binaries to be
 
 Example usage:
 
-```lind_run geteuid_grate.wasm example.wasm```
+```lind_run geteuid-grate.wasm example.wasm```
 
+## Contributing a New Grate
+
+When adding a new grate to `examples/`, follow these rules to keep it easy to discover, build, and test from the repo root.
+
+### Naming
+
+- Use kebab-case for grate names.
+- Use `<name>-grate` for C grates.
+- Use `<name>-grate-rs` for Rust grates.
+- Keep the directory name, build target name, and generated `.cwasm` basename aligned.
+
+Examples:
+
+- `examples/seccomp-grate` -> `seccomp-grate.cwasm`
+- `examples/resource-grate-rs` -> `resource-grate-rs.cwasm`
+
+### Recommended Layout
+
+For C grates:
+
+```text
+examples/<name>-grate/
+├── src/
+├── test/
+├── build.conf
+├── compile_grate.sh
+└── README.md
+```
+
+For Rust grates:
+
+```text
+examples/<name>-grate-rs/
+├── src/
+├── test/
+├── Cargo.toml
+└── README.md
+```
+
+### Build Conventions
+
+- C grates should provide a `compile_grate.sh` script that is independent of CWD.
+- Rust grates should build with `cargo lind_compile`.
+- In C grates, make the entry source filename match the grate name, for example `src/seccomp-grate.c`.
+- In Rust grates, set `[package].name` in `Cargo.toml` to match the directory name.
+- If your grate needs extra runtime files, have the build or test flow copy them explicitly.
+
+### Test Expectations
+
+- Add at least one test program under `test/`.
+- Register the grate in [`test/grates_test.toml`](./test/grates_test.toml), refer the documentation on this file for information on naming conventions.
+- Prefer focused tests that prove the grate’s syscall interposition behavior instead of broad integration-only coverage.
+
+### Best Practices
+
+- Keep each grate self-contained inside its example directory.
+- Document what syscalls are intercepted, what behavior changes, and how to run the grate manually.
+- Preserve normal Lind behavior for syscalls you are not intentionally overriding.
+- Keep startup and argument handling consistent, since grates are commonly composed with other grates.
+
+### Contributor Checklist
+
+Before sending a new grate for review:
+
+- Create the new directory in `examples/` using the naming rules above.
+- Add the build entrypoint (`compile_grate.sh` for C or `Cargo.toml` for Rust).
+- Add a README with purpose, build instructions, usage, and test notes.
+- Add the grate to [`test/grates_test.toml`](./test/grates_test.toml).
+- Verify it builds via `make <grate-name>` or the equivalent direct build command.
+- Run `make test GRATE=<grate-name>` before submitting.
