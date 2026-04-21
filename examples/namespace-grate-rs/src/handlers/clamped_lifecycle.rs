@@ -1,7 +1,7 @@
 use grate_rs::{
     SyscallHandler,
     constants::{SYS_CLONE, SYS_EXEC, SYS_EXIT, SYS_REGISTER_HANDLER},
-    copy_data_between_cages, register_handler,
+    copy_data_between_cages, is_thread_clone, register_handler,
 };
 
 use fdtables;
@@ -223,14 +223,16 @@ pub extern "C" fn fork_handler(
     // Forward the fork to the runtime. Returns child cage ID to parent, 0 to child.
     let child_cage_id = helpers::do_syscall(arg1cage, SYS_CLONE, &args, &arg_cages) as u64;
 
-    // If the forking cage is inside the clamp, the child inherits that status.
-    if helpers::is_cage_clamped(arg1cage) {
-        // Copy the fd table so the child knows which fds are clamped.
-        let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
-    }
+    if !is_thread_clone(arg1, arg1cage) {
+        // If the forking cage is inside the clamp, the child inherits that status.
+        if helpers::is_cage_clamped(arg1cage) {
+            // Copy the fd table so the child knows which fds are clamped.
+            let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
+        }
 
-    // Register our lifecycle handlers on the child so we can track it.
-    register_lifecycle_handlers(child_cage_id);
+        // Register our lifecycle handlers on the child so we can track it.
+        register_lifecycle_handlers(child_cage_id);
+    }
 
     child_cage_id as i32
 }
