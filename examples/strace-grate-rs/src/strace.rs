@@ -95,6 +95,7 @@ macro_rules! define_syscall_handler {
                 0
             ) {
                 Ok(val) => val,
+                Err(GrateError::MakeSyscallError(ret)) => ret,
                 Err(_) => -1
             };
 
