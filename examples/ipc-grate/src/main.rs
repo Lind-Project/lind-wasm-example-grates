@@ -13,7 +13,7 @@ mod socket;
 mod ipc;
 
 use grate_rs::constants::*;
-use grate_rs::{GrateBuilder, GrateError, SyscallHandler, copy_data_between_cages, getcageid, make_threei_call};
+use grate_rs::{GrateBuilder, GrateError, SyscallHandler, copy_data_between_cages, getcageid, is_thread_clone, make_threei_call};
 
 use ipc::*;
 
@@ -520,11 +520,13 @@ pub extern "C" fn fork_handler(
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
+    // Threads share the parent's fd table — only do fork bookkeeping
+    // for process forks.
+    let is_thread = is_thread_clone(arg1, arg1cage);
+
     // --- Phase 1: snapshot parent's fdtable and pre-collect pipe/socket
     //     Arc references BEFORE forking.  Uses IPC_STATE (via with_ipc) but
     //     NOT CAGE_INIT_LOCK, so no lock-ordering issue.
-    let parent_fds = fdtables::return_fdtable_copy(cage_id);
-
     enum RefBump {
         Pipe { pipe: std::sync::Arc<pipe::PipeBuffer>, is_read: bool },
         Socket {
@@ -534,41 +536,35 @@ pub extern "C" fn fork_handler(
     }
 
     let mut bumps: Vec<RefBump> = Vec::new();
-    for (_fd, entry) in &parent_fds {
-        match entry.fdkind {
-            IPC_PIPE => {
-                if let Some(pipe) = with_ipc(|s| s.get_pipe(entry.underfd)) {
-                    bumps.push(RefBump::Pipe {
-                        pipe,
-                        is_read: is_read_end(entry.perfdinfo as i32),
+
+    if !is_thread {
+        let parent_fds = fdtables::return_fdtable_copy(cage_id);
+        for (_fd, entry) in &parent_fds {
+            match entry.fdkind {
+                IPC_PIPE => {
+                    if let Some(pipe) = with_ipc(|s| s.get_pipe(entry.underfd)) {
+                        bumps.push(RefBump::Pipe {
+                            pipe,
+                            is_read: is_read_end(entry.perfdinfo as i32),
+                        });
+                    }
+                }
+                socket::IPC_SOCKET => {
+                    let refs = with_ipc(|s| {
+                        s.sockets.get(entry.underfd).map(|sock| {
+                            (sock.sendpipe.clone(), sock.recvpipe.clone())
+                        })
                     });
+                    if let Some((sp, rp)) = refs {
+                        bumps.push(RefBump::Socket { sendpipe: sp, recvpipe: rp });
+                    }
                 }
+                _ => {}
             }
-            socket::IPC_SOCKET => {
-                let refs = with_ipc(|s| {
-                    s.sockets.get(entry.underfd).map(|sock| {
-                        (sock.sendpipe.clone(), sock.recvpipe.clone())
-                    })
-                });
-                if let Some((sp, rp)) = refs {
-                    bumps.push(RefBump::Socket { sendpipe: sp, recvpipe: rp });
-                }
-            }
-            _ => {}
         }
     }
 
     // --- Phase 2: fork, bump refcounts, THEN create child cage in fdtables.
-    //
-    // The child's handlers spin on fdtables::check_cage_exists (via
-    // lookup_ipc_fd) until the cage appears.  By bumping refcounts BEFORE
-    // creating the cage entry, we guarantee the child can't close an
-    // inherited pipe fd and prematurely drop a refcount to zero.
-    //
-    // After copy_fdtable_for_cage (which atomically creates + copies the
-    // cage entry), the child unblocks and sees both correct fds and correct
-    // refcounts.
-
     let ret = forward_syscall(SYS_CLONE, cage_id, &args, &arg_cages);
 
     if ret <= 0 {
@@ -577,30 +573,32 @@ pub extern "C" fn fork_handler(
 
     let child_cage_id = ret as u64;
 
-    // Bump refcounts FIRST (child is spinning, can't interfere).
-    for bump in &bumps {
-        match bump {
-            RefBump::Pipe { pipe, is_read } => {
-                if *is_read {
-                    pipe.incr_read_ref();
-                } else {
-                    pipe.incr_write_ref();
+    if !is_thread {
+        // Bump refcounts FIRST (child is spinning, can't interfere).
+        for bump in &bumps {
+            match bump {
+                RefBump::Pipe { pipe, is_read } => {
+                    if *is_read {
+                        pipe.incr_read_ref();
+                    } else {
+                        pipe.incr_write_ref();
+                    }
                 }
-            }
-            RefBump::Socket { sendpipe, recvpipe } => {
-                if let Some(sp) = sendpipe {
-                    sp.incr_write_ref();
-                }
-                if let Some(rp) = recvpipe {
-                    rp.incr_read_ref();
+                RefBump::Socket { sendpipe, recvpipe } => {
+                    if let Some(sp) = sendpipe {
+                        sp.incr_write_ref();
+                    }
+                    if let Some(rp) = recvpipe {
+                        rp.incr_read_ref();
+                    }
                 }
             }
         }
-    }
 
-    // Now create the child cage in fdtables — this is the signal that
-    // unblocks the child's spin-wait in lookup_ipc_fd.
-    let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id);
+        // Now create the child cage in fdtables — this is the signal that
+        // unblocks the child's spin-wait in lookup_ipc_fd.
+        let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id);
+    }
 
     child_cage_id as i32
 }
