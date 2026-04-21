@@ -2,8 +2,7 @@ use grate_rs::constants::*;
 use grate_rs::constants::error::{EACCES, EAGAIN, EMFILE};
 use grate_rs::constants::fs::*;
 use grate_rs::constants::net::AF_INET;
-use grate_rs::constants::process::CLONE_VM;
-use grate_rs::{copy_data_between_cages, getcageid, make_threei_call, GrateError};
+use grate_rs::{copy_data_between_cages, getcageid, is_thread_clone, make_threei_call, GrateError};
 
 use crate::NANNY;
 
@@ -748,18 +747,7 @@ pub extern "C" fn handle_clone(
     arg6: u64, arg6cage: u64,
 ) -> i32 {
     let nanny = NANNY.get().unwrap();
-    let grate_cage = getcageid();
-
-    // arg1 is a pointer to clone_args in the cage's memory.
-    // Read the flags field (first u64) to distinguish fork from thread.
-    let mut clone_flags: u64 = 0;
-    let _ = copy_data_between_cages(
-        grate_cage, arg1cage,
-        arg1, arg1cage,
-        &mut clone_flags as *mut u64 as u64, grate_cage,
-        8, 0,
-    );
-    let is_thread = (clone_flags & CLONE_VM) != 0;
+    let is_thread = is_thread_clone(arg1, arg1cage);
 
     if is_thread {
         if nanny.tattle_add_item("events").is_err() {
@@ -768,7 +756,7 @@ pub extern "C" fn handle_clone(
     }
 
     let ret = forward(
-        SYS_CLONE, grate_cage,
+        SYS_CLONE, grate_cageid,
         arg1, arg1cage, arg2, arg2cage, arg3, arg3cage,
         arg4, arg4cage, arg5, arg5cage, arg6, arg6cage,
     );
