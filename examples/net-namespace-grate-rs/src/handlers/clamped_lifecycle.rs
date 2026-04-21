@@ -126,9 +126,7 @@ pub extern "C" fn fork_handler(
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
-    eprintln!("[net-ns] fork: parent={} clamped={}", arg1cage, helpers::is_cage_clamped(arg1cage));
     let child_cage_id = helpers::do_syscall(arg1cage, SYS_CLONE, &args, &arg_cages) as u64;
-    eprintln!("[net-ns] fork: child={}", child_cage_id);
 
     if helpers::is_cage_clamped(arg1cage) {
         let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
