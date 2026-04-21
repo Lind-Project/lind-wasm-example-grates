@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use grate_rs::constants::*;
-use grate_rs::{GrateBuilder, GrateError, copy_data_between_cages, getcageid, make_threei_call};
+use grate_rs::{GrateBuilder, GrateError, copy_data_between_cages, getcageid, is_thread_clone, make_threei_call};
 
 const FDT_KIND: u32 = 1;
 
@@ -173,7 +173,9 @@ pub extern "C" fn fork_handler(
     if ret <= 0 { return ret; }
 
     let child_cage_id = ret as u64;
-    let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id);
+    if !is_thread_clone(arg1, arg1cage) {
+        let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id);
+    }
     child_cage_id as i32
 }
 
