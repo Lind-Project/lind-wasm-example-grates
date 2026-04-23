@@ -22,9 +22,9 @@ use crate::pipe::PipeBuffer;
 /// Buffer capacity for unix domain socket pipes (matches safeposix).
 pub const UDSOCK_CAPACITY: usize = 212_992;
 
-// Socket domains.
-pub const AF_UNIX: i32 = 1;
-pub const AF_INET: i32 = 2;
+// Socket domains — re-export from grate-rs as i32 for handler comparisons.
+pub const AF_UNIX: i32 = grate_rs::constants::net::AF_UNIX as i32;
+pub const AF_INET: i32 = grate_rs::constants::net::AF_INET as i32;
 
 // Socket types.
 pub const SOCK_STREAM: i32 = 1;
