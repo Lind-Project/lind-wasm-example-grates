@@ -25,7 +25,7 @@
 name = "geteuid-grate"
 dir = "geteuid-grate"
 type = "c"
-binary = "geteuid_grate"
+binary = "geteuid-grate"
 
 [[grate.tests]]
 test_src = "test/geteuid.c"
@@ -46,7 +46,7 @@ test_src = "test/strace_test.c"
 name = "strace-grate"
 dir = "strace-grate"
 type = "c"
-binary = "strace_grate"
+binary = "strace-grate"
 
 [[grate.tests]]
 test_src = "test/strace_test.c"
@@ -57,10 +57,10 @@ test_src = "test/strace_test.c"
 name = "imfs-grate"
 dir = "imfs-grate"
 type = "c"
-binary = "imfs_grate"
+binary = "imfs-grate"
 
 [[grate.tests]]
-test_src = "tests/imfs-test.c"
+test_src = "test/imfs-test.c"
 
 # ── IMFS (Rust) ──────────────────────────────────────────────────────
 
@@ -88,7 +88,7 @@ test_src = "test/readonly-grate-test.c"
 name = "seccomp-grate"
 dir = "seccomp-grate"
 type = "c"
-binary = "seccomp_grate"
+binary = "seccomp-grate"
 
 [[grate.tests]]
 test_src = "test/seccomp_chmod_test.c"
@@ -139,8 +139,8 @@ grate_args = ["-s", "0:100,1:"]
 # ── Write Filter (Rust) ─────────────────────────────────────────────
 
 [[grate]]
-name = "write_filter-grate"
-dir = "write_filter-grate-rs"
+name = "write-filter-grate-rs"
+dir = "write-filter-grate-rs"
 type = "rust"
 
 [[grate.tests]]
@@ -183,3 +183,13 @@ test_src = "test/ratelimit_demo.c"
 grate_args = "--ports 5432-5432 %{ resource-grate-rs.cwasm ratelimit_demo.cfg %}"
 files = ["test/ratelimit_demo.cfg"]
 timeout = 120
+
+# ── fdtables stress test (Rust) ──────────────────────────────────────
+
+[[grate]]
+name = "fdtables-test-grate"
+dir = "fdtables-test-grate"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/fdtables_test.c"

@@ -6,7 +6,7 @@
  *   - syscalls on non-/tmp paths are not.
  *
  * Example invocation:
- *      lind-boot namespace-grate.cwasm --prefix /tmp %{ testing-grate.cwasm
+ *      lind-boot namespace-grate-rs.cwasm --prefix /tmp %{ testing-grate.cwasm
  * -s 0:166,1:166,2:166,4:166,21:166,83:166,84:166,87:166 %}
  * namespace_test.cwasm
  *

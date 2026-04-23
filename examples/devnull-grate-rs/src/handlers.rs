@@ -10,7 +10,7 @@ use grate_rs::{
         SYS_CLONE, SYS_CLOSE, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_OPEN,
         SYS_READ, SYS_WRITE,
     },
-    copy_data_between_cages, getcageid, make_threei_call,
+    copy_data_between_cages, getcageid, is_thread_clone, make_threei_call,
 };
 
 const MAX_PATH: usize = 256;
@@ -172,7 +172,7 @@ pub extern "C" fn fork_handler(
         Err(_) => return -1,
     };
 
-    if ret > 0 {
+    if ret > 0 && !is_thread_clone(arg1, arg1cage) {
         let _ = fdtables::copy_fdtable_for_cage(cage_id, ret as u64);
     }
     ret
