@@ -5,7 +5,8 @@ use fdtables::init_empty_cage;
 use grate_rs::{
     GrateBuilder, GrateError,
     constants::{
-        SYS_ACCEPT, SYS_CLONE, SYS_CLOSE, SYS_CONNECT, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_READ, SYS_WRITE,
+        SYS_ACCEPT, SYS_CLONE, SYS_CLOSE, SYS_CONNECT, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_READ,
+        SYS_WRITE,
     },
 };
 use handlers::*;
@@ -19,13 +20,17 @@ use std::fs::File;
 use std::io::BufReader;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "An mTLS Grate for Lind-Wasm", long_about = None)]
+#[command(author, version, about = "A Production mTLS Grate for Lind-Wasm", long_about = None)]
 struct Args {
-    #[arg(long)]
-    cert: String,
-    #[arg(long)]
-    key: String,
-    #[arg(long)]
+    #[arg(long, help = "Path to the Server's public certificate")]
+    server_cert: Option<String>,
+    #[arg(long, help = "Path to the Server's private key")]
+    server_key: Option<String>,
+    #[arg(long, help = "Path to the Client's public certificate")]
+    client_cert: Option<String>,
+    #[arg(long, help = "Path to the Client's private key")]
+    client_key: Option<String>,
+    #[arg(long, help = "Path to the Certificate Authority root")]
     ca: String,
     #[arg(last = true)]
     app_args: Vec<String>,
@@ -52,34 +57,47 @@ fn main() {
     let args = Args::parse();
     init_empty_cage(grate_rs::getcageid());
 
+    // 1. Load the shared Certificate Authority
     let mut root_cert_store = rustls::RootCertStore::empty();
     for cert in load_certs(&args.ca) {
         root_cert_store.add(cert).unwrap();
     }
 
-    let verifier = WebPkiClientVerifier::builder(root_cert_store.clone().into())
-        .build()
-        .unwrap();
+    // 2. Configure the Server Identity (Used for SYS_ACCEPT)
+    // Only initialized if the server arguments are provided
+    if let (Some(cert_path), Some(key_path)) = (&args.server_cert, &args.server_key) {
+        let verifier = WebPkiClientVerifier::builder(root_cert_store.clone().into())
+            .build()
+            .unwrap();
 
-    let server_certs = load_certs(&args.cert);
-    let server_key = load_private_key(&args.key);
-    let server_config = ServerConfig::builder_with_provider(rustls_rustcrypto::provider().into())
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_client_cert_verifier(verifier)
-        .with_single_cert(server_certs, server_key)
-        .expect("bad client certificate/key");
-    SERVER_CONFIG.set(Arc::new(server_config)).unwrap();
+        let server_certs = load_certs(cert_path);
+        let server_key = load_private_key(key_path);
+        let server_config =
+            ServerConfig::builder_with_provider(rustls_rustcrypto::provider().into())
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(server_certs, server_key)
+                .expect("bad server certificate/key");
 
-    let client_certs = load_certs(&args.cert);
-    let client_key = load_private_key(&args.key);
-    let client_config = ClientConfig::builder_with_provider(rustls_rustcrypto::provider().into())
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_root_certificates(root_cert_store)
-        .with_client_auth_cert(client_certs, client_key)
-        .expect("bad client certificate/key");
-    CLIENT_CONFIG.set(Arc::new(client_config)).unwrap();
+        SERVER_CONFIG.set(Arc::new(server_config)).unwrap();
+    }
+
+    // 3. Configure the Client Identity (Used for SYS_CONNECT)
+    // Only initialized if the client arguments are provided
+    if let (Some(cert_path), Some(key_path)) = (&args.client_cert, &args.client_key) {
+        let client_certs = load_certs(cert_path);
+        let client_key = load_private_key(key_path);
+        let client_config =
+            ClientConfig::builder_with_provider(rustls_rustcrypto::provider().into())
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(root_cert_store)
+                .with_client_auth_cert(client_certs, client_key)
+                .expect("bad client certificate/key");
+
+        CLIENT_CONFIG.set(Arc::new(client_config)).unwrap();
+    }
 
     *TLS_SESSIONS.lock().unwrap() = Some(std::collections::HashMap::new());
 

@@ -1,8 +1,7 @@
 use grate_rs::{
     constants::{
-        SYS_ACCEPT, SYS_CLONE, SYS_CLOSE, SYS_CONNECT, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_READ, SYS_WRITE,
-        error::EIO,
-        lind::GRATE_MEMORY_FLAG,
+        SYS_ACCEPT, SYS_CLONE, SYS_CLOSE, SYS_CONNECT, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_READ,
+        SYS_WRITE, error::EIO, lind::GRATE_MEMORY_FLAG,
     },
     copy_data_between_cages, getcageid, is_thread_clone, make_threei_call,
 };
@@ -31,7 +30,44 @@ pub enum TlsStream {
     Client(StreamOwned<ClientConnection, ThreeiSocket>),
 }
 
-pub static TLS_SESSIONS: Mutex<Option<HashMap<u64, TlsStream>>> = Mutex::new(None);
+// reference counting
+pub struct SessionEntry {
+    pub stream: TlsStream,
+    pub refcount: usize,
+}
+
+pub static TLS_SESSIONS: Mutex<Option<HashMap<u64, SessionEntry>>> = Mutex::new(None);
+
+// --- RefCount Helpers ---
+fn increment_refcount(session_id: u64) {
+    if session_id == 0 {
+        return;
+    }
+    if let Some(sessions) = TLS_SESSIONS.lock().unwrap().as_mut() {
+        if let Some(entry) = sessions.get_mut(&session_id) {
+            entry.refcount += 1;
+        }
+    }
+}
+
+fn decrement_refcount(session_id: u64) {
+    if session_id == 0 {
+        return;
+    }
+    let mut should_remove = false;
+    if let Some(sessions) = TLS_SESSIONS.lock().unwrap().as_mut() {
+        if let Some(entry) = sessions.get_mut(&session_id) {
+            entry.refcount -= 1;
+            if entry.refcount == 0 {
+                should_remove = true;
+            }
+        }
+        if should_remove {
+            // Triggers close_notify on the network
+            sessions.remove(&session_id);
+        }
+    }
+}
 
 impl Read for ThreeiSocket {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -62,7 +98,7 @@ impl Read for ThreeiSocket {
                     "[mtls-grate] ThreeiSocket::read returned POSIX error: {}",
                     err_code
                 );
-                Err(std::io::Error::from_raw_os_error(libc::EIO))
+                Err(std::io::Error::from_raw_os_error(EIO))
             }
             Err(e) => {
                 eprintln!(
@@ -204,12 +240,16 @@ pub extern "C" fn connect_syscall(
         *id_guard += 1;
         current_id
     };
-    TLS_SESSIONS
-        .lock()
-        .unwrap()
-        .as_mut()
-        .unwrap()
-        .insert(session_id, TlsStream::Client(stream));
+    TLS_SESSIONS.lock().unwrap().as_mut().unwrap().insert(
+        session_id,
+        SessionEntry {
+            stream: TlsStream::Client(stream),
+            refcount: 1,
+        },
+    );
+
+    // register socket in fdtables before assigning info
+    let _ = fdtables::get_specific_virtual_fd(cageid, fd, 0, fd, false, 0);
 
     // attach the session_id to the existing virtual FD
     if let Err(e) = fdtables::set_perfdinfo(cageid, fd, session_id) {
@@ -297,12 +337,13 @@ pub extern "C" fn accept_syscall(
         *id_guard += 1;
         current_id
     };
-    TLS_SESSIONS
-        .lock()
-        .unwrap()
-        .as_mut()
-        .unwrap()
-        .insert(session_id, TlsStream::Server(stream));
+    TLS_SESSIONS.lock().unwrap().as_mut().unwrap().insert(
+        session_id,
+        SessionEntry {
+            stream: TlsStream::Server(stream),
+            refcount: 1,
+        },
+    );
 
     // map the read FD to virtual FD and attach session_id
     let real_new_fd = match fdtables::get_unused_virtual_fd(cageid, 0, real_new_fd, false, 0) {
@@ -389,8 +430,8 @@ pub extern "C" fn read_syscall(
         let mut guard = TLS_SESSIONS.lock().unwrap();
         let sessions = guard.as_mut().unwrap();
 
-        if let Some(stream_enum) = sessions.get_mut(&session_id) {
-            match stream_enum {
+        if let Some(entry) = sessions.get_mut(&session_id) {
+            match &mut entry.stream {
                 TlsStream::Server(stream) => match stream.read(&mut plaintext) {
                     Ok(b) => b,
                     Err(e) => {
@@ -518,8 +559,8 @@ pub extern "C" fn write_syscall(
         let mut guard = TLS_SESSIONS.lock().unwrap();
         let session = guard.as_mut().unwrap();
 
-        if let Some(stream_enum) = session.get_mut(&session_id) {
-            match stream_enum {
+        if let Some(entry) = session.get_mut(&session_id) {
+            match &mut entry.stream {
                 TlsStream::Server(stream) => match stream.write(&mut plaintext) {
                     Ok(b) => b,
                     Err(e) => {
@@ -554,7 +595,7 @@ pub extern "C" fn write_syscall(
 }
 
 pub extern "C" fn fork_syscall(
-    _cageid: u64,
+    cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -569,13 +610,13 @@ pub extern "C" fn fork_syscall(
     arg6cage: u64,
 ) -> i32 {
     let this_cage = getcageid();
-    let cage_id = arg1cage;
+    let parent_cage_id = cageid;
 
     let ret = match make_threei_call(
         SYS_CLONE as u32,
         0,
         this_cage,
-        cage_id,
+        parent_cage_id,
         arg1,
         arg1cage,
         arg2,
@@ -600,14 +641,23 @@ pub extern "C" fn fork_syscall(
 
     let child_cageid = ret as u64;
     if !is_thread_clone(arg1, arg1cage) {
-        let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cageid);
+        // PERF FIX: Only iterate over actually open FDs instead of 0..1024
+        let parent_fdtable = fdtables::return_fdtable_copy(parent_cage_id);
+
+        for virt_fd in parent_fdtable.keys() {
+            if let Ok(entry) = fdtables::translate_virtual_fd(parent_cage_id, *virt_fd) {
+                increment_refcount(entry.perfdinfo);
+            }
+        }
+
+        let _ = fdtables::copy_fdtable_for_cage(parent_cage_id, child_cageid);
     }
 
     child_cageid as i32
 }
 
 pub extern "C" fn exec_syscall(
-    _cageid: u64,
+    cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -622,19 +672,26 @@ pub extern "C" fn exec_syscall(
     arg6cage: u64,
 ) -> i32 {
     let this_cage = getcageid();
-    let cage_id = arg1cage;
 
-    fdtables::empty_fds_for_exec(cage_id);
+    // exec wipes the FD table. We must drop all session refcounts held by this cage.
+    let cage_fdtable = fdtables::return_fdtable_copy(cageid);
 
+    for virt_fd in cage_fdtable.keys() {
+        if let Ok(entry) = fdtables::translate_virtual_fd(cageid, *virt_fd) {
+            decrement_refcount(entry.perfdinfo);
+        }
+    }
+
+    fdtables::empty_fds_for_exec(cageid);
     for fd in 0..3u64 {
-        let _ = fdtables::get_specific_virtual_fd(cage_id, fd, 0, fd, false, 0);
+        let _ = fdtables::get_specific_virtual_fd(cageid, fd, 0, fd, false, 0);
     }
 
     match make_threei_call(
         SYS_EXECVE as u32,
         0,
         this_cage,
-        cage_id,
+        cageid,
         arg1,
         arg1cage,
         arg2,
@@ -655,7 +712,7 @@ pub extern "C" fn exec_syscall(
 }
 
 pub extern "C" fn dup_syscall(
-    _cageid: u64,
+    cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -670,14 +727,13 @@ pub extern "C" fn dup_syscall(
     arg6cage: u64,
 ) -> i32 {
     let this_cage = getcageid();
-    let cage_id = arg1cage;
-    let fd = arg1;
+    let oldfd = arg1;
 
     let ret = match make_threei_call(
         SYS_DUP as u32,
         0,
         this_cage,
-        cage_id,
+        cageid,
         arg1,
         arg1cage,
         arg2,
@@ -697,9 +753,10 @@ pub extern "C" fn dup_syscall(
     };
 
     if ret >= 0 {
-        if let Ok(entry) = fdtables::translate_virtual_fd(cage_id, fd) {
+        if let Ok(entry) = fdtables::translate_virtual_fd(cageid, oldfd) {
+            increment_refcount(entry.perfdinfo); // Increment session for the new duplicate
             let _ = fdtables::get_specific_virtual_fd(
-                cage_id,
+                cageid,
                 ret as u64,
                 entry.fdkind,
                 entry.underfd,
@@ -713,7 +770,7 @@ pub extern "C" fn dup_syscall(
 }
 
 pub extern "C" fn dup2_syscall(
-    _cageid: u64,
+    cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -728,15 +785,21 @@ pub extern "C" fn dup2_syscall(
     arg6cage: u64,
 ) -> i32 {
     let this_cage = getcageid();
-    let cage_id = arg1cage;
     let oldfd = arg1;
     let newfd = arg2;
+
+    // Grab the session of newfd before it potentially gets overwritten
+    let old_newfd_session = if let Ok(entry) = fdtables::translate_virtual_fd(cageid, newfd) {
+        entry.perfdinfo
+    } else {
+        0
+    };
 
     let ret = match make_threei_call(
         SYS_DUP2 as u32,
         0,
         this_cage,
-        cage_id,
+        cageid,
         arg1,
         arg1cage,
         arg2,
@@ -756,9 +819,12 @@ pub extern "C" fn dup2_syscall(
     };
 
     if ret >= 0 {
-        if let Ok(entry) = fdtables::translate_virtual_fd(cage_id, oldfd) {
+        decrement_refcount(old_newfd_session); // newfd was overwritten
+
+        if let Ok(entry) = fdtables::translate_virtual_fd(cageid, oldfd) {
+            increment_refcount(entry.perfdinfo); // oldfd session duplicated
             let _ = fdtables::get_specific_virtual_fd(
-                cage_id,
+                cageid,
                 newfd,
                 entry.fdkind,
                 entry.underfd,
@@ -767,11 +833,12 @@ pub extern "C" fn dup2_syscall(
             );
         }
     }
+
     ret
 }
 
 pub extern "C" fn close_syscall(
-    _cageid: u64,
+    cageid: u64,
     fd: u64,
     fd_cage: u64,
     arg2: u64,
@@ -786,29 +853,18 @@ pub extern "C" fn close_syscall(
     arg6cage: u64,
 ) -> i32 {
     let this_cage = getcageid();
-    let cage_id = fd_cage;
 
-    // Check if this fd has a TLS session and tear it down.
-    if let Ok(entry) = fdtables::translate_virtual_fd(cage_id, fd) {
-        let session_id = entry.perfdinfo;
-        if session_id != 0 {
-            let mut guard = TLS_SESSIONS.lock().unwrap();
-            if let Some(sessions) = guard.as_mut() {
-                // Removing the entry drops the StreamOwned, which sends
-                // close_notify and releases the TLS state.
-                sessions.remove(&session_id);
-            }
-        }
+    if let Ok(entry) = fdtables::translate_virtual_fd(cageid, fd) {
+        decrement_refcount(entry.perfdinfo); // Safely drop the reference
     }
 
-    let _ = fdtables::close_virtualfd(cage_id, fd);
+    let _ = fdtables::close_virtualfd(cageid, fd);
 
-    // Forward close to the underlying socket.
     match make_threei_call(
         SYS_CLOSE as u32,
         0,
         this_cage,
-        cage_id,
+        cageid,
         fd,
         fd_cage,
         arg2,
