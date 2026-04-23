@@ -2,11 +2,12 @@
  * Test for net-namespace-grate-rs.
  *
  * Run with testing-grate as the clamped grate:
- *   --ports 8080-8090 %{ testing-grate.cwasm -s 49:0,42:0,43:0 %}
+ *   --ports 8080-8090 %{ testing-grate.cwasm -s 49:166,42:166,43:166 %}
  *
- * testing-grate stubs: bind(49)=0, connect(42)=0, accept(43)=0.
- * Clamped port calls should return 0 (from the stub).
- * Unclamped port calls go to the kernel.
+ * testing-grate stubs: bind(49)=166, connect(42)=166, accept(43)=166.
+ * 166 is a sentinel value that can't come from the kernel (bind/connect
+ * return 0 on success, negative on error). So ret==166 proves the call
+ * was routed through the clamped grate.
  */
 #include <errno.h>
 #include <netinet/in.h>
@@ -14,6 +15,8 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#define STUB_RET 166
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -39,25 +42,25 @@ int main(void) {
     CHECK("socket()", fd >= 0);
     if (fd >= 0) close(fd);
 
-    /* Test 2: bind to clamped port — routed to testing-grate stub, returns 0 */
+    /* Test 2: bind to clamped port — routed to stub, returns 166 */
     fd = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in addr = make_addr(8080);
     int ret = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
-    CHECK("bind to clamped port 8080 returns 0", ret == 0);
+    CHECK("bind to clamped port 8080 returns stub value", ret == STUB_RET);
     if (fd >= 0) close(fd);
 
-    /* Test 3: bind to unclamped port — passthrough to kernel */
+    /* Test 3: bind to unclamped port — passthrough to kernel, returns 0 */
     fd = socket(AF_INET, SOCK_STREAM, 0);
     addr = make_addr(9999);
     ret = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
-    CHECK("bind to unclamped port 9999 succeeds", ret == 0);
+    CHECK("bind to unclamped port 9999 returns 0 (kernel)", ret == 0);
     if (fd >= 0) close(fd);
 
-    /* Test 4: connect to clamped port — routed to testing-grate stub, returns 0 */
+    /* Test 4: connect to clamped port — routed to stub, returns 166 */
     fd = socket(AF_INET, SOCK_STREAM, 0);
     addr = make_addr(8085);
     ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
-    CHECK("connect to clamped port 8085 returns 0", ret == 0);
+    CHECK("connect to clamped port 8085 returns stub value", ret == STUB_RET);
     if (fd >= 0) close(fd);
 
     /* Test 5: connect to unclamped port — passthrough to kernel, fails (no server) */

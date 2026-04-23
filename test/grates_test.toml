@@ -176,7 +176,7 @@ type = "rust"
 
 [[grate.tests]]
 test_src = "test/net_namespace_test.c"
-grate_args = "--ports 8080-8090 %{ testing-grate.cwasm -s 49:0,42:0,43:0 %}"
+grate_args = "--ports 8080-8090 %{ testing-grate.cwasm -s 49:166,42:166,43:166 %}"
 
 [[grate.tests]]
 test_src = "test/ratelimit_demo.c"
