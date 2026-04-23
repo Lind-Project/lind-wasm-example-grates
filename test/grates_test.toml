@@ -177,3 +177,30 @@ type = "rust"
 [[grate.tests]]
 test_src = "test/ipc_test.c"
 timeout = 120
+
+# ── Net Namespace (Rust) ─────────────────────────────────────────────
+
+[[grate]]
+name = "net-namespace-grate-rs"
+dir = "net-namespace-grate-rs"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/net_namespace_test.c"
+grate_args = "--ports 8080-8090 %{ testing-grate.cwasm -s 49:166,42:166,43:166 %}"
+
+[[grate.tests]]
+test_src = "test/ratelimit_demo.c"
+grate_args = "--ports 5432-5432 %{ resource-grate-rs.cwasm ratelimit_demo.cfg %}"
+files = ["test/ratelimit_demo.cfg"]
+timeout = 120
+
+# ── fdtables stress test (Rust) ──────────────────────────────────────
+
+[[grate]]
+name = "fdtables-test-grate"
+dir = "fdtables-test-grate"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/fdtables_test.c"
