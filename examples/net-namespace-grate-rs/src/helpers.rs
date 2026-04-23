@@ -3,10 +3,10 @@
 //! Mirrors the FS namespace grate's helpers.rs but routes by port range
 //! instead of path prefix.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
-use grate_rs::{copy_data_between_cages, make_threei_call};
+use grate_rs::{copy_data_between_cages, getcageid, make_threei_call};
 
 // =====================================================================
 //  Global state
@@ -15,23 +15,19 @@ use grate_rs::{copy_data_between_cages, make_threei_call};
 /// Routing table: (cage_id, syscall_nr) -> alt syscall number.
 static ROUTES: Mutex<Option<HashMap<(u64, u64), u64>>> = Mutex::new(None);
 
-/// The namespace grate's own cage ID.
-static NS_CAGE_ID: Mutex<u64> = Mutex::new(0);
-
 /// Port range for routing: (low, high) inclusive.
 static PORT_RANGE: Mutex<(u16, u16)> = Mutex::new((0, 0));
 
 /// Set of cage IDs inside the clamp.
-static CLAMPED_CAGES: Mutex<Option<HashMap<u64, ()>>> = Mutex::new(None);
+static CLAMPED_CAGES: Mutex<Option<HashSet<u64>>> = Mutex::new(None);
 
 /// Alt syscall number allocator — starts above Lind's 1001-1003 range.
 static ALT_ALLOCATOR: Mutex<u64> = Mutex::new(2000);
 
 /// Initialize all global state. Called once at startup.
-pub fn init_globals(ns_cage_id: u64, port_low: u16, port_high: u16) {
+pub fn init_globals(port_low: u16, port_high: u16) {
     *ROUTES.lock().unwrap() = Some(HashMap::new());
-    *CLAMPED_CAGES.lock().unwrap() = Some(HashMap::new());
-    *NS_CAGE_ID.lock().unwrap() = ns_cage_id;
+    *CLAMPED_CAGES.lock().unwrap() = Some(HashSet::new());
     *PORT_RANGE.lock().unwrap() = (port_low, port_high);
 }
 
@@ -40,7 +36,7 @@ pub fn init_globals(ns_cage_id: u64, port_low: u16, port_high: u16) {
 // =====================================================================
 
 pub fn get_ns_cage_id() -> u64 {
-    *NS_CAGE_ID.lock().unwrap()
+    getcageid()
 }
 
 pub fn get_port_range() -> (u16, u16) {
@@ -60,7 +56,7 @@ pub fn alloc_alt_syscall() -> u64 {
 
 pub fn register_clamped_cage(cage_id: u64) {
     let mut cages = CLAMPED_CAGES.lock().unwrap();
-    cages.as_mut().unwrap().insert(cage_id, ());
+    cages.as_mut().unwrap().insert(cage_id);
 }
 
 pub fn deregister_clamped_cage(cage_id: u64) {
@@ -73,7 +69,7 @@ pub fn is_cage_clamped(cage_id: u64) -> bool {
         .lock()
         .unwrap()
         .as_ref()
-        .map(|c| c.contains_key(&cage_id))
+        .map(|c| c.contains(&cage_id))
         .unwrap_or(false)
 }
 
@@ -140,18 +136,7 @@ pub fn extract_port_from_sockaddr(buf: &[u8]) -> Option<u16> {
     }
     let family = u16::from_ne_bytes([buf[0], buf[1]]);
     match family {
-        2 => {
-            // AF_INET: port at offset 2, big-endian
-            Some(u16::from_be_bytes([buf[2], buf[3]]))
-        }
-        10 => {
-            // AF_INET6: port at offset 2, big-endian
-            if buf.len() >= 4 {
-                Some(u16::from_be_bytes([buf[2], buf[3]]))
-            } else {
-                None
-            }
-        }
+        2 | 10 => Some(u16::from_be_bytes([buf[2], buf[3]])),
         _ => None,
     }
 }

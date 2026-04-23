@@ -5,7 +5,7 @@
 use grate_rs::{
     SyscallHandler,
     constants::{SYS_CLONE, SYS_EXEC, SYS_EXIT, SYS_REGISTER_HANDLER},
-    copy_data_between_cages, register_handler,
+    copy_data_between_cages, is_thread_clone, register_handler,
 };
 
 use crate::handlers::get_ns_handler;
@@ -80,9 +80,7 @@ pub extern "C" fn exec_handler(
     let ns_cage = helpers::get_ns_cage_id();
 
     if let Some(path) = helpers::read_path_from_cage(arg1, arg1cage) {
-        eprintln!("[net-ns] exec: cage={} path={}", arg1cage, path);
         if path == "%}" {
-            eprintln!("[net-ns] exec: detected %}} boundary for cage {}", arg1cage);
             helpers::deregister_clamped_cage(arg1cage);
 
             const PTR_SIZE: usize = 8;
@@ -128,16 +126,17 @@ pub extern "C" fn fork_handler(
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
-    eprintln!("[net-ns] lifecycle fork: parent={} clamped={}", arg1cage, helpers::is_cage_clamped(arg1cage));
     let child_cage_id = helpers::do_syscall(arg1cage, SYS_CLONE, &args, &arg_cages) as u64;
-    eprintln!("[net-ns] lifecycle fork: child={}", child_cage_id);
 
-    if helpers::is_cage_clamped(arg1cage) {
-        let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
-        helpers::clone_cage_routes(arg1cage, child_cage_id);
+    if !is_thread_clone(arg1, arg1cage) {
+        if helpers::is_cage_clamped(arg1cage) {
+            let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
+            helpers::clone_cage_routes(arg1cage, child_cage_id);
+        }
+
+        register_lifecycle_handlers(child_cage_id);
     }
 
-    register_lifecycle_handlers(child_cage_id);
     child_cage_id as i32
 }
 

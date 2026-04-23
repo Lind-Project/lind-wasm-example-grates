@@ -1,12 +1,12 @@
 /*
  * Test for net-namespace-grate-rs.
  *
- * When run under the grate with e.g. --ports 8080-8090, sockets that
- * bind/connect to ports in that range should be routed through the
- * clamped child grate. Sockets on other ports pass through to kernel.
+ * Run with testing-grate as the clamped grate:
+ *   --ports 8080-8090 %{ testing-grate.cwasm -s 49:0,42:0,43:0 %}
  *
- * Uses the testing-grate as the clamped grate with stub handlers that
- * return a known constant, so we can verify routing.
+ * testing-grate stubs: bind(49)=0, connect(42)=0, accept(43)=0.
+ * Clamped port calls should return 0 (from the stub).
+ * Unclamped port calls go to the kernel.
  */
 #include <errno.h>
 #include <netinet/in.h>
@@ -39,36 +39,32 @@ int main(void) {
     CHECK("socket()", fd >= 0);
     if (fd >= 0) close(fd);
 
-    /* Test 2: bind to port in clamped range */
+    /* Test 2: bind to clamped port — routed to testing-grate stub, returns 0 */
     fd = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in addr = make_addr(8080);
     int ret = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
-    CHECK("bind to clamped port 8080", ret == 0 || ret < 0);
-    /* Can't assert much without knowing the child grate behavior,
-       but the bind should have been routed to the clamped grate. */
+    CHECK("bind to clamped port 8080 returns 0", ret == 0);
     if (fd >= 0) close(fd);
 
-    /* Test 3: bind to port outside clamped range — passthrough */
+    /* Test 3: bind to unclamped port — passthrough to kernel */
     fd = socket(AF_INET, SOCK_STREAM, 0);
     addr = make_addr(9999);
     ret = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
     CHECK("bind to unclamped port 9999 succeeds", ret == 0);
     if (fd >= 0) close(fd);
 
-    /* Test 4: connect to clamped port */
+    /* Test 4: connect to clamped port — routed to testing-grate stub, returns 0 */
     fd = socket(AF_INET, SOCK_STREAM, 0);
     addr = make_addr(8085);
     ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
-    /* connect will likely fail (no server), but it should have gone
-       through the clamped grate's handler. */
-    CHECK("connect to clamped port 8085 routed", 1);
+    CHECK("connect to clamped port 8085 returns 0", ret == 0);
     if (fd >= 0) close(fd);
 
-    /* Test 5: connect to unclamped port */
+    /* Test 5: connect to unclamped port — passthrough to kernel, fails (no server) */
     fd = socket(AF_INET, SOCK_STREAM, 0);
     addr = make_addr(12345);
     ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
-    CHECK("connect to unclamped port 12345 passthrough", 1);
+    CHECK("connect to unclamped port 12345 fails (no server)", ret < 0);
     if (fd >= 0) close(fd);
 
     printf("\nResult: %d/%d passed\n", tests_passed, tests_run);

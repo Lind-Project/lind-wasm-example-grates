@@ -13,7 +13,6 @@ use core::ffi::{c_char, c_void};
 use std::ffi::CString;
 use std::ptr;
 
-use grate_rs::getcageid;
 use grate_rs::constants::mman::*;
 use grate_rs::ffi::*;
 
@@ -121,8 +120,7 @@ fn main() {
         }
     };
 
-    let ns_cage_id = getcageid();
-    helpers::init_globals(ns_cage_id, config.port_low, config.port_high);
+    helpers::init_globals(config.port_low, config.port_high);
 
     let cstrings: Vec<CString> = config
         .exec_chain

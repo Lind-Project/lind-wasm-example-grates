@@ -54,6 +54,7 @@ fd_route_handler!(ns_sendmsg_handler, SYS_SENDMSG);
 fd_route_handler!(ns_recvmsg_handler, SYS_RECVMSG);
 fd_route_handler!(ns_listen_handler, SYS_LISTEN);
 fd_route_handler!(ns_shutdown_handler, SYS_SHUTDOWN);
+fd_route_handler!(ns_recvfrom_handler, SYS_RECVFROM);
 
 // =====================================================================
 //  SOCKET — passthrough, just track the fd
@@ -244,13 +245,6 @@ pub extern "C" fn ns_sendto_handler(
 }
 
 // =====================================================================
-//  RECVFROM — fd-based routing
-// =====================================================================
-
-// recvfrom: route based on fd.
-fd_route_handler!(ns_recvfrom_handler, SYS_RECVFROM);
-
-// =====================================================================
 //  CLOSE — fd-based routing + cleanup
 // =====================================================================
 
@@ -378,35 +372,27 @@ pub extern "C" fn ns_clone_handler(
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
-    eprintln!("[net-ns] ns_clone: parent={} parent_exists={}", arg1cage, fdtables::check_cage_exists(arg1cage));
-
     // Route through alt if the clamped grate registered for SYS_CLONE.
     let nr = helpers::get_route(arg1cage, SYS_CLONE).unwrap_or(SYS_CLONE);
-    eprintln!("[net-ns] ns_clone: routing to nr={} (SYS_CLONE={})", nr, SYS_CLONE);
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
-    eprintln!("[net-ns] ns_clone: ret={}", ret);
 
     if ret <= 0 {
         return ret;
     }
 
     let child_cage_id = ret as u64;
-    eprintln!("[net-ns] ns_clone: child={} child_exists={}", child_cage_id, fdtables::check_cage_exists(child_cage_id));
 
     // Copy fdtables and routes if parent is tracked.
     if fdtables::check_cage_exists(arg1cage) {
-        eprintln!("[net-ns] ns_clone: copying fdtables {} -> {}", arg1cage, child_cage_id);
         let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
         helpers::clone_cage_routes(arg1cage, child_cage_id);
     } else {
-        eprintln!("[net-ns] ns_clone: init empty cage {}", child_cage_id);
         fdtables::init_empty_cage(child_cage_id);
         for fd in 0..3u64 {
             let _ = fdtables::get_specific_virtual_fd(child_cage_id, fd, 0, fd, false, 0);
         }
     }
 
-    eprintln!("[net-ns] ns_clone: registering lifecycle on {}", child_cage_id);
     register_lifecycle_handlers(child_cage_id);
     child_cage_id as i32
 }
