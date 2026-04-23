@@ -54,33 +54,28 @@ Non-TLS fds (e.g. files, pipes) pass through unchanged.
 
 Server side:
 ```bash
-lind-wasm mTLS-grate-rs.cwasm \
-  --cert ./certs/cert.pem \
-  --key ./certs/key.pem \
-  --ca ./certs/ca.crt \
+lind_run mTLS-grate-rs.cwasm \
+  --server-cert /certs/server.crt \
+  --server-key /certs/server.key \
+  --ca /certs/ca.crt \
   -- server.cwasm
 ```
 
 Test with openssl client (from the host, not inside Lind):
 ```bash
-openssl s_client -ignore_unexpected_eof \
-  -connect 127.0.0.1:443 \
-  -cert client-cert.pem \
-  -key client-key.pem \
-  -CAfile ca.crt
+lind_run mTLS-grate-rs.cwasm \
+  --client-cert /certs/client.crt \
+  --client-key /certs/client.key \
+  --ca /certs/ca.crt \
+  -- client.cwasm
 ```
-
-The `-ignore_unexpected_eof` flag is needed because when the cage closes
-the socket, the grate sends a TLS close_notify but the TCP connection may
-be torn down before openssl finishes processing it. Without this flag,
-openssl treats the abrupt shutdown as an error.
 
 Note: only the CA certificate (`ca.crt`) needs to be shared between
 server and client. Each side has its own cert and private key.
 
 ## Certificate setup
 
-Generate test certificates:
+Generate test certificates and install dependencies:
 ```bash
 bash test/setup.sh
 ```
@@ -96,7 +91,16 @@ cd examples/mTLS-grate-rs
 cargo lind_compile
 ```
 
+## Testing
+```bash
+lind_compile -s test/mtls_server_test.c
+lind_compile -s test/mtls_client_test.c
+
+bash test/test.sh
+```
+
 ## Dependencies
 
 Uses `rustls` 0.23 with the `rustls-rustcrypto` pure-Rust crypto provider
 (no assembly, compatible with Lind's WASM runtime).
+Uses tcpdump as part of the test to verify encrypted stream.
