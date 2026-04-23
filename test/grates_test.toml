@@ -167,6 +167,17 @@ type = "rust"
 test_src = "test/namespace_test.c"
 grate_args = "--prefix /tmp %{ testing-grate.cwasm -s 0:166,1:166,2:166,4:166,21:166,83:166,84:166,87:166 %}"
 
+# ── IPC (Rust) ───────────────────────────────────────────────────────
+
+[[grate]]
+name = "ipc-grate"
+dir = "ipc-grate"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/ipc_test.c"
+timeout = 120
+
 # ── Net Namespace (Rust) ─────────────────────────────────────────────
 
 [[grate]]
