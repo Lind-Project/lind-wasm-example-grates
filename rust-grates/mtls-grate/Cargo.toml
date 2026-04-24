@@ -1,9 +1,15 @@
 [package]
-name = "net-namespace-grate-rs"
+name = "mtls-grate"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 grate-rs = { git = "https://github.com/Lind-Project/lind-wasm-example-grates", branch = "main", subdir = "lib/grate-rs" }
 fdtables = { git = "https://github.com/Lind-Project/lind-wasm", branch = "main", subdir = "src/fdtables" }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+rustls-rustcrypto = "0.0.2-alpha"
+rustls-pemfile = "2.1"
+rustls-pki-types = "1.4"
+clap = { version = "4.0", features = ["derive"] }
+lazy_static = "1.4"
 libc = "0.2"
