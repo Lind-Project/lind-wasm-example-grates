@@ -1,7 +1,6 @@
 use crate::helpers;
-use grate_rs::{SyscallHandler, constants::*};
-
-use fdtables;
+use crate::handlers::clamped_lifecycle::register_lifecycle_handlers;
+use grate_rs::{SyscallHandler, constants::*, is_thread_clone};
 
 // =====================================================================
 //  PATH-BASED SYSCALL HANDLERS
@@ -333,6 +332,50 @@ pub extern "C" fn ns_dup3_handler(
 }
 
 // =====================================================================
+//  CLONE — route through alt + lifecycle bookkeeping
+// =====================================================================
+
+/// clone/fork: route through the clamped grate's handler (alt), then
+/// register lifecycle handlers and init fdtables on the child cage.
+pub extern "C" fn ns_clone_handler(
+    _cageid: u64,
+    arg1: u64, arg1cage: u64,
+    arg2: u64, arg2cage: u64,
+    arg3: u64, arg3cage: u64,
+    arg4: u64, arg4cage: u64,
+    arg5: u64, arg5cage: u64,
+    arg6: u64, arg6cage: u64,
+) -> i32 {
+    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    let nr = helpers::get_route(arg1cage, SYS_CLONE).unwrap_or(SYS_CLONE);
+    let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
+
+    if ret <= 0 {
+        return ret;
+    }
+
+    if !is_thread_clone(arg1, arg1cage) {
+        let child_cage_id = ret as u64;
+
+        if fdtables::check_cage_exists(arg1cage) {
+            let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
+            helpers::clone_cage_routes(arg1cage, child_cage_id);
+        } else {
+            fdtables::init_empty_cage(child_cage_id);
+            for fd in 0..3u64 {
+                let _ = fdtables::get_specific_virtual_fd(child_cage_id, fd, 0, fd, false, 0);
+            }
+        }
+
+        register_lifecycle_handlers(child_cage_id);
+    }
+
+    ret
+}
+
+// =====================================================================
 //  HANDLER LOOKUP
 //
 //  Maps syscall numbers to their namespace handler function pointers.
@@ -375,6 +418,9 @@ pub fn get_ns_handler(syscall_nr: u64) -> Option<SyscallHandler> {
         SYS_DUP => Some(ns_dup_handler),
         SYS_DUP2 => Some(ns_dup2_handler),
         SYS_DUP3 => Some(ns_dup3_handler),
+
+        // Lifecycle — interpose so we track child cages
+        SYS_CLONE => Some(ns_clone_handler),
 
         _ => None,
     }

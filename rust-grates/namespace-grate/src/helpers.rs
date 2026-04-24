@@ -114,6 +114,21 @@ pub fn get_route(cage_id: u64, syscall_nr: u64) -> Option<u64> {
         .and_then(|r| r.get(&(cage_id, syscall_nr)).copied())
 }
 
+/// Copy all routes from parent cage to child cage.
+pub fn clone_cage_routes(parent: u64, child: u64) {
+    let mut routes = ROUTES.lock().unwrap();
+    if let Some(map) = routes.as_mut() {
+        let parent_routes: Vec<(u64, u64)> = map
+            .iter()
+            .filter(|&(&(cid, _), _)| cid == parent)
+            .map(|(&(_, nr), &alt)| (nr, alt))
+            .collect();
+        for (nr, alt) in parent_routes {
+            map.insert((child, nr), alt);
+        }
+    }
+}
+
 /// Remove all state for a cage (routes + clamped status).
 pub fn remove_cage_state(cage_id: u64) {
     if let Some(routes) = ROUTES.lock().unwrap().as_mut() {
