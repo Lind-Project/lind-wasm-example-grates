@@ -1,5 +1,5 @@
 [package]
-name = "strace-grate-rs"
+name = "strace-grate"
 version = "0.1.0"
 edition = "2024"
 

@@ -1,5 +1,5 @@
 [package]
-name = "geteuid-grate-rs"
+name = "geteuid-grate"
 version = "0.1.0"
 edition = "2024"
 

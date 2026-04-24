@@ -144,7 +144,7 @@ parse_toml_array() {
 
 build_c_grate() {
     local dir="$1"
-    local grate_dir="$REPO_ROOT/examples/$dir"
+    local grate_dir="$REPO_ROOT/grates/$gtype/$dir"
 
     if [[ -f "$grate_dir/compile_grate.sh" ]]; then
         echo "  Building C grate: $dir"
@@ -161,7 +161,7 @@ build_c_grate() {
 
 build_rust_grate() {
     local dir="$1"
-    local grate_dir="$REPO_ROOT/examples/$dir"
+    local grate_dir="$REPO_ROOT/grates/$gtype/$dir"
 
     if [[ -f "$grate_dir/compile_grate.sh" ]]; then
         echo "  Building Rust grate: $dir"
@@ -244,7 +244,7 @@ for gi in "${!G_NAMES[@]}"; do
         continue
     fi
 
-    if [[ ! -d "$REPO_ROOT/examples/$gdir" ]]; then
+    if [[ ! -d "$REPO_ROOT/grates/$gtype/$gdir" ]]; then
         continue
     fi
 
@@ -260,7 +260,7 @@ for gi in "${!G_NAMES[@]}"; do
         echo "    -> found in lindfs"
     else
         # Fallback: search grate dir and copy if found
-        grate_cwasm="$(find "$REPO_ROOT/examples/$gdir" -name "*.cwasm" -not -path "*/test*" -not -path "*/tests*" 2>/dev/null | head -1)"
+        grate_cwasm="$(find "$REPO_ROOT/grates/$gtype/$gdir" -name "*.cwasm" -not -path "*/test*" -not -path "*/tests*" 2>/dev/null | head -1)"
         if [[ -n "$grate_cwasm" ]]; then
             cp "$grate_cwasm" "$LINDFS/"
             echo "    -> $(basename "$grate_cwasm") copied to lindfs"
@@ -277,7 +277,7 @@ for gi in "${!G_NAMES[@]}"; do
         [[ "${T_SKIPS[$ti]}" == "true" ]] && continue
 
         tsrc="${T_SRC[$ti]}"
-        test_src_path="$REPO_ROOT/examples/$gdir/$tsrc"
+        test_src_path="$REPO_ROOT/grates/$gtype/$gdir/$tsrc"
 
         if [[ ! -f "$test_src_path" ]]; then
             echo -e "  ${RED}Test source not found: $tsrc${NC}"
@@ -318,7 +318,7 @@ for gi in "${!G_NAMES[@]}"; do
         if [[ -n "$tfiles" ]]; then
             while IFS= read -r f; do
                 [[ -z "$f" ]] && continue
-                src="$REPO_ROOT/examples/$gdir/$f"
+                src="$REPO_ROOT/grates/$gtype/$gdir/$f"
                 if [[ -f "$src" ]]; then
                     cp "$src" "$LINDFS/"
                 fi
@@ -352,7 +352,7 @@ for gi in "${!G_NAMES[@]}"; do
         continue
     fi
 
-    if [[ ! -d "$REPO_ROOT/examples/$gdir" ]]; then
+    if [[ ! -d "$REPO_ROOT/grates/$gtype/$gdir" ]]; then
         log_skip "$gname (directory not found)"
         continue
     fi

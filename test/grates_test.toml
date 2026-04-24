@@ -4,7 +4,7 @@
 #
 # Fields:
 #   name      - display name
-#   dir       - directory under examples/
+#   dir       - directory under grates/c/ or grates/rust/ (determined by type)
 #   type      - "rust" or "c"
 #   binary    - (optional) cwasm filename in lindfs (without .cwasm)
 #               defaults to name
@@ -19,7 +19,7 @@
 #   timeout    - (optional) timeout in seconds (default: 60)
 #   skip       - (optional) skip this test
 
-# ── Minimal example ──────────────────────────────────────────────────
+# ── Geteuid (C) ─────────────────────────────────────────────────────
 
 [[grate]]
 name = "geteuid-grate"
@@ -30,17 +30,17 @@ binary = "geteuid-grate"
 [[grate.tests]]
 test_src = "test/geteuid.c"
 
-# ── Rust strace ──────────────────────────────────────────────────────
+# ── Strace (Rust) ───────────────────────────────────────────────────
 
 [[grate]]
-name = "strace-grate-rs"
-dir = "strace-grate-rs"
+name = "strace-grate"
+dir = "strace-grate"
 type = "rust"
 
 [[grate.tests]]
 test_src = "test/strace_test.c"
 
-# ── C strace ─────────────────────────────────────────────────────────
+# ── Strace (C) ──────────────────────────────────────────────────────
 
 [[grate]]
 name = "strace-grate"
@@ -51,7 +51,7 @@ binary = "strace-grate"
 [[grate.tests]]
 test_src = "test/strace_test.c"
 
-# ── IMFS (C) ─────────────────────────────────────────────────────────
+# ── IMFS (C) ────────────────────────────────────────────────────────
 
 [[grate]]
 name = "imfs-grate"
@@ -62,27 +62,27 @@ binary = "imfs-grate"
 [[grate.tests]]
 test_src = "test/imfs-test.c"
 
-# ── IMFS (Rust) ──────────────────────────────────────────────────────
+# ── IMFS (Rust) ─────────────────────────────────────────────────────
 
 [[grate]]
-name = "imfs-grate-rs"
-dir = "imfs-grate-rs"
+name = "imfs-grate"
+dir = "imfs-grate"
 type = "rust"
 
 [[grate.tests]]
 test_src = "test/imfs_test.c"
 
-# ── Readonly (Rust) ──────────────────────────────────────────────────
+# ── Readonly (Rust) ─────────────────────────────────────────────────
 
 [[grate]]
-name = "readonly-grate-rs"
-dir = "readonly-grate-rs"
+name = "readonly-grate"
+dir = "readonly-grate"
 type = "rust"
 
 [[grate.tests]]
 test_src = "test/readonly-grate-test.c"
 
-# ── Seccomp (C) — whitelist config ───────────────────────────────────
+# ── Seccomp (C) — whitelist config ──────────────────────────────────
 
 [[grate]]
 name = "seccomp-grate"
@@ -100,11 +100,11 @@ test_src = "test/seccomp_chmod_test.c"
 grate_args = ["seccomp_blacklist_test.conf"]
 files = ["policies/seccomp_blacklist_test.conf"]
 
-# ── Chroot (Rust) ────────────────────────────────────────────────────
+# ── Chroot (Rust) ───────────────────────────────────────────────────
 
 [[grate]]
-name = "chroot-grate-rs"
-dir = "chroot-grate-rs"
+name = "chroot-grate"
+dir = "chroot-grate"
 type = "rust"
 
 [[grate.tests]]
@@ -112,11 +112,11 @@ test_src = "test/chroot-test.c"
 grate_args = ["--chroot-dir", "/tmp"]
 lindfs_dir = "tmp"
 
-# ── Resource (Rust) ──────────────────────────────────────────────────
+# ── Resource (Rust) ─────────────────────────────────────────────────
 
 [[grate]]
-name = "resource-grate-rs"
-dir = "resource-grate-rs"
+name = "resource-grate"
+dir = "resource-grate"
 type = "rust"
 
 [[grate.tests]]
@@ -125,7 +125,7 @@ grate_args = ["test_resources.cfg"]
 files = ["test/test_resources.cfg"]
 timeout = 120
 
-# Testing Grate (Rust)
+# ── Testing Grate (Rust) ────────────────────────────────────────────
 
 [[grate]]
 name = "testing-grate"
@@ -136,38 +136,38 @@ type = "rust"
 test_src = "test/testing-grate-test.c"
 grate_args = ["-s", "0:100,1:"]
 
-# ── Write Filter (Rust) ─────────────────────────────────────────────
+# ── Write Filter (Rust) ────────────────────────────────────────────
 
 [[grate]]
-name = "write-filter-grate-rs"
-dir = "write-filter-grate-rs"
+name = "write-filter-grate"
+dir = "write-filter-grate"
 type = "rust"
 
 [[grate.tests]]
 test_src = "test/write_filter-test-grate.c"
 
-# ── Devnull (Rust) ───────────────────────────────────────────────────
+# ── Devnull (Rust) ──────────────────────────────────────────────────
 
 [[grate]]
-name = "devnull-grate-rs"
-dir = "devnull-grate-rs"
+name = "devnull-grate"
+dir = "devnull-grate"
 type = "rust"
 
 [[grate.tests]]
 test_src = "test/devnull_test.c"
 
-# FS Namespace Grate (Rust)
+# ── FS Namespace (Rust) ─────────────────────────────────────────────
 
 [[grate]]
-name = "namespace-grate-rs"
-dir = "namespace-grate-rs"
+name = "namespace-grate"
+dir = "namespace-grate"
 type = "rust"
 
 [[grate.tests]]
 test_src = "test/namespace_test.c"
 grate_args = "--prefix /tmp %{ testing-grate.cwasm -s 0:166,1:166,2:166,4:166,21:166,83:166,84:166,87:166 %}"
 
-# ── IPC (Rust) ───────────────────────────────────────────────────────
+# ── IPC (Rust) ──────────────────────────────────────────────────────
 
 [[grate]]
 name = "ipc-grate"
@@ -178,11 +178,11 @@ type = "rust"
 test_src = "test/ipc_test.c"
 timeout = 120
 
-# ── Net Namespace (Rust) ─────────────────────────────────────────────
+# ── Net Namespace (Rust) ────────────────────────────────────────────
 
 [[grate]]
-name = "net-namespace-grate-rs"
-dir = "net-namespace-grate-rs"
+name = "net-namespace-grate"
+dir = "net-namespace-grate"
 type = "rust"
 
 [[grate.tests]]
@@ -191,21 +191,21 @@ grate_args = "--ports 8080-8090 %{ testing-grate.cwasm -s 49:166,42:166,43:166 %
 
 [[grate.tests]]
 test_src = "test/ratelimit_demo.c"
-grate_args = "--ports 5432-5432 %{ resource-grate-rs.cwasm ratelimit_demo.cfg %}"
+grate_args = "--ports 5432-5432 %{ resource-grate.cwasm ratelimit_demo.cfg %}"
 files = ["test/ratelimit_demo.cfg"]
 timeout = 120
 
-# ── mTLS (Rust) ──────────────────────────────────────────────────────
+# ── mTLS (Rust) ─────────────────────────────────────────────────────
 # Requires cert setup (test/setup.sh) and runs server+client separately.
 # Use test/test.sh for the full test with network capture verification.
 
 [[grate]]
-name = "mTLS-grate-rs"
-dir = "mTLS-grate-rs"
+name = "mtls-grate"
+dir = "mtls-grate"
 type = "rust"
 skip = true
 
-# ── fdtables stress test (Rust) ──────────────────────────────────────
+# ── fdtables stress test (Rust) ─────────────────────────────────────
 
 [[grate]]
 name = "fdtables-test-grate"

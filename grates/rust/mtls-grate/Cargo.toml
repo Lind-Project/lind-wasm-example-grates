@@ -1,5 +1,5 @@
 [package]
-name = "mTLS-grate-rs"
+name = "mtls-grate"
 version = "0.1.0"
 edition = "2024"
 

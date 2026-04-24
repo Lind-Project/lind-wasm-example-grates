@@ -10,11 +10,11 @@
 
 SHELL := /bin/bash
 
-EXAMPLES_DIR := examples
+GRATES_DIR := grates
 
 # All grate directories
-C_GRATES := $(shell find $(EXAMPLES_DIR) -name "compile_grate.sh" -exec dirname {} \; | sort)
-RUST_GRATES := $(shell find $(EXAMPLES_DIR) -name "Cargo.toml" -not -path "*/target/*" -exec dirname {} \; | sort)
+C_GRATES := $(shell find $(GRATES_DIR)/c -name "compile_grate.sh" -exec dirname {} \; 2>/dev/null | sort)
+RUST_GRATES := $(shell find $(GRATES_DIR)/rust -name "Cargo.toml" -not -path "*/target/*" -exec dirname {} \; 2>/dev/null | sort)
 ALL_GRATES := $(sort $(C_GRATES) $(RUST_GRATES))
 
 # Extract just the directory name for make targets
@@ -78,6 +78,6 @@ clean:
 			rm -rf "$$g/output"; \
 		fi; \
 	done
-	@echo "Cleaning .cwasm/.wasm files from examples..."
-	@find $(EXAMPLES_DIR) \( -name "*.cwasm" -o -name "*.wasm" \) -not -path "*/target/*" -delete 2>/dev/null || true
+	@echo "Cleaning .cwasm/.wasm files..."
+	@find $(GRATES_DIR) \( -name "*.cwasm" -o -name "*.wasm" \) -not -path "*/target/*" -delete 2>/dev/null || true
 	@echo "Done."
