@@ -1,9 +1,9 @@
-# chroot-grate-rs
+# chroot-grate
 
 ## Build
 
 ```bash
-cargo lind_compile
+cargo lind_compile --output-dir grates
 ```
 
 ## Run
@@ -12,7 +12,7 @@ This binary expects `--chroot-dir` followed by the program (and args) to run
 under the grate:
 
 ```bash
-lind_run chroot-grate-rs.wasm --chroot-dir cage.wasm
+lind-wasm grates/chroot-grate.cwasm --chroot-dir cage.cwasm
 ```
 
 ## Code layout

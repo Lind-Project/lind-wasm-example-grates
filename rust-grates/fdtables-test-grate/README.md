@@ -37,13 +37,13 @@ the counter values. If Mutex works cross-thread, all three match. If not,
 ## Usage
 
 ```bash
-lind-wasm fdtables-test-grate.cwasm fdtables_test.cwasm
+lind-wasm grates/fdtables-test-grate.cwasm fdtables_test.cwasm
 ```
 
 ## Building
 
 ```bash
 cd examples/fdtables-test-grate
-cargo lind_compile
+cargo lind_compile --output-dir grates
 lind-clang -s test/fdtables_test.c
 ```
