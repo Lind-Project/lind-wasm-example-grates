@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Build everything needed for the least-privilege demo.
-# C grates build with -O2, Rust grates build with --release.
+# Rust grates build with --release.
 
 set -euo pipefail
 
@@ -11,21 +11,21 @@ LINDFS="${LINDFS:-${LIND_WASM_ROOT:-$HOME/lind-wasm}/lindfs}"
 
 echo "=== Building Least-Privilege Demo ==="
 
-# C grate: seccomp-grate with -O2
-echo "Building seccomp-grate (C, -O2)..."
+# C grate
+echo "Building seccomp-grate..."
 (cd "$REPO_ROOT/c-grates/seccomp-grate" && \
-  lind_compile -s -O2 --compile-grate --output-dir grates src/seccomp-grate.c src/seccomp.c)
+  lind_compile -s --compile-grate --output-dir grates src/seccomp-grate.c src/seccomp.c)
 
-# Rust grates: namespace-grate and imfs-grate with --release
-echo "Building namespace-grate (Rust, --release)..."
+# Rust grates with --release
+echo "Building namespace-grate (--release)..."
 (cd "$REPO_ROOT/rust-grates/namespace-grate" && cargo lind_compile --release --output-dir grates)
 
-echo "Building imfs-grate (Rust, --release)..."
+echo "Building imfs-grate (--release)..."
 (cd "$REPO_ROOT/rust-grates/imfs-grate" && cargo lind_compile --release --output-dir grates)
 
-# Compile test binary with -O2
-echo "Compiling test (-O2)..."
-lind-clang -s -O2 "$SCRIPT_DIR/least_privilege_test.c"
+# Compile test binary
+echo "Compiling test..."
+lind-clang -s "$SCRIPT_DIR/least_privilege_test.c"
 
 # Copy config to lindfs
 cp "$SCRIPT_DIR/seccomp_fs_deny.conf" "$LINDFS/"
