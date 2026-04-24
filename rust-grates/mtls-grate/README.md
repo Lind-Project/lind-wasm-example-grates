@@ -1,4 +1,4 @@
-# mTLS Grate
+# mtls-grate
 
 Transparently wraps plain TCP connections in mutual TLS. The cage program
 performs normal socket operations (connect, accept, read, write) over
@@ -20,7 +20,7 @@ code changes. For example:
   mTLS to encrypt traffic to the database server.
 - A microservice that communicates over plain HTTP can get mTLS
   enforcement at the sandbox boundary.
-- Combined with `net-namespace-grate`, mTLS can be scoped to specific
+- Combined with `net-namespace-grate`, mtls can be scoped to specific
   ports — e.g., only encrypt traffic to port 5432 while leaving local
   connections unaffected.
 
@@ -54,7 +54,7 @@ Non-TLS fds (e.g. files, pipes) pass through unchanged.
 
 Server side:
 ```bash
-lind_run mTLS-grate-rs.cwasm \
+lind-wasm grates/mtls-grate.cwasm \
   --server-cert /certs/server.crt \
   --server-key /certs/server.key \
   --ca /certs/ca.crt \
@@ -63,7 +63,7 @@ lind_run mTLS-grate-rs.cwasm \
 
 Test with openssl client (from the host, not inside Lind):
 ```bash
-lind_run mTLS-grate-rs.cwasm \
+lind-wasm grates/mtls-grate.cwasm \
   --client-cert /certs/client.crt \
   --client-key /certs/client.key \
   --ca /certs/ca.crt \
@@ -87,8 +87,8 @@ certificates.
 ## Building
 
 ```bash
-cd examples/mTLS-grate-rs
-cargo lind_compile
+cd examples/mtls-grate
+cargo lind_compile --output-dir grates
 ```
 
 ## Testing

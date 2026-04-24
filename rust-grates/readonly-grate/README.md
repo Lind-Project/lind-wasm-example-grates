@@ -15,4 +15,4 @@ All such calls will return `EPERM`.
 ## Usage
 
 Run a program under the `readonly-grate` using:
-`lind_run readonly-grate.cwasm readonly-grate-test.cwasm`
+`lind-wasm grates/readonly-grate.cwasm readonly-grate-test.cwasm`

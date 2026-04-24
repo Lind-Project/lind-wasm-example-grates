@@ -82,7 +82,7 @@ or use the `compile_grate.sh` script to build seccomp grate. Compile script copi
 
 ## Example Usage:
 
-`lind_run seccomp-grate.cwasm <seccomp_configuration> <app.cwasm> ...`
+`lind-wasm grates/seccomp-grate.cwasm <seccomp_configuration> <app.cwasm> ...`
 
 ## Testing
 
@@ -98,8 +98,8 @@ To verify the grate's functionality, you can execute the provided `tests/seccomp
 
 ### Executing Test:
 
-- `lind_run seccomp-grate.cwasm seccomp_whitelist_test.conf seccomp_chmod_test.c`
-- `lind_run seccomp-grate.cwasm seccomp_blacklist_test.conf seccomp_chmod_test.c`
+- `lind-wasm grates/seccomp-grate.cwasm seccomp_whitelist_test.conf seccomp_chmod_test.c`
+- `lind-wasm grates/seccomp-grate.cwasm seccomp_blacklist_test.conf seccomp_chmod_test.c`
 
 ## Future Work
 

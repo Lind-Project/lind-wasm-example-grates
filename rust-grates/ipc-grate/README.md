@@ -60,14 +60,14 @@ buffer's producer and consumer halves are NOT wrapped in Mutex because
 ## Usage
 
 ```bash
-lind-wasm ipc-grate.cwasm <program> [args...]
+lind-wasm grates/ipc-grate.cwasm <program> [args...]
 ```
 
 ## Building
 
 ```bash
 cd examples/ipc-grate
-cargo lind_compile
+cargo lind_compile --output-dir grates
 ```
 
 ## Known limitations

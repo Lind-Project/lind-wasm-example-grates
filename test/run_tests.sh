@@ -172,9 +172,9 @@ build_rust_grate() {
         fi
     elif [[ -f "$grate_dir/Cargo.toml" ]]; then
         echo "  Building Rust grate: $dir (cargo lind_compile)"
-        if ! (cd "$grate_dir" && cargo lind_compile) > /dev/null 2>&1; then
+        if ! (cd "$grate_dir" && cargo lind_compile --output-dir grates) > /dev/null 2>&1; then
             echo "    Build failed. Re-running with output:"
-            (cd "$grate_dir" && cargo lind_compile) 2>&1 | sed 's/^/    /'
+            (cd "$grate_dir" && cargo lind_compile --output-dir grates) 2>&1 | sed 's/^/    /'
             return 1
         fi
     else
@@ -255,15 +255,16 @@ for gi in "${!G_NAMES[@]}"; do
         *)    continue ;;
     esac
 
-    # Verify grate cwasm landed in lindfs (compile scripts put it there directly)
-    if ls "$LINDFS/"*"${gdir}"*.cwasm &>/dev/null || ls "$LINDFS/${gname}.cwasm" &>/dev/null; then
-        echo "    -> found in lindfs"
+    # Verify grate cwasm landed in lindfs/grates/ (compile scripts put it there directly)
+    if ls "$LINDFS/grates/"*"${gdir}"*.cwasm &>/dev/null || ls "$LINDFS/grates/${gname}.cwasm" &>/dev/null; then
+        echo "    -> found in lindfs/grates/"
     else
         # Fallback: search grate dir and copy if found
         grate_cwasm="$(find "$REPO_ROOT/${gtype}-grates/$gdir" -name "*.cwasm" -not -path "*/test*" -not -path "*/tests*" 2>/dev/null | head -1)"
         if [[ -n "$grate_cwasm" ]]; then
-            cp "$grate_cwasm" "$LINDFS/"
-            echo "    -> $(basename "$grate_cwasm") copied to lindfs"
+            mkdir -p "$LINDFS/grates"
+            cp "$grate_cwasm" "$LINDFS/grates/"
+            echo "    -> $(basename "$grate_cwasm") copied to lindfs/grates/"
         else
             echo -e "  ${RED}ERROR: no .cwasm found for $gname after build${NC}"
             continue
@@ -367,7 +368,7 @@ for gi in "${!G_NAMES[@]}"; do
     [[ -z "$gbin" ]] && gbin="$gname"
 
     grate_cwasm=""
-    for candidate in "$LINDFS/${gbin}.cwasm" "$LINDFS/${gname}.cwasm"; do
+    for candidate in "$LINDFS/grates/${gbin}.cwasm" "$LINDFS/grates/${gname}.cwasm"; do
         if [[ -f "$candidate" ]]; then
             grate_cwasm="$candidate"
             break
@@ -411,12 +412,14 @@ for gi in "${!G_NAMES[@]}"; do
         fi
 
         # Run with timeout; capture output and check for panics
-        cmd="lind-wasm $(basename "$grate_cwasm") ${run_args}$(basename "$test_cwasm")"
+        # Grate binary is in lindfs/grates/, test binary is in lindfs/
+        grate_rel="grates/$(basename "$grate_cwasm")"
+        cmd="lind-wasm $grate_rel ${run_args}$(basename "$test_cwasm")"
         echo "  Running: $cmd (timeout=${ttimeout}s)"
 
         tmp_out=$(mktemp)
         exit_code=0
-        timeout -k 5 "$ttimeout" lind-wasm "$(basename "$grate_cwasm")" \
+        timeout -k 5 "$ttimeout" lind-wasm "$grate_rel" \
             $run_args \
             "$(basename "$test_cwasm")" \
             > "$tmp_out" 2>&1 || exit_code=$?

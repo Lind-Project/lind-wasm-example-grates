@@ -1,29 +1,29 @@
-# net-namespace-grate-rs
+# net-namespace-grate
 
 A meta-grate that routes network syscalls to clamped child grates based on port range. Sockets that bind or connect to ports in the range get routed through the child grate stack. All other network traffic passes through to the kernel.
 
 ## Usage
 
 ```bash
-net-namespace-grate-rs --ports <low>-<high> %{ <grate1> [grate2 ...] %} <program> [args...]
+net-namespace-grate --ports <low>-<high> %{ <grate1> [grate2 ...] %} <program> [args...]
 ```
 
 ### Examples
 
 Route ports 8080-8090 through an mTLS grate:
 ```bash
-lind-wasm net-namespace-grate-rs.cwasm --ports 8080-8090 %{ mtls-grate.cwasm %} server.cwasm
+lind-wasm grates/net-namespace-grate.cwasm --ports 8080-8090 %{ grates/mtls-grate.cwasm %} server.cwasm
 ```
 
 Route a single port through a rate-limiting grate:
 ```bash
-lind-wasm net-namespace-grate-rs.cwasm --ports 443-443 %{ resource-grate-rs.cwasm resource.cfg %} server.cwasm
+lind-wasm grates/net-namespace-grate.cwasm --ports 443-443 %{ grates/resource-grate.cwasm resource.cfg %} server.cwasm
 ```
 
 Stack multiple ranges using recursion:
 ```bash
-lind-wasm net-namespace-grate-rs.cwasm --ports 80-89 %{ \
-  net-namespace-grate-rs.cwasm --ports 443-443 %{ mtls-grate.cwasm %} \
+lind-wasm grates/net-namespace-grate.cwasm --ports 80-89 %{ \
+  grates/net-namespace-grate.cwasm --ports 443-443 %{ grates/mtls-grate.cwasm %} \
   http-server.cwasm \
 %}
 ```
@@ -53,8 +53,8 @@ lind-wasm net-namespace-grate-rs.cwasm --ports 80-89 %{ \
 ## Building
 
 ```bash
-cd examples/net-namespace-grate-rs
-cargo lind_compile
+cd examples/net-namespace-grate
+cargo lind_compile --output-dir grates
 ```
 
 ## Testing
@@ -64,9 +64,9 @@ cargo lind_compile
 lind-clang -s test/net_namespace_test.c
 
 # Run with testing-grate as the clamped grate (stubs bind/connect/etc.)
-lind-wasm net-namespace-grate-rs.cwasm \
+lind-wasm grates/net-namespace-grate.cwasm \
   --ports 8080-8090 \
-  %{ testing-grate.cwasm -s 49:0,42:0,43:0 %} \
+  %{ grates/testing-grate.cwasm -s 49:0,42:0,43:0 %} \
   net_namespace_test.cwasm
 ```
 

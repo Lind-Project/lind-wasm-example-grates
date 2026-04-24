@@ -1,4 +1,4 @@
-# resource-grate-rs
+# resource-grate
 
 A Rust grate that enforces per-sandbox resource limits using the same
 token-bucket algorithm as repy's `nanny.py`. Limits are shared across all
@@ -46,27 +46,27 @@ resource messport 12345
 ## Usage
 
 ```bash
-lind-wasm resource-grate-rs.cwasm <config_file> <cage_binary> [args...]
+lind-wasm grates/resource-grate.cwasm <config_file> <cage_binary> [args...]
 ```
 
 Or via environment variable:
 
 ```bash
-RESOURCE_CONFIG=<config_file> lind-wasm resource-grate-rs.cwasm <cage_binary> [args...]
+RESOURCE_CONFIG=<config_file> lind-wasm grates/resource-grate.cwasm <cage_binary> [args...]
 ```
 
 ## Building
 
 ```bash
-cd examples/resource-grate-rs
-cargo lind_compile
+cd examples/resource-grate
+cargo lind_compile --output-dir grates
 ```
 
 ## Testing
 
 ```bash
 # Compile and run against the test config
-lind-wasm resource-grate-rs.cwasm test_resources.cfg resource_test.cwasm
+lind-wasm grates/resource-grate.cwasm test_resources.cfg resource_test.cwasm
 ```
 
 The test suite (`test/resource_test.c`) includes:

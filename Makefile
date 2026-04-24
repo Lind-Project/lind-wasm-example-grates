@@ -51,7 +51,7 @@ rust/$(notdir $(1)):
 	@if [ -f "$(1)/compile_grate.sh" ]; then \
 		cd "$(1)" && bash compile_grate.sh; \
 	else \
-		cd "$(1)" && cargo lind_compile; \
+		cd "$(1)" && cargo lind_compile --output-dir grates; \
 	fi
 endef
 
