@@ -5,24 +5,31 @@
 # Composes seccomp-grate + namespace-grate + imfs-grate to confine
 # a process tree to /workspace. All filesystem access outside
 # /workspace is denied with EPERM.
-#
-# Prerequisites:
-#   - Build seccomp-grate:    make c/seccomp-grate
-#   - Build namespace-grate:  make rust/namespace-grate
-#   - Build imfs-grate:       make rust/imfs-grate
-#   - Compile test:           lind-clang -s demos/least-privilege/least_privilege_test.c
-#   - Copy config to lindfs:  cp demos/least-privilege/seccomp_fs_deny.conf $LINDFS/
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LINDFS="${LINDFS:-${LIND_WASM_ROOT:-$HOME/lind-wasm}/lindfs}"
+
+echo "=== Least-Privilege Confinement Demo ==="
+echo ""
+
+# Build required grates
+echo "Building grates..."
+(cd "$REPO_ROOT" && make c/seccomp-grate)
+(cd "$REPO_ROOT" && make rust/namespace-grate)
+(cd "$REPO_ROOT" && make rust/imfs-grate)
+echo ""
+
+# Compile test binary
+echo "Compiling test..."
+lind-clang -s "$SCRIPT_DIR/least_privilege_test.c"
+echo ""
 
 # Copy config to lindfs
 cp "$SCRIPT_DIR/seccomp_fs_deny.conf" "$LINDFS/"
 
-echo "=== Least-Privilege Confinement Demo ==="
-echo ""
 echo "Composition:"
 echo "  seccomp-grate (deny all FS by default)"
 echo "    -> namespace-grate --prefix /workspace"
