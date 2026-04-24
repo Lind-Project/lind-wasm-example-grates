@@ -4,7 +4,7 @@
 #
 # Fields:
 #   name      - display name
-#   dir       - directory under grates/c/ or grates/rust/ (determined by type)
+#   dir       - directory under c-grates/ or rust-grates/ (determined by type)
 #   type      - "rust" or "c"
 #   binary    - (optional) cwasm filename in lindfs (without .cwasm)
 #               defaults to name
