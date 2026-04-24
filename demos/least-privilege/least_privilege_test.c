@@ -89,6 +89,9 @@ static void run_checks(int depth) {
 int main(void) {
     printf("=== Least-Privilege Confinement Test ===\n");
 
+    /* Create /workspace directory in imfs */
+    mkdir("/workspace", 0755);
+
     /* Depth 0: parent process */
     run_checks(0);
 
