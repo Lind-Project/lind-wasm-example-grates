@@ -4,7 +4,8 @@
 #   make test                    # run full test suite
 #   make test GRATE=geteuid-grate  # run one grate's tests
 #   make list                    # list available grates
-#   make <grate-name>            # build a single grate
+#   make c/<name>                # build a C grate
+#   make rust/<name>             # build a Rust grate
 #   make all                     # build all grates
 #   make clean                   # remove build artifacts
 
@@ -17,29 +18,32 @@ C_GRATES := $(shell find $(GRATES_DIR)/c -name "compile_grate.sh" -exec dirname 
 RUST_GRATES := $(shell find $(GRATES_DIR)/rust -name "Cargo.toml" -not -path "*/target/*" -exec dirname {} \; 2>/dev/null | sort)
 ALL_GRATES := $(sort $(C_GRATES) $(RUST_GRATES))
 
-# Extract just the directory name for make targets
-GRATE_TARGETS := $(notdir $(ALL_GRATES))
+# Targets use type/name format to avoid collisions (e.g. c/strace-grate, rust/strace-grate)
+C_TARGETS := $(patsubst $(GRATES_DIR)/%,%,$(C_GRATES))
+RUST_TARGETS := $(patsubst $(GRATES_DIR)/%,%,$(RUST_GRATES))
+ALL_TARGETS := $(C_TARGETS) $(RUST_TARGETS)
 
-.PHONY: all test list clean help $(GRATE_TARGETS)
+.PHONY: all test list clean help $(ALL_TARGETS)
 
 help:
 	@echo "Usage:"
 	@echo "  make test                      Run full test suite"
 	@echo "  make test GRATE=<name>         Run tests for one grate"
 	@echo "  make list                      List available grates"
-	@echo "  make <grate-name>              Build a single grate"
+	@echo "  make c/<grate-name>            Build a C grate"
+	@echo "  make rust/<grate-name>         Build a Rust grate"
 	@echo "  make all                       Build all grates"
 	@echo "  make clean                     Remove build artifacts"
 	@echo ""
 	@echo "Available grates:"
-	@for g in $(GRATE_TARGETS); do echo "  $$g"; done
+	@for g in $(ALL_TARGETS); do echo "  $$g"; done
 
-all: $(GRATE_TARGETS)
+all: $(ALL_TARGETS)
 
 # Build individual grates
 define build_grate
-$(notdir $(1)):
-	@echo "Building $(notdir $(1))..."
+$(patsubst $(GRATES_DIR)/%,%,$(1)):
+	@echo "Building $(patsubst $(GRATES_DIR)/%,%,$(1))..."
 	@if [ -f "$(1)/compile_grate.sh" ]; then \
 		cd "$(1)" && bash compile_grate.sh; \
 	elif [ -f "$(1)/Cargo.toml" ]; then \
