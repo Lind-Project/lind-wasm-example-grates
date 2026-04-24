@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 
 : "${LIND_WASM_APPS:?LIND_WASM_APPS is not set}"
 
-lind_compile -s --compile-grate \
+lind_compile -s --compile-grate --output-dir grates \
   src/witness-grate.c \
   "$LIND_WASM_APPS"/ed25519/*.c \
   -I"$LIND_WASM_APPS"/
