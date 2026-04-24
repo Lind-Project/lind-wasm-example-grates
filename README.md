@@ -7,36 +7,13 @@ Grates can enforce security policies, emulate devices, add encryption, rate-limi
 ## Repository Layout
 
 ```
-c-grates/                    C grate implementations
-  geteuid-grate/             Minimal example — overrides geteuid to return 10
-  strace-grate/              Logs all syscalls with arguments and return values
-  imfs-grate/                Full in-memory filesystem
-  seccomp-grate/             Syscall filter with INI-style allow/deny config
-  witness-grate/             Ed25519 signing of syscall arguments
-
-rust-grates/                 Rust grate implementations
-  geteuid-grate/             Minimal Rust example
-  strace-grate/              Syscall tracer
-  imfs-grate/                In-memory filesystem
-  chroot-grate/              Path-rewriting chroot jail
-  readonly-grate/            Blocks all write syscalls
-  write-filter-grate/        Blocks writes to non-.log files
-  devnull-grate/             Emulates /dev/null
-  resource-grate/            Rate-limiting and resource caps (repy nanny port)
-  testing-grate/             Runtime-configurable stub for testing
-  namespace-grate/           Routes filesystem syscalls by path prefix
-  net-namespace-grate/       Routes network syscalls by port range
-  ipc-grate/                 Userspace pipes and unix sockets
-  mtls-grate/                Transparent mutual TLS
-  fdtables-test-grate/       fdtables stress test
-
-lib/
-  grate-rs/                  Rust library for writing grates (GrateBuilder API)
-
-test/
-  grates_test.toml           Test suite configuration
-  run_tests.sh               Test runner
+c-grates/           C grate implementations
+rust-grates/        Rust grate implementations
+lib/grate-rs/       Rust library for writing grates
+test/               Test suite configuration and runner
 ```
+
+See [issue #6](https://github.com/Lind-Project/lind-wasm-example-grates/issues/6) for the current status of implemented grates.
 
 ## Quick Start
 
@@ -51,26 +28,15 @@ make rust/strace-grate         # Rust grate
 make all
 ```
 
-C grates compile with `lind_compile --compile-grate`. Rust grates compile with `cargo lind_compile`. Both output `.cwasm` files to `lindfs/grates/`.
+C grates compile with `lind_compile --compile-grate`. Rust grates compile with `cargo lind_compile`. Both output `.cwasm` files to `lindfs/`.
 
 ### Running
 
-Grates are the first argument to `lind-wasm`. The cage binary follows:
+A grate is run as a regular Lind program. The grate takes the target cage binary as input. Each grate has its own usage — see the individual grate's README for details.
 
 ```bash
-# Run a cage through the strace grate
 lind-wasm grates/strace-grate.cwasm my-program.cwasm
-
-# Run with a config file (resource grate)
-lind-wasm grates/resource-grate.cwasm config.cfg my-program.cwasm
-
-# Compose multiple grates (namespace grate wrapping a resource grate)
-lind-wasm grates/net-namespace-grate.cwasm --ports 5432-5432 %{ \
-  grates/resource-grate.cwasm rate-limit.cfg \
-%} server.cwasm
 ```
-
-Grate binaries live in `lindfs/grates/`. Cage binaries and config files live in `lindfs/` root.
 
 ### Testing
 
@@ -87,7 +53,7 @@ make list
 
 ## How Grates Work
 
-### The Grate Pattern
+### Grate Lifecycle
 
 1. **Fork**: The grate forks a child cage process
 2. **Register**: The grate registers handler functions for specific syscalls on the child
@@ -113,6 +79,11 @@ int main(int argc, char *argv[]) {
     int grateid = getpid();
     pid_t pid = fork();
     if (pid == 0) {
+        // register_handler(target_cage, syscall_number, grate_id, handler_fn_ptr)
+        //   target_cage:    cage ID to intercept syscalls from
+        //   syscall_number: which syscall to intercept (e.g. 107 = geteuid)
+        //   grate_id:       this grate's cage ID (for routing)
+        //   handler_fn_ptr: address of the handler function
         register_handler(getpid(), 107, grateid, (uint64_t)&my_handler);
         execv(argv[1], &argv[1]);
     }
@@ -121,9 +92,11 @@ int main(int argc, char *argv[]) {
 }
 ```
 
-Build: `lind_compile -s --compile-grate --output-dir grates my-grate.c`
+Build: `lind_compile -s --compile-grate my-grate.c`
 
 ### Writing a Rust Grate
+
+Rust grates can optionally use the `grate-rs` library (`lib/grate-rs/`) which provides a `GrateBuilder` API that handles the fork/register/exec lifecycle. See [`lib/grate-rs/README.md`](./lib/grate-rs/README.md) for the full API documentation.
 
 ```rust
 use grate_rs::{GrateBuilder, GrateError};
@@ -147,40 +120,13 @@ fn main() {
 }
 ```
 
-Build: `cargo lind_compile --output-dir grates`
-
-### The grate-rs Library
-
-Rust grates use the `grate-rs` library (`lib/grate-rs/`) which provides:
-
-- **`GrateBuilder`**: Builder pattern for registering handlers and lifecycle hooks
-  - `.register(syscall_nr, handler)` — register a syscall handler
-  - `.preexec(callback)` — run after fork, before child execs (use for fdtables init)
-  - `.teardown(callback)` — run after cage exits
-  - `.run(argv)` — fork, register, exec (terminal)
-- **`make_threei_call`**: Forward a syscall through the 3i runtime
-- **`copy_data_between_cages`**: Copy memory between cage address spaces
-- **`is_thread_clone`**: Check if a SYS_CLONE call is a thread (not a fork)
-- **`getcageid`**: Get the current cage ID
-- **Constants**: Syscall numbers, errno values, file flags, network constants, `GRATE_MEMORY_FLAG`
+Build: `cargo lind_compile`
 
 ### Grate Composition
 
-Grates compose by chaining: each grate execs the next one as its child. The namespace grates (`namespace-grate`, `net-namespace-grate`) enable selective composition using `%{ ... %}` syntax:
+Grates compose by chaining — each grate execs the next one as its child. This allows stacking multiple interposition layers without any grate needing to know about the others.
 
-```bash
-# Only route /tmp filesystem calls through the imfs grate
-lind-wasm grates/namespace-grate.cwasm --prefix /tmp %{ \
-  grates/imfs-grate.cwasm \
-%} my-program.cwasm
-
-# Rate-limit only port 5432 traffic
-lind-wasm grates/net-namespace-grate.cwasm --ports 5432-5432 %{ \
-  grates/resource-grate.cwasm config.cfg \
-%} server.cwasm
-```
-
-Grates inside `%{ ... %}` handle syscalls that match the condition. Everything else passes through to the kernel. Grates are written independently — the namespace grate handles routing without either grate knowing about the other.
+For selective composition, namespace grates can route specific syscalls to a clamped grate based on a condition (path prefix, port range, etc.) while passing everything else through to the kernel. See the namespace grate READMEs for usage details.
 
 ## Contributing
 
@@ -194,7 +140,7 @@ c-grates/<name>-grate/
 ├── test/
 ├── build.conf
 ├── compile_grate.sh
-��── README.md
+└── README.md
 
 rust-grates/<name>-grate/
 ├── src/
@@ -206,22 +152,20 @@ rust-grates/<name>-grate/
 ### Naming
 
 - Kebab-case: `resource-grate`, `write-filter-grate`
-- No `-rs` suffix — the directory location (`rust-grates/`) indicates the language
+- The directory location (`c-grates/` or `rust-grates/`) indicates the language
 - Package name in `Cargo.toml` matches the directory name
-- Generated `.cwasm` goes to `lindfs/grates/`
 
 ### Build Conventions
 
-- C: provide `compile_grate.sh` using `lind_compile -s --compile-grate --output-dir grates`
-- Rust: build with `cargo lind_compile --output-dir grates`
-- Rust Cargo.toml should use git URLs for `grate-rs` dependency (not path)
+- C: provide `compile_grate.sh` using `lind_compile -s --compile-grate`
+- Rust: build with `cargo lind_compile`
+- Use `--output-dir grates` if you want the output in `lindfs/grates/` instead of `lindfs/`
 
 ### Testing
 
 - Add test programs under `test/`
 - Register in `test/grates_test.toml`
 - Tests compile with `lind-clang -s` and run as cage binaries
-- Use `is_thread_clone` in fork handlers to avoid copying fdtables for threads
 
 ### Checklist
 
@@ -234,4 +178,4 @@ rust-grates/<name>-grate/
 
 - [Lind-Wasm documentation](https://lind-project.github.io/lind-wasm/)
 - [3i subsystem](https://github.com/Lind-Project/lind-wasm/blob/main/src/threei/README.md)
-- [grate-rs API](./lib/grate-rs/src/lib.rs)
+- [grate-rs library](./lib/grate-rs/README.md)
