@@ -195,6 +195,16 @@ grate_args = "--ports 5432-5432 %{ resource-grate-rs.cwasm ratelimit_demo.cfg %}
 files = ["test/ratelimit_demo.cfg"]
 timeout = 120
 
+# ── mTLS (Rust) ──────────────────────────────────────────────────────
+# Requires cert setup (test/setup.sh) and runs server+client separately.
+# Use test/test.sh for the full test with network capture verification.
+
+[[grate]]
+name = "mTLS-grate-rs"
+dir = "mTLS-grate-rs"
+type = "rust"
+skip = true
+
 # ── fdtables stress test (Rust) ──────────────────────────────────────
 
 [[grate]]
