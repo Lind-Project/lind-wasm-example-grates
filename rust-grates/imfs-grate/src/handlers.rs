@@ -48,7 +48,7 @@ pub extern "C" fn open_handler(
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
-    _arg2cage: u64,
+    arg2cage: u64,
     arg3: u64,
     _arg3cage: u64,
     _arg4: u64,
@@ -58,7 +58,12 @@ pub extern "C" fn open_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    let cage_id = arg1cage;
+    // This represents the calling cage, i.e. the cage that initially called open. Since arg1,
+    // arg1cage represents a path pointer, it might have represent the cageid of a transient grate
+    // that modified this pointer.
+    //
+    // We therefore use arg2cage since that represents the `flag` which is an integer pointer.
+    let cage_id = arg2cage;
 
     // Copy the pathname from the cage's memory.
     let pathname = match copy_path_from_cage(arg1, arg1cage) {
