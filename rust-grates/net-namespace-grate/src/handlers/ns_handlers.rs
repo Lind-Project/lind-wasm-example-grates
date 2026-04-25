@@ -28,25 +28,17 @@ macro_rules! fd_route_handler {
             let args = [arg1, arg2, arg3, arg4, arg5, arg6];
             let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
-            let route = helpers::get_route(arg1cage, $sysno);
-            let has_cage = fdtables::check_cage_exists(arg1cage);
-            let perfd = if has_cage {
-                fdtables::translate_virtual_fd(arg1cage, arg1)
-                    .map(|e| e.perfdinfo)
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-
-            let nr = match route {
-                Some(alt) if perfd != 0 => alt,
+            let nr = match helpers::get_route(arg1cage, $sysno) {
+                Some(alt)
+                    if fdtables::check_cage_exists(arg1cage)
+                        && fdtables::translate_virtual_fd(arg1cage, arg1)
+                            .map(|e| e.perfdinfo != 0)
+                            .unwrap_or(false) =>
+                {
+                    alt
+                }
                 _ => $sysno,
             };
-
-            if $sysno == 1 { // SYS_WRITE
-                eprintln!("[net-ns] write: cage={} fd={} route={:?} cage_exists={} perfdinfo={} nr={}",
-                          arg1cage, arg1, route, has_cage, perfd, nr);
-            }
 
             helpers::do_syscall(arg1cage, nr, &args, &arg_cages)
         }
@@ -84,9 +76,7 @@ pub extern "C" fn ns_socket_handler(
 
     // Route through alt if child grate registered for SYS_SOCKET.
     let nr = helpers::get_route(arg1cage, SYS_SOCKET).unwrap_or(SYS_SOCKET);
-    eprintln!("[net-ns] socket: cage={} nr={} (SYS_SOCKET={})", arg1cage, nr, SYS_SOCKET);
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
-    eprintln!("[net-ns] socket: ret={}", ret);
 
     if ret >= 0 && fdtables::check_cage_exists(arg1cage) {
         let _ = fdtables::get_specific_virtual_fd(
@@ -114,15 +104,14 @@ pub extern "C" fn ns_bind_handler(
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
-    let port = helpers::read_port_from_cage(arg2, arg2cage, arg3);
-    let in_range = port.map(|p| helpers::port_in_range(p)).unwrap_or(false);
-    eprintln!("[net-ns] bind: cage={} port={:?} in_range={}", arg1cage, port, in_range);
+    let in_range = helpers::read_port_from_cage(arg2, arg2cage, arg3)
+        .map(|port| helpers::port_in_range(port))
+        .unwrap_or(false);
 
     let nr = match helpers::get_route(arg1cage, SYS_BIND) {
         Some(alt) if in_range => alt,
         _ => SYS_BIND,
     };
-    eprintln!("[net-ns] bind: nr={}", nr);
 
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
 
@@ -150,21 +139,18 @@ pub extern "C" fn ns_connect_handler(
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
-    let port = helpers::read_port_from_cage(arg2, arg2cage, arg3);
-    let in_range = port.map(|p| helpers::port_in_range(p)).unwrap_or(false);
-    eprintln!("[net-ns] connect: cage={} fd={} port={:?} in_range={}", arg1cage, arg1, port, in_range);
+    let in_range = helpers::read_port_from_cage(arg2, arg2cage, arg3)
+        .map(|port| helpers::port_in_range(port))
+        .unwrap_or(false);
 
     let nr = match helpers::get_route(arg1cage, SYS_CONNECT) {
         Some(alt) if in_range => alt,
         _ => SYS_CONNECT,
     };
-    eprintln!("[net-ns] connect: nr={}", nr);
 
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
-    eprintln!("[net-ns] connect: ret={} cage_exists={}", ret, fdtables::check_cage_exists(arg1cage));
 
     if ret >= 0 && in_range && fdtables::check_cage_exists(arg1cage) {
-        eprintln!("[net-ns] connect: setting perfdinfo=1 for cage={} fd={}", arg1cage, arg1);
         let _ = fdtables::set_perfdinfo(arg1cage, arg1, 1);
     }
     ret
