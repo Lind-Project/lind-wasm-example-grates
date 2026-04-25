@@ -48,7 +48,7 @@ pub extern "C" fn open_handler(
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
-    arg2cage: u64,
+    _arg2cage: u64,
     arg3: u64,
     _arg3cage: u64,
     _arg4: u64,
@@ -58,7 +58,7 @@ pub extern "C" fn open_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    let cage_id = arg2cage;
+    let cage_id = arg1cage;
 
     // Copy the pathname from the cage's memory.
     let pathname = match copy_path_from_cage(arg1, arg1cage) {
@@ -453,7 +453,7 @@ pub extern "C" fn mkdir_handler(
 // =====================================================================
 
 pub extern "C" fn fork_handler(
-    _cageid: u64,
+    cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
