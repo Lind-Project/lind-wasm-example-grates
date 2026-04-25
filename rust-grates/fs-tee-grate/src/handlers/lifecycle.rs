@@ -12,7 +12,6 @@ pub fn register_lifecycle_handlers(cage_id: u64) {
     let handlers: &[(u64, SyscallHandler)] = &[
         (SYS_REGISTER_HANDLER, register_handler_handler),
         (SYS_EXEC, exec_handler),
-        (SYS_CLONE, fork_handler),
     ];
 
     for &(syscall_nr, handler) in handlers {
@@ -169,6 +168,7 @@ pub extern "C" fn exec_handler(
                         false, 0,
                     );
                 }
+                register_handler(arg1cage, SYS_CLONE, tee_cage, fork_handler).unwrap();
 
                 copy_handler_table_to_cage(tee_cage, arg1cage).unwrap();
                 // Check interposition map for target == primary_target.
