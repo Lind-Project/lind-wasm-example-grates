@@ -44,7 +44,7 @@ fn copy_path_from_cage(path_ptr: u64, path_cage: u64) -> Option<String> {
 // =====================================================================
 
 pub extern "C" fn open_handler(
-    _cageid: u64,
+    cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -58,7 +58,7 @@ pub extern "C" fn open_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    let cage_id = arg1cage;
+    let cage_id = cageid;
 
     // Copy the pathname from the cage's memory.
     let pathname = match copy_path_from_cage(arg1, arg1cage) {
@@ -79,7 +79,7 @@ pub extern "C" fn open_handler(
 // =====================================================================
 
 pub extern "C" fn close_handler(
-    _cageid: u64,
+    cageid: u64,
     arg1: u64,
     arg1cage: u64,
     _arg2: u64,
@@ -105,7 +105,7 @@ pub extern "C" fn close_handler(
 // =====================================================================
 
 pub extern "C" fn read_handler(
-    _cageid: u64,
+    cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -119,7 +119,7 @@ pub extern "C" fn read_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    let cage_id = arg1cage;
+    let cage_id = cageid;
     let fd = arg1;
     let count = arg3 as usize;
     let this_cage = getcageid();
@@ -155,7 +155,7 @@ pub extern "C" fn read_handler(
 // =====================================================================
 
 pub extern "C" fn write_handler(
-    _cageid: u64,
+    cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -169,7 +169,7 @@ pub extern "C" fn write_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    let cage_id = arg1cage;
+    let cage_id = cageid;
     let fd = arg1;
     let count = arg3 as usize;
     let this_cage = getcageid();
@@ -208,7 +208,7 @@ pub extern "C" fn write_handler(
 // =====================================================================
 
 pub extern "C" fn lseek_handler(
-    _cageid: u64,
+    cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -236,7 +236,7 @@ pub extern "C" fn lseek_handler(
 // =====================================================================
 
 pub extern "C" fn fcntl_handler(
-    _cageid: u64,
+    cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -263,7 +263,7 @@ pub extern "C" fn fcntl_handler(
 // =====================================================================
 
 pub extern "C" fn unlink_handler(
-    _cageid: u64,
+    cageid: u64,
     arg1: u64,
     arg1cage: u64,
     _arg2: u64,
@@ -286,7 +286,7 @@ pub extern "C" fn unlink_handler(
 }
 
 pub extern "C" fn link_handler(
-    _cageid: u64,
+    cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -322,7 +322,7 @@ pub extern "C" fn link_handler(
 // =====================================================================
 
 pub extern "C" fn pread_handler(
-    _cageid: u64,
+    cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -336,7 +336,7 @@ pub extern "C" fn pread_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    let cage_id = arg1cage;
+    let cage_id = cageid;
     let fd = arg1;
     let count = arg3 as usize;
     let offset = arg4 as i64;
@@ -371,7 +371,7 @@ pub extern "C" fn pread_handler(
 // =====================================================================
 
 pub extern "C" fn pwrite_handler(
-    _cageid: u64,
+    cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -385,7 +385,7 @@ pub extern "C" fn pwrite_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    let cage_id = arg1cage;
+    let cage_id = cageid;
     let fd = arg1;
     let count = arg3 as usize;
     let offset = arg4 as i64;
@@ -420,7 +420,7 @@ pub extern "C" fn pwrite_handler(
 // =====================================================================
 
 pub extern "C" fn mkdir_handler(
-    _cageid: u64,
+    cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -515,7 +515,7 @@ pub extern "C" fn fork_handler(
 // =====================================================================
 
 pub extern "C" fn exec_handler(
-    _cageid: u64,
+    cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -529,7 +529,7 @@ pub extern "C" fn exec_handler(
     arg6: u64,
     arg6cage: u64,
 ) -> i32 {
-    let cage_id = arg1cage;
+    let cage_id = cageid;
     let this_cage = getcageid();
 
     // Interposing on exec also interposes on the very first exec that launches the first child cage.
