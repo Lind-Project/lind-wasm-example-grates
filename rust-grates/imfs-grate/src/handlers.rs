@@ -70,7 +70,9 @@ pub extern "C" fn open_handler(
     let mode = arg3 as u32;
 
     eprintln!("[imfs] open: cageid={} arg1cage={:#x} cage_id={:#x} path={}", cageid, arg1cage, cage_id, pathname);
-    imfs::with_imfs(|state| state.open(cage_id, &pathname, flags, mode))
+    let ret = imfs::with_imfs(|state| state.open(cage_id, &pathname, flags, mode));
+    eprintln!("[imfs] open: ret={}", ret);
+    ret
 }
 
 // =====================================================================

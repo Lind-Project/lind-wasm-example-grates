@@ -114,7 +114,9 @@ macro_rules! path_rewrite_handler {
             };
 
             ensure_cage_root(cage_id);
-            forward_with_rewrite($sysno, cage_id, &args, &arg_cages, $path_idx, &c_path)
+            let ret = forward_with_rewrite($sysno, cage_id, &args, &arg_cages, $path_idx, &c_path);
+            eprintln!("[fs-view] ret={}", ret);
+            ret
         }
     };
 }
