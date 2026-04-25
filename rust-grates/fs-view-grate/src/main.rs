@@ -161,15 +161,7 @@ macro_rules! two_path_rewrite_handler {
             c[$idx2] = grate | GRATE_MEMORY_FLAG;
 
             ensure_cage_root(cage_id);
-
-            match make_threei_call(
-                $sysno as u32, 0, grate, cage_id,
-                a[0], c[0], a[1], c[1], a[2], c[2],
-                a[3], c[3], a[4], c[4], a[5], c[5], 0,
-            ) {
-                Ok(r) => r,
-                Err(_) => -1,
-            }
+            forward($sysno, cage_id, &a, &c)
         }
     };
 }
