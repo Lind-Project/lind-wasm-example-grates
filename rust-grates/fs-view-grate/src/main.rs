@@ -42,7 +42,7 @@ fn forward_with_rewrite(
     let mut a = *args;
     let mut c = *arg_cages;
     a[path_idx] = new_path.as_ptr() as u64;
-    c[path_idx] = grate | GRATE_MEMORY_FLAG;
+    c[path_idx] = grate;
 
     match make_threei_call(
         nr as u32, 0, grate, cage_id,
