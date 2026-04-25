@@ -2,7 +2,6 @@ use std::{collections::HashMap, sync::Mutex};
 
 #[derive(Copy, Clone, Debug)]
 pub enum TeePhase {
-    Init,
     Primary,
     Secondary,
     Target,
@@ -11,10 +10,9 @@ pub enum TeePhase {
 impl TeePhase {
     pub fn next(self) -> Self {
         match self {
-            TeePhase::Init => TeePhase::Primary,
             TeePhase::Primary => TeePhase::Secondary,
             TeePhase::Secondary => TeePhase::Target,
-            TeePhase::Target => TeePhase::Target, // or panic!() if that's invalid
+            TeePhase::Target => TeePhase::Target,
         }
     }
 }

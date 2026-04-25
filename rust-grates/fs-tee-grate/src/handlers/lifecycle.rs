@@ -1,13 +1,10 @@
 use crate::handlers::tee::get_tee_handler;
 use crate::tee::*;
 use crate::utils::do_syscall;
-use grate_rs::SyscallHandler;
-use grate_rs::constants::*;
-use grate_rs::copy_data_between_cages;
-use grate_rs::copy_handler_table_to_cage;
-use grate_rs::getcageid;
-use grate_rs::make_threei_call;
-use grate_rs::register_handler;
+use grate_rs::{
+    SyscallHandler, constants::*, copy_data_between_cages, copy_handler_table_to_cage, getcageid,
+    make_threei_call, register_handler,
+};
 
 pub fn register_lifecycle_handlers(cage_id: u64) {
     let tee_cage = getcageid();
@@ -15,8 +12,6 @@ pub fn register_lifecycle_handlers(cage_id: u64) {
     let handlers: &[(u64, SyscallHandler)] = &[
         (SYS_REGISTER_HANDLER, register_handler_handler),
         (SYS_EXEC, exec_handler),
-        // (SYS_CLONE, fork_handler),
-        // (SYS_EXIT, exit_handler),
     ];
 
     for &(syscall_nr, handler) in handlers {
@@ -24,11 +19,6 @@ pub fn register_lifecycle_handlers(cage_id: u64) {
             eprintln!(
                 "[tee-grate] failed to register lifecycle handler {} on cage {}: {:?}",
                 syscall_nr, cage_id, e
-            );
-        } else {
-            println!(
-                "[tetrs] registered: {} {} {}",
-                cage_id, syscall_nr, tee_cage
             );
         }
     }
@@ -49,18 +39,18 @@ pub extern "C" fn register_handler_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    println!(
-        "[tetrs | register_handler_handler] {} {} {} {}",
-        target_cage, syscall_nr, grate_id, fn_ptr
-    );
-
     // Record the interposition.
+    //
+    // This map is used to later re-write handlers from perceived targetcageid from primary and
+    // secondary stacks' perspectives to the actual target cageid.
     with_tee(|s| {
         s.interposition_map
             .push((target_cage, syscall_nr, grate_id, fn_ptr))
     });
 
-    // Performe the interposition.
+    // Perform the interposition. We don't want to interfere within interpositions within primary
+    // and secondary stacks. For calls that cross the boundary, these are overwritten later in exec
+    // through copy_handler_table.
     return do_syscall(
         grate_id,
         SYS_REGISTER_HANDLER,
@@ -86,6 +76,21 @@ pub extern "C" fn exec_handler(
     arg6: u64,
     arg6cage: u64,
 ) -> i32 {
+    // Step 0. Copy path to grate.
+    //
+    // Step 1.1 If path is %}, move to the next phase (Primary -> Secondary -> Target)
+    //
+    // Step 1.2 If path is %} and in Secondary phase, we are about to start the secondary stack on
+    // this cage, use copy_handler_table to reset this cage to act like the child of the
+    // fs-tee-grate, and then register lifecycle handlers.
+    //
+    // Step 1.3 If path is %} and in Target phase, make this the child of fs-tee-grate, read
+    // interposition_map to populate tee_routes.
+    //
+    // Step 2. If path is %{ or %}, shift args and call recursively.
+    //
+    // Step 3. If none of these match, carry on.
+
     // Copy path to grate.
     let tee_cage = getcageid();
 
@@ -108,30 +113,21 @@ pub extern "C" fn exec_handler(
     let len = buf.iter().position(|&b| b == 0).unwrap_or(256);
     let path = String::from_utf8_lossy(&buf[..len]);
 
-    println!("[tetrs | exec_handler] Path: {}", path);
-
     // Is path == %} ? Switch phase to next.
     if path == "%}" {
         with_tee(|s| s.phase = s.phase.next());
 
         let phase = with_tee(|s| s.phase);
 
-        // If secondary: copy_handler_table_to_cage, re-register lifecycle handlers.
-
         match phase {
             TeePhase::Secondary => {
-                println!(
-                    "[tetrs | exec_handler] Secondary phase, COPY_HANDLER_TABLE({tee_cage} => {arg1cage})"
-                );
                 copy_handler_table_to_cage(tee_cage, arg1cage).unwrap();
                 register_lifecycle_handlers(arg1cage);
-                // Register that primary_target is getcageid();
+
+                // Register that this cageid is what primary stack assumes to be the target cageid.
                 with_tee(|s| s.primary_target = arg1cage);
             }
             TeePhase::Target => {
-                println!(
-                    "[tetrs | exec_handler] Target phase, COPY_HANDLER_TABLE({tee_cage} => {arg1cage})"
-                );
                 copy_handler_table_to_cage(tee_cage, arg1cage).unwrap();
                 // Check interposition map for target == primary_target.
                 let primary_registers: Vec<(u64, u64, u64, u64)> = with_tee(|s| {
@@ -174,7 +170,7 @@ pub extern "C" fn exec_handler(
                     register_handler(arg1cage, syscall, tee_cage, handler).unwrap();
                 }
 
-                // Check map for target == secondary_target.
+                // Check map for target == secondary_target (which is arg1cage).
                 let secondary_registers: Vec<(u64, u64, u64, u64)> = with_tee(|s| {
                     s.interposition_map
                         .iter()
@@ -268,15 +264,7 @@ pub extern "C" fn exec_handler(
             0,
         )
         .unwrap();
-
-        // return do_syscall(
-        //    arg2cage,
-        //    SYS_EXEC,
-        //    &[real_path, argv1_addr, arg3, arg4, arg5, arg6],
-        //    &[arg2cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
-        //);
     } else {
-        println!("\n===== Actual Cage Exec: {path} ========\n");
         return do_syscall(
             arg1cage,
             SYS_EXEC,
@@ -284,40 +272,4 @@ pub extern "C" fn exec_handler(
             &[arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
         );
     }
-}
-
-pub extern "C" fn fork_handler(
-    _cageid: u64,
-    arg1: u64,
-    arg1cage: u64,
-    arg2: u64,
-    arg2cage: u64,
-    arg3: u64,
-    arg3cage: u64,
-    arg4: u64,
-    arg4cage: u64,
-    arg5: u64,
-    arg5cage: u64,
-    arg6: u64,
-    arg6cage: u64,
-) -> i32 {
-    0
-}
-
-pub extern "C" fn exit_handler(
-    _cageid: u64,
-    arg1: u64,
-    arg1cage: u64,
-    arg2: u64,
-    arg2cage: u64,
-    arg3: u64,
-    arg3cage: u64,
-    arg4: u64,
-    arg4cage: u64,
-    arg5: u64,
-    arg5cage: u64,
-    arg6: u64,
-    arg6cage: u64,
-) -> i32 {
-    0
 }
