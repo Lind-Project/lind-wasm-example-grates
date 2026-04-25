@@ -1,8 +1,14 @@
 # Filesystem Isolation Demo
 
-Demonstrates per-cage filesystem isolation using namespace-grate + imfs-grate.
-Paths under `/tmp` are routed to an in-memory filesystem, giving each cage
-an independent view. All other paths proceed to the host filesystem normally.
+Demonstrates per-cage filesystem isolation using three composed grates:
+
+- **namespace-grate**: Routes `/tmp` paths to the clamped grate stack
+- **fs-view-grate**: Prefixes paths with `/cage-<id>/` for per-cage isolation
+- **imfs-grate**: Provides an in-memory filesystem
+
+Paths under `/tmp` are routed to an in-memory filesystem, with each cage
+getting an independent view via path prefixing. All other paths proceed
+to the host filesystem normally.
 
 Two cages that both open `/tmp/foo` receive independent in-memory files with
 no shared state. This cannot be replicated with FUSE (requires privileged mount)

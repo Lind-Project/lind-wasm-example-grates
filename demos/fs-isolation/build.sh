@@ -12,6 +12,9 @@ echo "=== Building Filesystem Isolation Demo ==="
 echo "Building namespace-grate (--release)..."
 (cd "$REPO_ROOT/rust-grates/namespace-grate" && cargo lind_compile --release --output-dir grates)
 
+echo "Building fs-view-grate (--release)..."
+(cd "$REPO_ROOT/rust-grates/fs-view-grate" && cargo lind_compile --release --output-dir grates)
+
 echo "Building imfs-grate (--release)..."
 (cd "$REPO_ROOT/rust-grates/imfs-grate" && cargo lind_compile --release --output-dir grates)
 

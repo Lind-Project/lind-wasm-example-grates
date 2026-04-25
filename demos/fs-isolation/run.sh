@@ -9,10 +9,12 @@ echo "=== Filesystem Isolation Demo ==="
 echo ""
 echo "Composition:"
 echo "  namespace-grate --prefix /tmp"
-echo "    -> imfs-grate (independent in-memory FS per cage)"
+echo "    -> fs-view-grate (per-cage path prefixing)"
+echo "      -> imfs-grate (in-memory FS)"
 echo "  Host filesystem (everything outside /tmp)"
 echo ""
 
 lind-wasm grates/namespace-grate.cwasm --prefix /tmp %{ \
+  grates/fs-view-grate.cwasm \
   grates/imfs-grate.cwasm \
 %} fs_isolation_test.cwasm
