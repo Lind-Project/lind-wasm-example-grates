@@ -13,7 +13,7 @@ echo "mTLS automatically — no per-worker configuration needed."
 echo ""
 
 lind-wasm grates/mtls-grate.cwasm \
-  --server-cert ./certs/cert.pem \
-  --server-key ./certs/key.pem \
+  --server-cert ./certs/server.crt \
+  --server-key ./certs/server.key \
   --ca ./certs/ca.crt \
   -- mtls_propagation_test.cwasm
