@@ -317,6 +317,9 @@ pub extern "C" fn handle_write(
     arg6: u64, arg6cage: u64,
 ) -> i32 {
     let cage_id = arg1cage;
+    let kind = fd_kind(cage_id, arg1);
+    eprintln!("[resource] write: grate={} cage={} fd={} fdkind={} (FD_SOCKET={})",
+              grate_cageid, cage_id, arg1, kind, FD_SOCKET);
     charge_write_pre(cage_id, arg1);
 
     let ret = forward(
@@ -437,7 +440,6 @@ pub extern "C" fn handle_socket(
 ) -> i32 {
     let cage_id = arg1cage;
 
-
     let ret = forward(
         SYS_SOCKET, grate_cageid,
         arg1, arg1cage, arg2, arg2cage, arg3, arg3cage,
@@ -445,6 +447,7 @@ pub extern "C" fn handle_socket(
     );
 
     if ret >= 0 {
+        eprintln!("[resource] socket: cage={} fd={} registering as FD_SOCKET", cage_id, ret);
         let _ = fdtables::get_specific_virtual_fd(
             cage_id, ret as u64, FD_SOCKET, 0, false, 0,
         );
