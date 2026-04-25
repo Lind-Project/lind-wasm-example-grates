@@ -437,7 +437,6 @@ pub extern "C" fn handle_socket(
 ) -> i32 {
     let cage_id = arg1cage;
 
-
     let ret = forward(
         SYS_SOCKET, grate_cageid,
         arg1, arg1cage, arg2, arg2cage, arg3, arg3cage,
