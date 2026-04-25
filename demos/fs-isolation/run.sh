@@ -15,6 +15,6 @@ echo "  Host filesystem (everything outside /tmp)"
 echo ""
 
 lind-wasm grates/namespace-grate.cwasm --prefix /tmp %{ \
-  grates/fs-view-grate.cwasm \
   grates/imfs-grate.cwasm \
+  grates/fs-view-grate.cwasm \
 %} fs_isolation_test.cwasm
