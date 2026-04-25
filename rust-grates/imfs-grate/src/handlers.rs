@@ -69,6 +69,7 @@ pub extern "C" fn open_handler(
     let flags = arg2 as i32;
     let mode = arg3 as u32;
 
+    eprintln!("[imfs] open: cageid={} arg1cage={:#x} cage_id={:#x} path={}", cageid, arg1cage, cage_id, pathname);
     imfs::with_imfs(|state| state.open(cage_id, &pathname, flags, mode))
 }
 
@@ -93,6 +94,7 @@ pub extern "C" fn close_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
+    eprintln!("[imfs] close: cageid={} arg1cage={:#x} fd={}", cageid, arg1cage, arg1);
     imfs::with_imfs(|state| state.close(arg1cage, arg1))
 }
 
@@ -119,6 +121,7 @@ pub extern "C" fn read_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
+    eprintln!("[imfs] read: cageid={} arg1cage={:#x} fd={}", cageid, arg1cage, arg1);
     let cage_id = arg1cage;
     let fd = arg1;
     let count = arg3 as usize;
@@ -169,6 +172,7 @@ pub extern "C" fn write_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
+    eprintln!("[imfs] write: cageid={} arg1cage={:#x} fd={}", cageid, arg1cage, arg1);
     let cage_id = arg1cage;
     let fd = arg1;
     let count = arg3 as usize;
