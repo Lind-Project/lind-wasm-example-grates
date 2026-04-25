@@ -365,10 +365,7 @@ pub extern "C" fn ns_clone_handler(
         // Register lifecycle handlers on the child.
         register_lifecycle_handlers(child_cage_id);
 
-        // Copy fdtables if the parent has an entry — the child needs one
-        // for inner grates (like imfs) to track fds. The inner grate's
-        // preexec handles its own child (the next cage in the chain), but
-        // test program forks go through here.
+        eprintln!("[ns] clone: parent={} child={}", arg1cage, child_cage_id);
         let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
     }
 
