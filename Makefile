@@ -75,7 +75,8 @@ clean-lindfs:
 	rm -rf "$$LINDFS/grates/"*.cwasm 2>/dev/null || true; \
 	rm -f "$$LINDFS/"*.cwasm 2>/dev/null || true; \
 	rm -rf "$$LINDFS/cage-"* 2>/dev/null || true; \
-	rm -f "$$LINDFS/"*.cfg "$$LINDFS/"*.conf 2>/dev/null || true
+	rm -f "$$LINDFS/"*.cfg "$$LINDFS/"*.conf 2>/dev/null || true; \
+	rm -rf "$$LINDFS/certs" 2>/dev/null || true
 
 # Clean everything
 clean: clean-lindfs
