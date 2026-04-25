@@ -74,6 +74,7 @@ clean-lindfs:
 	@LINDFS="$${LINDFS:-$${LIND_WASM_ROOT:-$$HOME/lind-wasm}/lindfs}"; \
 	rm -rf "$$LINDFS/grates/"*.cwasm 2>/dev/null || true; \
 	rm -f "$$LINDFS/"*.cwasm 2>/dev/null || true; \
+	chmod -R u+w "$$LINDFS/cage-"* 2>/dev/null || true; \
 	rm -rf "$$LINDFS/cage-"* 2>/dev/null || true; \
 	rm -f "$$LINDFS/"*.cfg "$$LINDFS/"*.conf 2>/dev/null || true; \
 	rm -rf "$$LINDFS/certs" 2>/dev/null || true
