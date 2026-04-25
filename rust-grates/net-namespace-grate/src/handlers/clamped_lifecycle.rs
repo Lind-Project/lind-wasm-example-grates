@@ -22,6 +22,9 @@ pub extern "C" fn register_handler_handler(
 ) -> i32 {
     let ns_cage = helpers::get_ns_cage_id();
 
+    eprintln!("[net-ns] register_handler: target={} syscall={} grate={} clamped={}",
+              target_cage, syscall_nr, grate_id, helpers::is_cage_clamped(grate_id));
+
     if !helpers::is_cage_clamped(grate_id) {
         return helpers::do_syscall(
             grate_id,
@@ -80,6 +83,7 @@ pub extern "C" fn exec_handler(
     let ns_cage = helpers::get_ns_cage_id();
 
     if let Some(path) = helpers::read_path_from_cage(arg1, arg1cage) {
+        eprintln!("[net-ns] exec: cage={} path={}", arg1cage, path);
         if path == "%}" {
             helpers::deregister_clamped_cage(arg1cage);
 
