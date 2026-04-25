@@ -95,6 +95,8 @@ clean: clean-lindfs
 			rm -rf "$$g/output"; \
 		fi; \
 	done
-	@echo "Cleaning .cwasm/.wasm files from source dirs..."
-	@find c-grates rust-grates \( -name "*.cwasm" -o -name "*.wasm" \) -not -path "*/target/*" -delete 2>/dev/null || true
+	@echo "Cleaning .cwasm/.wasm files from source dirs and demos..."
+	@find c-grates rust-grates demos \( -name "*.cwasm" -o -name "*.wasm" \) -not -path "*/target/*" -delete 2>/dev/null || true
+	@echo "Cleaning Cargo.lock files..."
+	@find rust-grates -name "Cargo.lock" -delete 2>/dev/null || true
 	@echo "Done."
