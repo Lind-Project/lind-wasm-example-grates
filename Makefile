@@ -21,7 +21,7 @@ C_TARGETS := $(patsubst c-grates/%,c/%,$(C_GRATES))
 RUST_TARGETS := $(patsubst rust-grates/%,rust/%,$(RUST_GRATES))
 ALL_TARGETS := $(C_TARGETS) $(RUST_TARGETS)
 
-.PHONY: all test list clean help $(ALL_TARGETS)
+.PHONY: all test list clean clean-lindfs help $(ALL_TARGETS)
 
 help:
 	@echo "Usage:"
@@ -61,16 +61,24 @@ $(foreach g,$(RUST_GRATES),$(eval $(call build_rust_grate,$(g))))
 # Test suite
 test:
 ifdef GRATE
-	@./test/run_tests.sh "$(GRATE)"
+	@./test/run_tests.sh "$(GRATE)"; ret=$$?; $(MAKE) -s clean-lindfs; exit $$ret
 else
-	@./test/run_tests.sh
+	@./test/run_tests.sh; ret=$$?; $(MAKE) -s clean-lindfs; exit $$ret
 endif
 
 list:
 	@./test/run_tests.sh --list
 
-# Clean
-clean:
+# Clean lindfs artifacts (called after test and by clean)
+clean-lindfs:
+	@LINDFS="$${LINDFS:-$${LIND_WASM_ROOT:-$$HOME/lind-wasm}/lindfs}"; \
+	rm -rf "$$LINDFS/grates/"*.cwasm 2>/dev/null || true; \
+	rm -f "$$LINDFS/"*.cwasm 2>/dev/null || true; \
+	rm -rf "$$LINDFS/cage-"* 2>/dev/null || true; \
+	rm -f "$$LINDFS/"*.cfg "$$LINDFS/"*.conf 2>/dev/null || true
+
+# Clean everything
+clean: clean-lindfs
 	@echo "Cleaning Rust grate targets..."
 	@for g in $(RUST_GRATES); do \
 		if [ -d "$$g/target" ]; then \
@@ -87,11 +95,4 @@ clean:
 	done
 	@echo "Cleaning .cwasm/.wasm files from source dirs..."
 	@find c-grates rust-grates \( -name "*.cwasm" -o -name "*.wasm" \) -not -path "*/target/*" -delete 2>/dev/null || true
-	@echo "Cleaning lindfs..."
-	@LINDFS="$${LINDFS:-$${LIND_WASM_ROOT:-$$HOME/lind-wasm}/lindfs}"; \
-	rm -rf "$$LINDFS/grates/"*.cwasm 2>/dev/null || true; \
-	rm -f "$$LINDFS/"*.cwasm 2>/dev/null || true; \
-	rm -rf "$$LINDFS/cage-"* 2>/dev/null || true; \
-	rm -f "$$LINDFS/"*.cfg "$$LINDFS/"*.conf 2>/dev/null || true; \
-	echo "  removed grate binaries, test artifacts, cage dirs, and config files from lindfs"
 	@echo "Done."
