@@ -16,8 +16,8 @@ use std::ptr;
 use crate::constants::lind::ELINDAPIABORTED;
 use crate::constants::mman::*;
 use crate::ffi::{
-    clean_exit, cp_data_impl, execv, fork, getpid_impl, make_syscall_impl, mmap, munmap,
-    register_handler_impl, sem_destroy, sem_init, sem_post, sem_t, sem_wait, waitpid,
+    clean_exit, cp_data_impl, cp_handler_impl, execv, fork, getpid_impl, make_syscall_impl, mmap,
+    munmap, register_handler_impl, sem_destroy, sem_init, sem_post, sem_t, sem_wait, waitpid,
 };
 
 /// Error types that can occur during grate execution.
@@ -29,6 +29,8 @@ pub enum GrateError {
     HandlerRegistrationError(i32),
     /// Error returned by `copy_data_between_cages`.
     CopyDataError(i32),
+    /// Error returned by `copy_handler_table_to_cage`.
+    CopyHandlerError(i32),
     /// Make syscall error
     MakeSyscallError(i32),
 }
@@ -189,6 +191,17 @@ pub fn copy_data_between_cages(
     }
 }
 
+/// Copy data between two cages.
+pub fn copy_handler_table_to_cage(srccage: u64, targetcage: u64) -> Result<(), GrateError> {
+    let ret = unsafe { cp_handler_impl(srccage, targetcage) };
+
+    // 3i::copy_handler_table_to_cage returns ELINDAPIABORTED for every error.
+    match ret as u64 {
+        ELINDAPIABORTED => Err(GrateError::CopyDataError(ELINDAPIABORTED as i32)),
+        _ => Ok(()),
+    }
+}
+
 /// Use threei to make a syscall.
 pub fn make_threei_call(
     callnumber: c_uint,
@@ -254,10 +267,14 @@ pub fn is_thread_clone(clone_args_ptr: u64, clone_args_cage: u64) -> bool {
     let grate_cage = getcageid();
     let mut flags: u64 = 0;
     let _ = copy_data_between_cages(
-        grate_cage, clone_args_cage,
-        clone_args_ptr, clone_args_cage,
-        &mut flags as *mut u64 as u64, grate_cage,
-        8, 0,
+        grate_cage,
+        clone_args_cage,
+        clone_args_ptr,
+        clone_args_cage,
+        &mut flags as *mut u64 as u64,
+        grate_cage,
+        8,
+        0,
     );
     (flags & constants::process::CLONE_VM) != 0
 }
