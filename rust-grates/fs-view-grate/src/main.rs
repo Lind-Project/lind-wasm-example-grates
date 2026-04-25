@@ -107,16 +107,13 @@ macro_rules! path_rewrite_handler {
             };
 
             let rewritten = cage_path(&path, cage_id);
-            eprintln!("[fs-view] cage={} {} -> {}", cage_id, path, rewritten);
             let c_path = match CString::new(rewritten) {
                 Ok(p) => p,
                 Err(_) => return -1,
             };
 
             ensure_cage_root(cage_id);
-            let ret = forward_with_rewrite($sysno, cage_id, &args, &arg_cages, $path_idx, &c_path);
-            eprintln!("[fs-view] ret={}", ret);
-            ret
+            forward_with_rewrite($sysno, cage_id, &args, &arg_cages, $path_idx, &c_path)
         }
     };
 }

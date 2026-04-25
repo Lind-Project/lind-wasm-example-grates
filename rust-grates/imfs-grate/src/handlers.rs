@@ -44,7 +44,7 @@ fn copy_path_from_cage(path_ptr: u64, path_cage: u64) -> Option<String> {
 // =====================================================================
 
 pub extern "C" fn open_handler(
-    cageid: u64,
+    _cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -69,10 +69,7 @@ pub extern "C" fn open_handler(
     let flags = arg2 as i32;
     let mode = arg3 as u32;
 
-    eprintln!("[imfs] open: cageid={} arg1cage={:#x} arg2cage={:#x} cage_id={:#x} path={}", cageid, arg1cage, arg2cage, cage_id, pathname);
-    let ret = imfs::with_imfs(|state| state.open(cage_id, &pathname, flags, mode));
-    eprintln!("[imfs] open: ret={}", ret);
-    ret
+    imfs::with_imfs(|state| state.open(cage_id, &pathname, flags, mode))
 }
 
 // =====================================================================
@@ -82,7 +79,7 @@ pub extern "C" fn open_handler(
 // =====================================================================
 
 pub extern "C" fn close_handler(
-    cageid: u64,
+    _cageid: u64,
     arg1: u64,
     arg1cage: u64,
     _arg2: u64,
@@ -96,7 +93,6 @@ pub extern "C" fn close_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    eprintln!("[imfs] close: cageid={} arg1cage={:#x} fd={}", cageid, arg1cage, arg1);
     imfs::with_imfs(|state| state.close(arg1cage, arg1))
 }
 
@@ -109,7 +105,7 @@ pub extern "C" fn close_handler(
 // =====================================================================
 
 pub extern "C" fn read_handler(
-    cageid: u64,
+    _cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -123,7 +119,6 @@ pub extern "C" fn read_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    eprintln!("[imfs] read: cageid={} arg1cage={:#x} fd={}", cageid, arg1cage, arg1);
     let cage_id = arg1cage;
     let fd = arg1;
     let count = arg3 as usize;
@@ -160,7 +155,7 @@ pub extern "C" fn read_handler(
 // =====================================================================
 
 pub extern "C" fn write_handler(
-    cageid: u64,
+    _cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -174,7 +169,6 @@ pub extern "C" fn write_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    eprintln!("[imfs] write: cageid={} arg1cage={:#x} fd={}", cageid, arg1cage, arg1);
     let cage_id = arg1cage;
     let fd = arg1;
     let count = arg3 as usize;
@@ -214,7 +208,7 @@ pub extern "C" fn write_handler(
 // =====================================================================
 
 pub extern "C" fn lseek_handler(
-    cageid: u64,
+    _cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -242,7 +236,7 @@ pub extern "C" fn lseek_handler(
 // =====================================================================
 
 pub extern "C" fn fcntl_handler(
-    cageid: u64,
+    _cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -269,7 +263,7 @@ pub extern "C" fn fcntl_handler(
 // =====================================================================
 
 pub extern "C" fn unlink_handler(
-    cageid: u64,
+    _cageid: u64,
     arg1: u64,
     arg1cage: u64,
     _arg2: u64,
@@ -292,7 +286,7 @@ pub extern "C" fn unlink_handler(
 }
 
 pub extern "C" fn link_handler(
-    cageid: u64,
+    _cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -328,7 +322,7 @@ pub extern "C" fn link_handler(
 // =====================================================================
 
 pub extern "C" fn pread_handler(
-    cageid: u64,
+    _cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -377,7 +371,7 @@ pub extern "C" fn pread_handler(
 // =====================================================================
 
 pub extern "C" fn pwrite_handler(
-    cageid: u64,
+    _cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -426,7 +420,7 @@ pub extern "C" fn pwrite_handler(
 // =====================================================================
 
 pub extern "C" fn mkdir_handler(
-    cageid: u64,
+    _cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -459,7 +453,7 @@ pub extern "C" fn mkdir_handler(
 // =====================================================================
 
 pub extern "C" fn fork_handler(
-    cageid: u64,
+    _cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -521,7 +515,7 @@ pub extern "C" fn fork_handler(
 // =====================================================================
 
 pub extern "C" fn exec_handler(
-    cageid: u64,
+    _cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
