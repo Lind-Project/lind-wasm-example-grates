@@ -85,6 +85,13 @@ clean:
 			rm -rf "$$g/output"; \
 		fi; \
 	done
-	@echo "Cleaning .cwasm/.wasm files..."
+	@echo "Cleaning .cwasm/.wasm files from source dirs..."
 	@find c-grates rust-grates \( -name "*.cwasm" -o -name "*.wasm" \) -not -path "*/target/*" -delete 2>/dev/null || true
+	@echo "Cleaning lindfs..."
+	@LINDFS="$${LINDFS:-$${LIND_WASM_ROOT:-$$HOME/lind-wasm}/lindfs}"; \
+	rm -rf "$$LINDFS/grates/"*.cwasm 2>/dev/null || true; \
+	rm -f "$$LINDFS/"*.cwasm 2>/dev/null || true; \
+	rm -rf "$$LINDFS/cage-"* 2>/dev/null || true; \
+	rm -f "$$LINDFS/"*.cfg "$$LINDFS/"*.conf 2>/dev/null || true; \
+	echo "  removed grate binaries, test artifacts, cage dirs, and config files from lindfs"
 	@echo "Done."
