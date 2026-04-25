@@ -3,7 +3,7 @@ use crate::tee::*;
 use crate::utils::do_syscall;
 use grate_rs::{
     SyscallHandler, constants::*, copy_data_between_cages, copy_handler_table_to_cage, getcageid,
-    make_threei_call, register_handler,
+    is_thread_clone, make_threei_call, register_handler,
 };
 
 pub fn register_lifecycle_handlers(cage_id: u64) {
@@ -12,6 +12,7 @@ pub fn register_lifecycle_handlers(cage_id: u64) {
     let handlers: &[(u64, SyscallHandler)] = &[
         (SYS_REGISTER_HANDLER, register_handler_handler),
         (SYS_EXEC, exec_handler),
+        (SYS_CLONE, fork_handler),
     ];
 
     for &(syscall_nr, handler) in handlers {
@@ -22,6 +23,38 @@ pub fn register_lifecycle_handlers(cage_id: u64) {
             );
         }
     }
+}
+
+pub extern "C" fn fork_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    // Forward the fork to the runtime. Returns child cage ID to parent, 0 to child.
+    let child_cage_id = do_syscall(arg1cage, SYS_CLONE, &args, &arg_cages) as u64;
+
+    if !is_thread_clone(arg1, arg1cage) {
+        // Copy the fd table so the child knows which fds are clamped.
+        let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
+
+        // Register our lifecycle handlers on the child so we can track it.
+        // register_lifecycle_handlers(child_cage_id);
+    }
+
+    child_cage_id as i32
 }
 
 pub extern "C" fn register_handler_handler(
@@ -128,6 +161,15 @@ pub extern "C" fn exec_handler(
                 with_tee(|s| s.primary_target = arg1cage);
             }
             TeePhase::Target => {
+                fdtables::init_empty_cage(arg1cage as u64);
+                for _fd in 0..3 {
+                    let _ = fdtables::get_unused_virtual_fd(
+                        arg1cage, 1,
+                        _fd, // underfd: which FD to use for secondary grate chain.
+                        false, 0,
+                    );
+                }
+
                 copy_handler_table_to_cage(tee_cage, arg1cage).unwrap();
                 // Check interposition map for target == primary_target.
                 let primary_registers: Vec<(u64, u64, u64, u64)> = with_tee(|s| {

@@ -9,6 +9,8 @@ pub const PRIMARY_ONLY_SYSCALLS: &[u64] = &[
     SYS_EXEC,  // 59 (execve)
     SYS_EXIT,  // 60
 ];
+const F_DUPFD: u64 = 0;
+const F_DUPFD_CLOEXEC: u64 = 1030;
 
 macro_rules! tee_handler {
     ($name:ident, $nr:expr) => {
@@ -48,6 +50,11 @@ pub fn tee_dispatch(
         (route_entry.primary_alt, route_entry.secondary_alt)
     });
 
+    let secondary_fd = match fdtables::translate_virtual_fd(arg_cages[0], args[0]) {
+        Ok(entry) => entry.underfd,
+        Err(_) => args[0],
+    };
+
     // Primary
     let primary_syscall = primary.unwrap_or(syscall_number);
     let primary_result = do_syscall(cage_id, primary_syscall, args, arg_cages);
@@ -62,8 +69,10 @@ pub fn tee_dispatch(
         return primary_result;
     }
 
+    let mut secondary_args = args.clone();
+    secondary_args[0] = secondary_fd;
     if let Some(secondary_syscall) = secondary {
-        let secondary_result = do_syscall(cage_id, secondary_syscall, args, arg_cages);
+        let secondary_result = do_syscall(cage_id, secondary_syscall, &secondary_args, arg_cages);
 
         println!(
             "[t-grate] syscall_number={} secondary={}",
@@ -74,7 +83,25 @@ pub fn tee_dispatch(
     return primary_result;
 }
 
-tee_handler!(tee_open, SYS_OPEN);
+fn record_fd_pair(cage_id: u64, primary_result: i32, secondary_result: i32) {
+    let _ = fdtables::get_specific_virtual_fd(
+        cage_id,
+        primary_result as u64,   // virtual fd in primary chain
+        0,                       // fdkind (unused)
+        secondary_result as u64, // underfd in secondary chain
+        false,                   // should_cloexec (unused)
+        0,                       // perfdinfo (unused)
+    );
+}
+
+fn translate_secondary_fd(cage_id: u64, fd: u64) -> u64 {
+    match fdtables::translate_virtual_fd(cage_id, fd) {
+        Ok(entry) => entry.underfd,
+        Err(_) => fd,
+    }
+}
+
+// tee_handler!(tee_open, SYS_OPEN);
 tee_handler!(tee_stat, SYS_XSTAT);
 tee_handler!(tee_access, SYS_ACCESS);
 tee_handler!(tee_unlink, SYS_UNLINK);
@@ -94,14 +121,248 @@ tee_handler!(tee_pread, SYS_PREAD);
 tee_handler!(tee_pwrite, SYS_PWRITE);
 tee_handler!(tee_lseek, SYS_LSEEK);
 tee_handler!(tee_fstat, SYS_FXSTAT);
-tee_handler!(tee_fcntl, SYS_FCNTL);
 tee_handler!(tee_ftruncate, SYS_FTRUNCATE);
 tee_handler!(tee_fchmod, SYS_FCHMOD);
 tee_handler!(tee_readv, SYS_READV);
 tee_handler!(tee_writev, SYS_WRITEV);
-tee_handler!(tee_dup, SYS_DUP);
-tee_handler!(tee_dup2, SYS_DUP2);
-tee_handler!(tee_dup3, SYS_DUP3);
+
+pub extern "C" fn tee_open(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    let (primary, secondary) = with_tee(|s| {
+        let route_entry = s.tee_routes.get(&(arg_cages[0], SYS_OPEN)).unwrap();
+        (route_entry.primary_alt, route_entry.secondary_alt)
+    });
+
+    // Primary
+    let primary_syscall = primary.unwrap_or(SYS_OPEN);
+    let primary_result = do_syscall(arg2cage, primary_syscall, &args, &arg_cages);
+
+    println!(
+        "[t-grate] syscall_number={} primary={}",
+        SYS_OPEN, primary_result
+    );
+
+    if let Some(secondary_syscall) = secondary {
+        let secondary_result = do_syscall(arg2cage, secondary_syscall, &args, &arg_cages);
+
+        println!(
+            "[t-grate] syscall_number={} secondary={}",
+            SYS_OPEN, secondary_result
+        );
+
+        record_fd_pair(arg2cage, primary_result, secondary_result);
+    }
+
+    return primary_result;
+}
+
+pub extern "C" fn tee_dup(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    let (primary, secondary) = with_tee(|s| {
+        let route_entry = s.tee_routes.get(&(arg1cage, SYS_DUP)).unwrap();
+        (route_entry.primary_alt, route_entry.secondary_alt)
+    });
+
+    let primary_syscall = primary.unwrap_or(SYS_DUP);
+    let primary_result = do_syscall(arg1cage, primary_syscall, &args, &arg_cages);
+
+    println!(
+        "[t-grate] syscall_number={} primary={}",
+        SYS_DUP, primary_result
+    );
+
+    if let Some(secondary_syscall) = secondary {
+        let mut secondary_args = args;
+        secondary_args[0] = translate_secondary_fd(arg1cage, arg1);
+        let secondary_result = do_syscall(arg1cage, secondary_syscall, &secondary_args, &arg_cages);
+
+        println!(
+            "[t-grate] syscall_number={} secondary={}",
+            SYS_DUP, secondary_result
+        );
+
+        record_fd_pair(arg1cage, primary_result, secondary_result);
+    }
+
+    primary_result
+}
+
+pub extern "C" fn tee_dup2(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    let (primary, secondary) = with_tee(|s| {
+        let route_entry = s.tee_routes.get(&(arg1cage, SYS_DUP2)).unwrap();
+        (route_entry.primary_alt, route_entry.secondary_alt)
+    });
+
+    let primary_syscall = primary.unwrap_or(SYS_DUP2);
+    let primary_result = do_syscall(arg1cage, primary_syscall, &args, &arg_cages);
+
+    println!(
+        "[t-grate] syscall_number={} primary={}",
+        SYS_DUP2, primary_result
+    );
+
+    if let Some(secondary_syscall) = secondary {
+        let mut secondary_args = args;
+        secondary_args[0] = translate_secondary_fd(arg1cage, arg1);
+        secondary_args[1] = translate_secondary_fd(arg1cage, arg2);
+        let secondary_result = do_syscall(arg1cage, secondary_syscall, &secondary_args, &arg_cages);
+
+        println!(
+            "[t-grate] syscall_number={} secondary={}",
+            SYS_DUP2, secondary_result
+        );
+
+        record_fd_pair(arg1cage, primary_result, secondary_result);
+    }
+
+    primary_result
+}
+
+pub extern "C" fn tee_dup3(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    let (primary, secondary) = with_tee(|s| {
+        let route_entry = s.tee_routes.get(&(arg1cage, SYS_DUP3)).unwrap();
+        (route_entry.primary_alt, route_entry.secondary_alt)
+    });
+
+    let primary_syscall = primary.unwrap_or(SYS_DUP3);
+    let primary_result = do_syscall(arg1cage, primary_syscall, &args, &arg_cages);
+
+    println!(
+        "[t-grate] syscall_number={} primary={}",
+        SYS_DUP3, primary_result
+    );
+
+    if let Some(secondary_syscall) = secondary {
+        let mut secondary_args = args;
+        secondary_args[0] = translate_secondary_fd(arg1cage, arg1);
+        secondary_args[1] = translate_secondary_fd(arg1cage, arg2);
+        let secondary_result = do_syscall(arg1cage, secondary_syscall, &secondary_args, &arg_cages);
+
+        println!(
+            "[t-grate] syscall_number={} secondary={}",
+            SYS_DUP3, secondary_result
+        );
+
+        record_fd_pair(arg1cage, primary_result, secondary_result);
+    }
+
+    primary_result
+}
+
+pub extern "C" fn tee_fcntl(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    let (primary, secondary) = with_tee(|s| {
+        let route_entry = s.tee_routes.get(&(arg1cage, SYS_FCNTL)).unwrap();
+        (route_entry.primary_alt, route_entry.secondary_alt)
+    });
+
+    let primary_syscall = primary.unwrap_or(SYS_FCNTL);
+    let primary_result = do_syscall(arg1cage, primary_syscall, &args, &arg_cages);
+
+    println!(
+        "[t-grate] syscall_number={} primary={}",
+        SYS_FCNTL, primary_result
+    );
+
+    if let Some(secondary_syscall) = secondary {
+        let mut secondary_args = args;
+        secondary_args[0] = translate_secondary_fd(arg1cage, arg1);
+        let secondary_result = do_syscall(arg1cage, secondary_syscall, &secondary_args, &arg_cages);
+
+        println!(
+            "[t-grate] syscall_number={} secondary={}",
+            SYS_FCNTL, secondary_result
+        );
+
+        if arg2 == F_DUPFD || arg2 == F_DUPFD_CLOEXEC {
+            record_fd_pair(arg1cage, primary_result, secondary_result);
+        }
+    }
+
+    primary_result
+}
 
 pub fn get_tee_handler(syscall_nr: u64) -> Option<SyscallHandler> {
     match syscall_nr {

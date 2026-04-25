@@ -7,6 +7,8 @@ use crate::{
     tee::{TEE_STATE, TeeState},
 };
 
+use fdtables;
+
 mod handlers;
 mod tee;
 mod utils;
@@ -35,6 +37,7 @@ fn create_sem() -> *mut sem_t {
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
 
+    // Init TeeState and convert argv to get the exec_chain.
     *TEE_STATE.lock().unwrap() = Some(TeeState::new());
     let (_storage, c_argv) = to_exec_argv(&argv);
 
@@ -44,7 +47,7 @@ fn main() {
     if child_cage == 0 {
         unsafe { sem_wait(exec_sem) };
 
-        let exec_ret = unsafe { execv(c_argv[0], c_argv.as_ptr()) };
+        let _exec_ret = unsafe { execv(c_argv[0], c_argv.as_ptr()) };
         std::process::exit(1);
     }
 
