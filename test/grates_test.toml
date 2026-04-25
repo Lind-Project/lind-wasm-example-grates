@@ -205,6 +205,16 @@ dir = "mtls-grate"
 type = "rust"
 skip = true
 
+# ── fs-view (Rust) ──────────────────────────────────────────────────
+
+[[grate]]
+name = "fs-view-grate"
+dir = "fs-view-grate"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/fs_view_test.c"
+
 # ── fdtables stress test (Rust) ─────────────────────────────────────
 
 [[grate]]
