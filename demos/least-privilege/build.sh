@@ -11,6 +11,11 @@ LINDFS="${LINDFS:-${LIND_WASM_ROOT:-$HOME/lind-wasm}/lindfs}"
 
 echo "=== Building Least-Privilege Demo ==="
 
+# Clean
+echo "Cleaning..."
+(cd "$REPO_ROOT/rust-grates/namespace-grate" && cargo clean 2>/dev/null || true)
+(cd "$REPO_ROOT/rust-grates/imfs-grate" && cargo clean 2>/dev/null || true)
+
 # C grate
 echo "Building seccomp-grate..."
 (cd "$REPO_ROOT/c-grates/seccomp-grate" && \

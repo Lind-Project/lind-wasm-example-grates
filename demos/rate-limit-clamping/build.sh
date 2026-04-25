@@ -10,6 +10,10 @@ LINDFS="${LINDFS:-${LIND_WASM_ROOT:-$HOME/lind-wasm}/lindfs}"
 
 echo "=== Building Rate-Limit Clamping Demo ==="
 
+echo "Cleaning..."
+(cd "$REPO_ROOT/rust-grates/net-namespace-grate" && cargo clean 2>/dev/null || true)
+(cd "$REPO_ROOT/rust-grates/resource-grate" && cargo clean 2>/dev/null || true)
+
 echo "Building net-namespace-grate (--release)..."
 (cd "$REPO_ROOT/rust-grates/net-namespace-grate" && cargo lind_compile --release --output-dir grates)
 

@@ -10,6 +10,9 @@ LINDFS="${LINDFS:-${LIND_WASM_ROOT:-$HOME/lind-wasm}/lindfs}"
 
 echo "=== Building mTLS Propagation Demo ==="
 
+echo "Cleaning..."
+(cd "$REPO_ROOT/rust-grates/mtls-grate" && cargo clean 2>/dev/null || true)
+
 echo "Building mtls-grate (--release)..."
 (cd "$REPO_ROOT/rust-grates/mtls-grate" && cargo lind_compile --release --output-dir grates)
 
