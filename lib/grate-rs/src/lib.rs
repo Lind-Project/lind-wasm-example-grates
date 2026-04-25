@@ -197,7 +197,7 @@ pub fn copy_handler_table_to_cage(srccage: u64, targetcage: u64) -> Result<(), G
 
     // 3i::copy_handler_table_to_cage returns ELINDAPIABORTED for every error.
     match ret as u64 {
-        ELINDAPIABORTED => Err(GrateError::CopyDataError(ELINDAPIABORTED as i32)),
+        ELINDAPIABORTED => Err(GrateError::CopyHandlerError(ELINDAPIABORTED as i32)),
         _ => Ok(()),
     }
 }
