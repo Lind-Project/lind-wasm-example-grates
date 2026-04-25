@@ -58,7 +58,7 @@ pub extern "C" fn open_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    let cage_id = cageid;
+    let cage_id = arg1cage;
 
     // Copy the pathname from the cage's memory.
     let pathname = match copy_path_from_cage(arg1, arg1cage) {
@@ -119,7 +119,7 @@ pub extern "C" fn read_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    let cage_id = cageid;
+    let cage_id = arg1cage;
     let fd = arg1;
     let count = arg3 as usize;
     let this_cage = getcageid();
@@ -169,7 +169,7 @@ pub extern "C" fn write_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    let cage_id = cageid;
+    let cage_id = arg1cage;
     let fd = arg1;
     let count = arg3 as usize;
     let this_cage = getcageid();
@@ -336,7 +336,7 @@ pub extern "C" fn pread_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    let cage_id = cageid;
+    let cage_id = arg1cage;
     let fd = arg1;
     let count = arg3 as usize;
     let offset = arg4 as i64;
@@ -385,7 +385,7 @@ pub extern "C" fn pwrite_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    let cage_id = cageid;
+    let cage_id = arg1cage;
     let fd = arg1;
     let count = arg3 as usize;
     let offset = arg4 as i64;
@@ -529,7 +529,7 @@ pub extern "C" fn exec_handler(
     arg6: u64,
     arg6cage: u64,
 ) -> i32 {
-    let cage_id = cageid;
+    let cage_id = arg1cage;
     let this_cage = getcageid();
 
     // Interposing on exec also interposes on the very first exec that launches the first child cage.
