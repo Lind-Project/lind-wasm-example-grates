@@ -76,7 +76,9 @@ pub extern "C" fn ns_socket_handler(
 
     // Route through alt if child grate registered for SYS_SOCKET.
     let nr = helpers::get_route(arg1cage, SYS_SOCKET).unwrap_or(SYS_SOCKET);
+    eprintln!("[net-ns] socket: cage={} nr={} (SYS_SOCKET={})", arg1cage, nr, SYS_SOCKET);
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
+    eprintln!("[net-ns] socket: ret={}", ret);
 
     if ret >= 0 && fdtables::check_cage_exists(arg1cage) {
         let _ = fdtables::get_specific_virtual_fd(
@@ -104,14 +106,15 @@ pub extern "C" fn ns_bind_handler(
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
-    let in_range = helpers::read_port_from_cage(arg2, arg2cage, arg3)
-        .map(|port| helpers::port_in_range(port))
-        .unwrap_or(false);
+    let port = helpers::read_port_from_cage(arg2, arg2cage, arg3);
+    let in_range = port.map(|p| helpers::port_in_range(p)).unwrap_or(false);
+    eprintln!("[net-ns] bind: cage={} port={:?} in_range={}", arg1cage, port, in_range);
 
     let nr = match helpers::get_route(arg1cage, SYS_BIND) {
         Some(alt) if in_range => alt,
         _ => SYS_BIND,
     };
+    eprintln!("[net-ns] bind: nr={}", nr);
 
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
 
