@@ -107,6 +107,7 @@ macro_rules! path_rewrite_handler {
             };
 
             let rewritten = cage_path(&path, cage_id);
+            eprintln!("[fs-view] cage={} {} -> {}", cage_id, path, rewritten);
             let c_path = match CString::new(rewritten) {
                 Ok(p) => p,
                 Err(_) => return -1,
