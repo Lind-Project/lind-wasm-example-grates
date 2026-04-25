@@ -89,7 +89,7 @@ int open_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
 
 	// Represents the calling cage. Using arg2cage instead of arg1cage since
 	// the path pointer may have been modified by a transient grate and
-	// therefore might differ from the original calling cage.
+	// therefore arg1cage might differ from the original calling cage.
 	int cageid = arg2cage;
 
 	// Copying the char* pathname into the grate's memory.

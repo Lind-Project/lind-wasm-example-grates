@@ -59,10 +59,11 @@ pub extern "C" fn open_handler(
     _arg6cage: u64,
 ) -> i32 {
     // This represents the calling cage, i.e. the cage that initially called open. Since arg1,
-    // arg1cage represents a path pointer, it might have represent the cageid of a transient grate
+    // arg1cage represents a path pointer, it might represent the cageid of a transient grate
     // that modified this pointer.
     //
-    // We therefore use arg2cage since that represents the `flag` which is an integer pointer.
+    // We therefore use arg2cage since that represents the `flag` which is an integer and won't be
+    // translated.
     let cage_id = arg2cage;
 
     // Copy the pathname from the cage's memory.
