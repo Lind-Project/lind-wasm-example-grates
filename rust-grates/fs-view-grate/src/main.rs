@@ -8,7 +8,7 @@
 
 use grate_rs::constants::*;
 use grate_rs::constants::lind::GRATE_MEMORY_FLAG;
-use grate_rs::{GrateBuilder, GrateError, copy_data_between_cages, getcageid, is_thread_clone, make_threei_call};
+use grate_rs::{GrateBuilder, GrateError, copy_data_between_cages, getcageid, make_threei_call};
 
 use std::ffi::CString;
 
@@ -109,7 +109,7 @@ macro_rules! path_rewrite_handler {
             let rewritten = cage_path(&path, cage_id);
             let c_path = match CString::new(rewritten) {
                 Ok(p) => p,
-                None => return -1,
+                Err(_) => return -1,
             };
 
             ensure_cage_root(cage_id);
@@ -146,11 +146,11 @@ macro_rules! two_path_rewrite_handler {
             let grate = getcageid();
             let c1 = match CString::new(cage_path(&path1, cage_id)) {
                 Ok(p) => p,
-                None => return -1,
+                Err(_) => return -1,
             };
             let c2 = match CString::new(cage_path(&path2, cage_id)) {
                 Ok(p) => p,
-                None => return -1,
+                Err(_) => return -1,
             };
 
             let mut a = args;
