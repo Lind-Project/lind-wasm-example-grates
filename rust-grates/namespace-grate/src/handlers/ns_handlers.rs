@@ -365,8 +365,8 @@ pub extern "C" fn ns_clone_handler(
         // Register lifecycle handlers on the child.
         register_lifecycle_handlers(child_cage_id);
 
-        eprintln!("[ns] clone: parent={} child={}", arg1cage, child_cage_id);
-        let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
+        // fdtables copy is handled by the lifecycle fork_handler —
+        // don't duplicate it here.
     }
 
     ret
