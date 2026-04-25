@@ -142,18 +142,21 @@ pub extern "C" fn ns_connect_handler(
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
-    let in_range = helpers::read_port_from_cage(arg2, arg2cage, arg3)
-        .map(|port| helpers::port_in_range(port))
-        .unwrap_or(false);
+    let port = helpers::read_port_from_cage(arg2, arg2cage, arg3);
+    let in_range = port.map(|p| helpers::port_in_range(p)).unwrap_or(false);
+    eprintln!("[net-ns] connect: cage={} fd={} port={:?} in_range={}", arg1cage, arg1, port, in_range);
 
     let nr = match helpers::get_route(arg1cage, SYS_CONNECT) {
         Some(alt) if in_range => alt,
         _ => SYS_CONNECT,
     };
+    eprintln!("[net-ns] connect: nr={}", nr);
 
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
+    eprintln!("[net-ns] connect: ret={} cage_exists={}", ret, fdtables::check_cage_exists(arg1cage));
 
     if ret >= 0 && in_range && fdtables::check_cage_exists(arg1cage) {
+        eprintln!("[net-ns] connect: setting perfdinfo=1 for cage={} fd={}", arg1cage, arg1);
         let _ = fdtables::set_perfdinfo(arg1cage, arg1, 1);
     }
     ret
