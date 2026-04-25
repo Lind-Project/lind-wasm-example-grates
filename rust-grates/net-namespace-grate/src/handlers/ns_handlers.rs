@@ -28,17 +28,25 @@ macro_rules! fd_route_handler {
             let args = [arg1, arg2, arg3, arg4, arg5, arg6];
             let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
-            let nr = match helpers::get_route(arg1cage, $sysno) {
-                Some(alt)
-                    if fdtables::check_cage_exists(arg1cage)
-                        && fdtables::translate_virtual_fd(arg1cage, arg1)
-                            .map(|e| e.perfdinfo != 0)
-                            .unwrap_or(false) =>
-                {
-                    alt
-                }
+            let route = helpers::get_route(arg1cage, $sysno);
+            let has_cage = fdtables::check_cage_exists(arg1cage);
+            let perfd = if has_cage {
+                fdtables::translate_virtual_fd(arg1cage, arg1)
+                    .map(|e| e.perfdinfo)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+
+            let nr = match route {
+                Some(alt) if perfd != 0 => alt,
                 _ => $sysno,
             };
+
+            if $sysno == 1 { // SYS_WRITE
+                eprintln!("[net-ns] write: cage={} fd={} route={:?} cage_exists={} perfdinfo={} nr={}",
+                          arg1cage, arg1, route, has_cage, perfd, nr);
+            }
 
             helpers::do_syscall(arg1cage, nr, &args, &arg_cages)
         }
