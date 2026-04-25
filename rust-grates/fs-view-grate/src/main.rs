@@ -42,7 +42,7 @@ fn forward_with_rewrite(
     let mut a = *args;
     let mut c = *arg_cages;
     a[path_idx] = new_path.as_ptr() as u64;
-    c[path_idx] = cage_id | GRATE_MEMORY_FLAG;
+    c[path_idx] = grate | GRATE_MEMORY_FLAG;
 
     match make_threei_call(
         nr as u32, 0, grate, cage_id,
@@ -76,7 +76,7 @@ fn ensure_cage_root(cage_id: u64) {
     // mkdir with 0755 — ignore errors (already exists is fine)
     let _ = make_threei_call(
         SYS_MKDIR as u32, 0, grate, cage_id,
-        ptr, cage_id | GRATE_MEMORY_FLAG,
+        ptr, grate | GRATE_MEMORY_FLAG,
         0o755, cage_id,
         0, 0, 0, 0, 0, 0, 0, 0, 0,
     );
@@ -159,9 +159,9 @@ macro_rules! two_path_rewrite_handler {
             let mut a = args;
             let mut c = arg_cages;
             a[$idx1] = c1.as_ptr() as u64;
-            c[$idx1] = cage_id | GRATE_MEMORY_FLAG;
+            c[$idx1] = grate | GRATE_MEMORY_FLAG;
             a[$idx2] = c2.as_ptr() as u64;
-            c[$idx2] = cage_id | GRATE_MEMORY_FLAG;
+            c[$idx2] = grate | GRATE_MEMORY_FLAG;
 
             ensure_cage_root(cage_id);
 

@@ -48,7 +48,7 @@ pub extern "C" fn open_handler(
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
-    _arg2cage: u64,
+    arg2cage: u64,
     arg3: u64,
     _arg3cage: u64,
     _arg4: u64,
@@ -58,7 +58,7 @@ pub extern "C" fn open_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    let cage_id = arg1cage;
+    let cage_id = arg2cage;
 
     // Copy the pathname from the cage's memory.
     let pathname = match copy_path_from_cage(arg1, arg1cage) {
@@ -69,7 +69,7 @@ pub extern "C" fn open_handler(
     let flags = arg2 as i32;
     let mode = arg3 as u32;
 
-    eprintln!("[imfs] open: cageid={} arg1cage={:#x} cage_id={:#x} path={}", cageid, arg1cage, cage_id, pathname);
+    eprintln!("[imfs] open: cageid={} arg1cage={:#x} arg2cage={:#x} cage_id={:#x} path={}", cageid, arg1cage, arg2cage, cage_id, pathname);
     let ret = imfs::with_imfs(|state| state.open(cage_id, &pathname, flags, mode));
     eprintln!("[imfs] open: ret={}", ret);
     ret
