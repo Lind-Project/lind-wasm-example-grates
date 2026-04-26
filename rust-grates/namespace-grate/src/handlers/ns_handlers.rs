@@ -359,15 +359,9 @@ pub extern "C" fn ns_clone_handler(
     if !is_thread_clone(arg1, arg1cage) {
         let child_cage_id = ret as u64;
 
-        if fdtables::check_cage_exists(arg1cage) {
-            let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
-            helpers::clone_cage_routes(arg1cage, child_cage_id);
-        } else {
-            fdtables::init_empty_cage(child_cage_id);
-            for fd in 0..3u64 {
-                let _ = fdtables::get_specific_virtual_fd(child_cage_id, fd, 0, fd, false, 0);
-            }
-        }
+        // Route cloning only — fdtables copy is handled by the lifecycle
+        // fork_handler to avoid double-init when inner grates also handle fork.
+        helpers::clone_cage_routes(arg1cage, child_cage_id);
 
         register_lifecycle_handlers(child_cage_id);
     }

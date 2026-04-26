@@ -224,10 +224,13 @@ pub extern "C" fn fork_handler(
     let child_cage_id = helpers::do_syscall(arg1cage, SYS_CLONE, &args, &arg_cages) as u64;
 
     if !is_thread_clone(arg1, arg1cage) {
-        // If the forking cage is inside the clamp, the child inherits that status.
+        // Copy fdtables — child always needs an entry for inner grates
+        // to track fds, regardless of clamp status.
+        let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
+
+        // If the forking cage is inside the clamp, clone routes too.
         if helpers::is_cage_clamped(arg1cage) {
-            // Copy the fd table so the child knows which fds are clamped.
-            let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
+            helpers::clone_cage_routes(arg1cage, child_cage_id);
         }
 
         // Register our lifecycle handlers on the child so we can track it.
