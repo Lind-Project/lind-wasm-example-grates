@@ -1,7 +1,7 @@
 /*
  * Demonstration: rate-limiting scoped to a single port via composition.
  *
- * net-namespace-grate routes port 5432 through resource-grate (rate limiter).
+ * net-routing-clamp routes port 5432 through resource-grate (rate limiter).
  * File I/O is unaffected because it doesn't go through the clamped grate.
  *
  * Expected behavior:
@@ -9,7 +9,7 @@
  *   - Socket writes to port 5432: throttled by resource-grate
  *
  * Usage:
- *   lind-wasm net-namespace-grate-rs.cwasm --ports 5432-5432 %{ \
+ *   lind-wasm net-routing-clamp-rs.cwasm --ports 5432-5432 %{ \
  *     resource-grate-rs.cwasm ratelimit_demo.cfg \
  *   %} ratelimit_demo.cwasm
  */

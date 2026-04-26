@@ -1,4 +1,4 @@
-/* namespace_test.c - routing-only tests for the namespace clamping grate.
+/* fs_routing_test.c - routing-only tests for the namespace clamping grate.
  *
  * These tests assume clamped FS syscalls are stubbed to a fixed return value.
  * We only verify that:
@@ -6,9 +6,9 @@
  *   - syscalls on non-/tmp paths are not.
  *
  * Example invocation:
- *      lind-boot namespace-grate-rs.cwasm --prefix /tmp %{ testing-grate.cwasm
+ *      lind-boot fs-routing-clamp.cwasm --prefix /tmp %{ testing-grate.cwasm
  * -s 0:166,1:166,2:166,4:166,21:166,83:166,84:166,87:166 %}
- * namespace_test.cwasm
+ * fs_routing_test.cwasm
  *
  * 	We use testing-grate to stub out all FS related syscalls to NS_CLAMP_RET
  * (166). Any calls to /tmp should return this value, all other calls should

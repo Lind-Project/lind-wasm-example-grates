@@ -1,10 +1,10 @@
-//! Network Namespace Clamping Grate
+//! Net Routing Clamp
 //!
 //! A meta-grate that selectively routes network syscalls to clamped grates
 //! based on a port range condition. Sockets that bind or connect to ports
 //! in the range get routed through the clamped grate stack.
 //!
-//! Usage: net-namespace-grate-rs --ports 8080-8090 %{ mtls-grate %} server
+//! Usage: net-routing-clamp --ports 8080-8090 %{ mtls-grate %} server
 
 mod handlers;
 mod helpers;
@@ -108,7 +108,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.is_empty() {
-        eprintln!("Usage: net-namespace-grate-rs --ports <low>-<high> %{{ <grates...> %}} <program> [args...]");
+        eprintln!("Usage: net-routing-clamp --ports <low>-<high> %{{ <grates...> %}} <program> [args...]");
         std::process::exit(1);
     }
 

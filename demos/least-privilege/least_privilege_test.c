@@ -4,11 +4,11 @@
  * Verifies that filesystem access is confined to /workspace across
  * multiple spawn depths. Paths outside /workspace should return EPERM
  * (from seccomp-grate), while /workspace paths succeed (via imfs-grate
- * through namespace-grate routing).
+ * through fs-routing-clamp routing).
  *
  * Usage (composed):
  *   lind-wasm grates/seccomp-grate.cwasm seccomp_fs_deny.conf \
- *     grates/namespace-grate.cwasm --prefix /workspace %{ \
+ *     grates/fs-routing-clamp.cwasm --prefix /workspace %{ \
  *       grates/imfs-grate.cwasm \
  *     %} least_privilege_test.cwasm
  */

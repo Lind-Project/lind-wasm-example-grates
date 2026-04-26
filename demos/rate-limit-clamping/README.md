@@ -2,17 +2,17 @@
 
 Demonstrates scoping a rate limit to a specific port using grate composition.
 The resource-grate enforces a bytes-per-second budget, and the
-net-namespace-grate routes only port 5432 traffic through it. Local file
+net-routing-clamp routes only port 5432 traffic through it. Local file
 I/O is unaffected.
 
 No existing mechanism can scope a rate limit this precisely within a single
 process. The resource-grate was written with no knowledge of
-net-namespace-grate — neither required modification to enable the composition.
+net-routing-clamp — neither required modification to enable the composition.
 
 ## Composition
 
 ```
-net-namespace-grate --ports 5432-5432
+net-routing-clamp --ports 5432-5432
   -> resource-grate (50 KB/s netsend limit)
 Host kernel (everything outside port 5432)
 ```
