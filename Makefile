@@ -3,6 +3,9 @@
 # Usage:
 #   make test                    # run full test suite
 #   make test GRATE=geteuid-grate  # run one grate's tests
+#   make demos                   # build all demos, then run them
+#   make demos-build             # build all demos
+#   make demos-run               # run all demos (build first!)
 #   make list                    # list available grates
 #   make c/<name>                # build a C grate
 #   make rust/<name>             # build a Rust grate
@@ -21,7 +24,10 @@ C_TARGETS := $(patsubst c-grates/%,c/%,$(C_GRATES))
 RUST_TARGETS := $(patsubst rust-grates/%,rust/%,$(RUST_GRATES))
 ALL_TARGETS := $(C_TARGETS) $(RUST_TARGETS)
 
-.PHONY: all test list clean clean-lindfs help $(ALL_TARGETS)
+# All demo directories
+DEMOS := $(shell find demos -name Makefile -exec dirname {} \; 2>/dev/null | sort)
+
+.PHONY: all test list clean clean-lindfs help demos demos-build demos-run $(ALL_TARGETS)
 
 help:
 	@echo "Usage:"
@@ -31,10 +37,16 @@ help:
 	@echo "  make c/<grate-name>            Build a C grate"
 	@echo "  make rust/<grate-name>         Build a Rust grate"
 	@echo "  make all                       Build all grates"
+	@echo "  make demos                     Build and run all demos"
+	@echo "  make demos-build               Build all demos"
+	@echo "  make demos-run                 Run all demos (build first)"
 	@echo "  make clean                     Remove build artifacts"
 	@echo ""
 	@echo "Available grates:"
 	@for g in $(ALL_TARGETS); do echo "  $$g"; done
+	@echo ""
+	@echo "Available demos:"
+	@for d in $(DEMOS); do echo "  $$d"; done
 
 all: $(ALL_TARGETS)
 
@@ -57,6 +69,27 @@ endef
 
 $(foreach g,$(C_GRATES),$(eval $(call build_c_grate,$(g))))
 $(foreach g,$(RUST_GRATES),$(eval $(call build_rust_grate,$(g))))
+
+# Demos
+demos: demos-build demos-run
+
+demos-build:
+	@for d in $(DEMOS); do \
+		echo ""; \
+		echo "========================================"; \
+		echo "Building $$d"; \
+		echo "========================================"; \
+		$(MAKE) -C "$$d" build || exit 1; \
+	done
+
+demos-run:
+	@for d in $(DEMOS); do \
+		echo ""; \
+		echo "========================================"; \
+		echo "Running $$d"; \
+		echo "========================================"; \
+		$(MAKE) -C "$$d" run || exit 1; \
+	done
 
 # Test suite
 test:
