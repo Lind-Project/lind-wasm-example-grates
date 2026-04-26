@@ -13,7 +13,7 @@ echo "=== Building Least-Privilege Demo ==="
 
 # Clean
 echo "Cleaning..."
-(cd "$REPO_ROOT/rust-grates/namespace-grate" && cargo clean 2>/dev/null || true)
+(cd "$REPO_ROOT/rust-grates/fs-routing-clamp" && cargo clean 2>/dev/null || true)
 (cd "$REPO_ROOT/rust-grates/imfs-grate" && cargo clean 2>/dev/null || true)
 
 # C grate
@@ -22,8 +22,8 @@ echo "Building seccomp-grate..."
   lind_compile -s --compile-grate --output-dir grates src/seccomp-grate.c src/seccomp.c)
 
 # Rust grates with --release
-echo "Building namespace-grate (--release)..."
-(cd "$REPO_ROOT/rust-grates/namespace-grate" && cargo lind_compile --release --output-dir grates)
+echo "Building fs-routing-clamp (--release)..."
+(cd "$REPO_ROOT/rust-grates/fs-routing-clamp" && cargo lind_compile --release --output-dir grates)
 
 echo "Building imfs-grate (--release)..."
 (cd "$REPO_ROOT/rust-grates/imfs-grate" && cargo lind_compile --release --output-dir grates)

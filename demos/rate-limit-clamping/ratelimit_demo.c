@@ -1,11 +1,11 @@
 /*
  * Rate-limit clamping demo.
  *
- * net-namespace-grate routes port 5432 through resource-grate (rate limiter).
+ * net-routing-clamp routes port 5432 through resource-grate (rate limiter).
  * File I/O is unaffected because it doesn't go through the clamped grate.
  *
  * Usage:
- *   lind-wasm grates/net-namespace-grate.cwasm --ports 5432-5432 %{ \
+ *   lind-wasm grates/net-routing-clamp.cwasm --ports 5432-5432 %{ \
  *     grates/resource-grate.cwasm ratelimit_demo.cfg \
  *   %} ratelimit_demo.cwasm
  */

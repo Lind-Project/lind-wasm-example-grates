@@ -2,7 +2,7 @@
 
 Demonstrates per-cage filesystem isolation using three composed grates:
 
-- **namespace-grate**: Routes `/tmp` paths to the clamped grate stack
+- **fs-routing-clamp**: Routes `/tmp` paths to the clamped grate stack
 - **fs-view-grate**: Prefixes paths with `/cage-<id>/` for per-cage isolation
 - **imfs-grate**: Provides an in-memory filesystem
 

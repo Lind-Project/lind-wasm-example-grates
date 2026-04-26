@@ -1,5 +1,5 @@
 /*
- * Test for net-namespace-grate-rs.
+ * Test for net-routing-clamp.
  *
  * Run with testing-grate as the clamped grate:
  *   --ports 8080-8090 %{ testing-grate.cwasm -s 49:166,42:166,43:166 %}

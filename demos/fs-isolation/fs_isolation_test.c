@@ -1,7 +1,7 @@
 /*
  * Filesystem isolation demo.
  *
- * Verifies that two cages sharing the same namespace-grate each get
+ * Verifies that two cages sharing the same fs-routing-clamp each get
  * independent in-memory filesystems for /tmp. Writes from one cage
  * to /tmp/foo must not be visible in the other.
  *
@@ -9,7 +9,7 @@
  * normally between cages.
  *
  * Usage:
- *   lind-wasm grates/namespace-grate.cwasm --prefix /tmp %{ \
+ *   lind-wasm grates/fs-routing-clamp.cwasm --prefix /tmp %{ \
  *     grates/imfs-grate.cwasm \
  *   %} fs_isolation_test.cwasm
  */

@@ -156,11 +156,11 @@ type = "rust"
 [[grate.tests]]
 test_src = "test/devnull_test.c"
 
-# ── FS Namespace (Rust) ─────────────────────────────────────────────
+# ── FS Routing Clamp (Rust) ─────────────────────────────────────────
 
 [[grate]]
-name = "namespace-grate"
-dir = "namespace-grate"
+name = "fs-routing-clamp"
+dir = "fs-routing-clamp"
 type = "rust"
 
 [[grate.tests]]
@@ -178,11 +178,11 @@ type = "rust"
 test_src = "test/ipc_test.c"
 timeout = 120
 
-# ── Net Namespace (Rust) ────────────────────────────────────────────
+# ── Net Routing Clamp (Rust) ────────────────────────────────────────
 
 [[grate]]
-name = "net-namespace-grate"
-dir = "net-namespace-grate"
+name = "net-routing-clamp"
+dir = "net-routing-clamp"
 type = "rust"
 
 [[grate.tests]]

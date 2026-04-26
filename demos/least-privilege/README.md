@@ -4,7 +4,7 @@ Demonstrates confining a process tree to `/workspace` using three
 independently-written grates composed together:
 
 - **seccomp-grate**: Denies all filesystem syscalls with EPERM by default
-- **namespace-grate**: Routes `/workspace` paths to the imfs-grate
+- **fs-routing-clamp**: Routes `/workspace` paths to the imfs-grate
 - **imfs-grate**: Provides an in-memory filesystem for `/workspace`
 
 The test program forks child processes at multiple depths and verifies
@@ -16,7 +16,7 @@ denied with EPERM from every spawned cage.
 ```bash
 # Build the grates
 make c/seccomp-grate
-make rust/namespace-grate
+make rust/fs-routing-clamp
 make rust/imfs-grate
 
 # Compile the test
