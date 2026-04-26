@@ -61,13 +61,13 @@ cargo lind_compile --output-dir grates
 
 ```bash
 # Compile the test
-lind-clang -s test/net_namespace_test.c
+lind-clang -s test/net_routing_test.c
 
 # Run with testing-grate as the clamped grate (stubs bind/connect/etc.)
 lind-wasm grates/net-routing-clamp.cwasm \
   --ports 8080-8090 \
   %{ grates/testing-grate.cwasm -s 49:0,42:0,43:0 %} \
-  net_namespace_test.cwasm
+  net_routing_test.cwasm
 ```
 
 The testing-grate stubs:
