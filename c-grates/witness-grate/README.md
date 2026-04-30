@@ -141,6 +141,14 @@ Needs to pull the source code of ed25519 from app repo, and set corresponding pa
 
 ## Running
 
+Generate seed file before run:
+
 ```sh
-./witness_grate <target_program> [target args...]
+head -c 32 /dev/urandom > witness.seed
+```
+
+Run the program with witness grate:
+
+```sh
+lind-wasm grates/witness_grate <target_program> [target args...]
 ```
