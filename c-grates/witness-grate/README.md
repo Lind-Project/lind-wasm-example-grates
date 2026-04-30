@@ -150,5 +150,5 @@ head -c 32 /dev/urandom > witness.seed
 Run the program with witness grate:
 
 ```sh
-lind-wasm witness_grate <target_program> [target args...]
+lind-wasm grates/witness_grate <target_program> [target args...]
 ```
