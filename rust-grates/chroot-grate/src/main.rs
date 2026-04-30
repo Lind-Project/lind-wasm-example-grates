@@ -540,7 +540,7 @@ extern "C" fn getcwd_handler(
         buf.len() as u64,
         0,
     ) {
-        Ok(_) => buf_ptr as i32,
+        Ok(_) => buf.len() as i32,
         Err(_) => -14, // EFAULT
     }
 }
