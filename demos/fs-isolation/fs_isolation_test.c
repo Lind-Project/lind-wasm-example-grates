@@ -53,6 +53,7 @@ int main(void) {
     /* Fork child — child gets its own imfs for /tmp */
     pid_t pid = fork();
     if (pid == 0) {
+        mkdir("/tmp", 0755);
         /* Child: write different data to /tmp/foo */
         int cfd = open("/tmp/foo", O_CREAT | O_RDWR | O_TRUNC, 0644);
         if (cfd < 0) _exit(1);
@@ -104,6 +105,7 @@ int main(void) {
 
     pid = fork();
     if (pid == 0) {
+        mkdir("/tmp", 0755);
         /* Child: /tmp/a.txt and /tmp/b.txt should not exist (fresh imfs) */
         int cfd = open("/tmp/a.txt", O_RDONLY);
         if (cfd >= 0) {

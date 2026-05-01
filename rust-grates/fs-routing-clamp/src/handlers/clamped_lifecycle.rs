@@ -1,13 +1,12 @@
 use grate_rs::{
-    SyscallHandler,
-    constants::{SYS_CLONE, SYS_EXEC, SYS_EXIT, SYS_REGISTER_HANDLER},
-    copy_data_between_cages, is_thread_clone, register_handler,
+    SyscallHandler, constants::*, copy_data_between_cages, getcageid, is_thread_clone,
+    register_handler,
 };
 
 use fdtables;
 
 use crate::handlers::get_ns_handler;
-use crate::helpers;
+use crate::helpers::{self};
 
 // =====================================================================
 //  1. LIFECYCLE HANDLERS
@@ -15,14 +14,8 @@ use crate::helpers;
 
 /// Handler for syscall 1001 (register_handler).
 ///
-/// When a clamped grate calls register_handler(cage, syscall, grate_id, fn_ptr),
-/// we intercept it to:
-///   1. Allocate an alt syscall number
-///   2. Register the clamped grate's handler at that alt number on the ns grate's cage
-///   3. Register the ns grate's handler for that syscall on the target cage
-///   4. Store the route: (cage, syscall) -> alt number
-///
-/// After the clamp phase ends (%} is exec'd), register_handler calls pass through.
+/// Records each inner-grate registration so the target cage can be rewired
+/// after the `%}` boundary, then forwards the original registration call.
 pub extern "C" fn register_handler_handler(
     _cageid: u64,
     target_cage: u64,
@@ -30,78 +23,126 @@ pub extern "C" fn register_handler_handler(
     _arg2: u64,
     grate_id: u64,
     handler_fn_ptr: u64,
-    _arg3cage: u64,
+    arg3cage: u64,
     _arg4: u64,
-    _arg4cage: u64,
+    arg4cage: u64,
     _arg5: u64,
-    _arg5cage: u64,
+    arg5cage: u64,
     _arg6: u64,
-    _arg6cage: u64,
+    arg6cage: u64,
 ) -> i32 {
-    let ns_cage = helpers::get_ns_cage_id();
-    // After clamp phase, pass through — we only intercept registrations
-    // from clamped grates (before %} boundary).
-    if !helpers::is_cage_clamped(grate_id) {
-        return helpers::do_syscall(
-            grate_id,
-            SYS_REGISTER_HANDLER,
-            &[target_cage, 0, handler_fn_ptr, 0, 0, 0],
-            &[syscall_nr, grate_id, 0, 0, 0, 0],
-        );
-    }
+    // Record the interposition request. This table is read later before execing the target cage to
+    // register clamped syscall handlers.
+    //.push((target_cage, syscall_nr, grate_id, handler_fn_ptr));
 
-    // Step 0: Check if this syscall, target pair is already registered.
-    let already_registered = match helpers::get_route(target_cage, syscall_nr) {
-        Some(_) => true,
-        _ => false,
-    };
+    helpers::push_interposition_request((target_cage, syscall_nr, grate_id, handler_fn_ptr));
 
-    // First registration.
-    if !already_registered {
-        // This syscall is ns_syscall
-        if let Some(ns_handler) = get_ns_handler(syscall_nr) {
-            // Step 1: Allocate a unique alt syscall number for this handler.
+    helpers::do_syscall(
+        grate_id,
+        SYS_REGISTER_HANDLER,
+        &[target_cage, 0, handler_fn_ptr, 0, 0, 0],
+        &[syscall_nr, grate_id, arg3cage, arg4cage, arg5cage, arg6cage],
+    )
+}
+
+pub fn register_target_handlers(target_cage: u64) -> i32 {
+    // These are all the calls that the fs-namespace grate cares about, all the following calls from the target
+    // must be routed through the grate regardless of whether the clamp interposed on them.
+    const FS_CALLS: [u64; 29] = [
+        SYS_OPEN,
+        SYS_XSTAT,
+        SYS_ACCESS,
+        SYS_UNLINK,
+        SYS_MKDIR,
+        SYS_RMDIR,
+        SYS_RENAME,
+        SYS_TRUNCATE,
+        SYS_CHMOD,
+        SYS_CHDIR,
+        SYS_READLINK,
+        SYS_UNLINKAT,
+        SYS_READLINKAT,
+        // FD-based
+        SYS_READ,
+        SYS_WRITE,
+        SYS_CLOSE,
+        SYS_PREAD,
+        SYS_PWRITE,
+        SYS_LSEEK,
+        SYS_FXSTAT,
+        SYS_FCNTL,
+        SYS_FTRUNCATE,
+        SYS_FCHMOD,
+        SYS_READV,
+        SYS_WRITEV,
+        // FD-based with fd-tracking side effects
+        SYS_DUP,
+        SYS_DUP2,
+        SYS_DUP3,
+        // Lifecycle — interpose so we track child cages
+        SYS_CLONE,
+    ];
+
+    let ns_cage = getcageid();
+
+    // Reinstall namespace-grate handlers for the syscall set we clamp.
+    //
+    // Two cases are possible:
+    //  1. The `entry` grate for the clamp interposed on this syscall. In this case, the alternate
+    //     path is to route the call to that handler.
+    //  2. The `entry` grate does not interpose on this syscall. In this case, the alternate path
+    //     is to route the call with (self_cageid=entry_grate, calling_cageid=target_cage).
+    //
+    //  The rationale for this can be seen with the following example:
+    //
+    //  namespace --prefix /tmp %{ interpose-open-write interpose-open %} target
+    //
+    //  target calls: open("/tmp",...); write(fd, ...);
+    //
+    //  For open, the call goes the namespace grate and then to the handler in interpose-open.
+    //
+    //  For write, the call goes to the namespace grate and is determined to be a clamped FD. Since
+    //  interpose-open does not have a handler for write, using (self_cageid=entry_grate) ensures
+    //  that the call still goes to interpose-open-write.
+    //
+    //  The routing logic is handled in the `ns_handlers.rs` helpers.
+    for fs_syscall in FS_CALLS {
+        let ns_handler = get_ns_handler(fs_syscall);
+
+        // Find Interposition Requests aimed at the child_cage.
+        if let Some((grate_id, handler_fn)) =
+            helpers::get_interposition_request(target_cage, fs_syscall)
+        {
+            // Handler for this syscall exists...
+
+            // ... Allocate alt syscall...
             let alt_nr = helpers::alloc_alt_syscall();
 
-            // Step 2: Register the clamped grate's handler at the alt number on the
-            // namespace grate's own cage. This way, when we later call
-            // do_syscall(alt_nr, ...) it routes to the clamped grate's handler.
+            // ... Register that to the namespace grate...
             let ret = helpers::do_syscall(
                 grate_id,
                 SYS_REGISTER_HANDLER,
-                &[ns_cage, 0, handler_fn_ptr, 0, 0, 0],
+                &[ns_cage, 0, handler_fn, 0, 0, 0],
                 &[alt_nr, grate_id, 0, 0, 0, 0],
             );
 
-            let _ = helpers::set_route(target_cage, syscall_nr, alt_nr);
-
             if ret != 0 {
-                println!("[ns-grate] failed to register alt handler: ret={}", ret);
                 return ret;
             }
 
-            // Step 3: Registered the regular call number to go to ns_grate.
-            match register_handler(target_cage, syscall_nr, ns_cage, ns_handler) {
-                Ok(_) => {}
-                Err(e) => {
-                    println!("[ns-grate] failed to register ns handler: {:?}", e);
-                    return -1;
-                }
+            // ... Add to routing table.
+            let _ = helpers::set_route(target_cage, fs_syscall, alt_nr);
+        }
+
+        // The visible handler on the target cage always points at ns-grate.
+        match register_handler(target_cage, fs_syscall, ns_cage, ns_handler.unwrap()) {
+            Ok(_) => {}
+            Err(e) => {
+                println!("[ns-grate] failed to register ns handler: {:?}", e);
+                return -1;
             }
-        } else {
-            // We don't have a handler for this syscall number. Pass through
-            // the clamped grate's registration directly — we can't interpose.
-            return helpers::do_syscall(
-                grate_id,
-                SYS_REGISTER_HANDLER,
-                &[target_cage, 0, handler_fn_ptr, 0, 0, 0],
-                &[syscall_nr, grate_id, 0, 0, 0, 0],
-            );
         }
     }
-
-    // Track this cage as clamped (also inits its fdtables entry).
-    helpers::register_clamped_cage(target_cage);
 
     0
 }
@@ -135,8 +176,10 @@ pub extern "C" fn exec_handler(
     // Read the exec path from the cage's memory to check for %}.
     if let Some(path) = helpers::read_path_from_cage(arg1, arg1cage) {
         if path == "%}" {
-            println!("[ns-grate] detected %}} boundary — ending clamp phase");
-            // Remove cageid from clamped cages.
+            // This cage is going to be the target cage, register the fs-clamped routing syscalls
+            // to this cage_id.
+            register_target_handlers(arg1cage);
+
             helpers::deregister_clamped_cage(arg1cage);
 
             // We've detected the clamp boundary, we need to left shift all argv[] and update the
@@ -183,6 +226,11 @@ pub extern "C" fn exec_handler(
                 &[arg2cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
             );
         } else {
+            // The current method to detect the "entry" grate to the clamp is to track the last
+            // exec'd process, and update this state variable. Once we hit the clamp end boundary
+            // (%}), we stop updating this variable.
+            helpers::set_clamp_entry(arg1cage);
+
             // In any other case, call exec without argument management.
             return helpers::do_syscall(
                 arg1cage,
@@ -201,7 +249,6 @@ pub extern "C" fn exec_handler(
 /// Forwards the fork, then if the parent was clamped:
 ///   - Clones the routing table to the child cage
 ///   - Clones the fdtables state to the child cage
-///   - Registers lifecycle handlers on the child cage
 pub extern "C" fn fork_handler(
     _cageid: u64,
     arg1: u64,
@@ -224,14 +271,14 @@ pub extern "C" fn fork_handler(
     let child_cage_id = helpers::do_syscall(arg1cage, SYS_CLONE, &args, &arg_cages) as u64;
 
     if !is_thread_clone(arg1, arg1cage) {
-        // If the forking cage is inside the clamp, the child inherits that status.
-        if helpers::is_cage_clamped(arg1cage) {
-            // Copy the fd table so the child knows which fds are clamped.
-            let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
-        }
+        // Copy fdtables — child always needs an entry for inner grates
+        // to track fds, regardless of clamp status.
+        let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
 
-        // Register our lifecycle handlers on the child so we can track it.
-        register_lifecycle_handlers(child_cage_id);
+        // If the forking cage is inside the clamp, clone routes too.
+        if helpers::is_cage_clamped(arg1cage) {
+            helpers::clone_cage_routes(arg1cage, child_cage_id);
+        }
     }
 
     child_cage_id as i32
@@ -272,8 +319,7 @@ pub extern "C" fn exit_handler(
 
 /// Register the four lifecycle handlers on a cage.
 ///
-/// Called on the initial child cage at startup, and on every new child
-/// created by fork_handler.
+/// Called on the initial child cage at startup.
 pub fn register_lifecycle_handlers(cage_id: u64) {
     let ns_cage = helpers::get_ns_cage_id();
 

@@ -15,53 +15,91 @@ use grate_rs::{copy_data_between_cages, make_threei_call};
 //  Global state
 // =====================================================================
 
-/// Routing table: (cage_id, syscall_nr) → alt syscall number.
-/// When a clamped grate registers a handler, we store the alt number here.
-static ROUTES: Mutex<Option<HashMap<(u64, u64), u64>>> = Mutex::new(None);
+pub struct NSClampState {
+    /// Routing table: (cage_id, syscall_nr) → alt syscall number.
+    /// When a clamped grate registers a handler, we store the alt number here.
+    routes: Option<HashMap<(u64, u64), u64>>,
 
-/// The namespace grate's own cage ID.
-static NS_CAGE_ID: Mutex<u64> = Mutex::new(0);
+    /// The namespace grate's own cage ID.
+    ns_cage_id: u64,
 
-/// The path prefix condition for routing.
-static ROUTING_PREFIX: Mutex<Option<String>> = Mutex::new(None);
+    /// Cage ID captured at the clamp entry point.
+    clamp_entry_cage: u64,
 
-/// Set of cage IDs that are inside the clamp.
-static CLAMPED_CAGES: Mutex<Option<HashMap<u64, ()>>> = Mutex::new(None);
+    /// The path prefix condition for routing.
+    routing_prefix: Option<String>,
 
-/// Alt syscall number allocator — starts well above Lind's 1001-1003 range.
-/// Each intercepted register_handler call gets a unique alt number.
-static ALT_ALLOCATOR: Mutex<u64> = Mutex::new(2000);
+    /// Set of cage IDs that are inside the clamp.
+    clamped_cages: Option<HashMap<u64, ()>>,
+
+    /// Alt syscall number allocator — starts well above Lind's 1001-1003 range.
+    /// Each intercepted register_handler call gets a unique alt number.
+    alt_allocator: u64,
+
+    /// Recorded inner-grate handler registrations as
+    /// `(target_cage, syscall_nr, grate_id, handler_fn_ptr)`.
+    interposition_map: Vec<(u64, u64, u64, u64)>,
+}
+
+impl NSClampState {
+    pub fn new(ns_cage_id: u64, prefix: String) -> Self {
+        Self {
+            routes: None,
+            ns_cage_id: ns_cage_id,
+            clamp_entry_cage: 0,
+            routing_prefix: Some(prefix),
+            clamped_cages: None,
+            alt_allocator: 3000,
+            interposition_map: Vec::new(),
+        }
+    }
+}
+
+pub static CLAMP_STATE: Mutex<Option<NSClampState>> = Mutex::new(None);
 
 /// Initialize all global state. Called once at startup.
 pub fn init_globals(ns_cage_id: u64, prefix: String) {
-    *ROUTES.lock().unwrap() = Some(HashMap::new());
-    *CLAMPED_CAGES.lock().unwrap() = Some(HashMap::new());
-    *NS_CAGE_ID.lock().unwrap() = ns_cage_id;
-    *ROUTING_PREFIX.lock().unwrap() = Some(prefix);
+    *CLAMP_STATE.lock().unwrap() = Some(NSClampState::new(ns_cage_id, prefix));
 }
 
 // =====================================================================
 //  Accessors
 // =====================================================================
 
+/// Return the namespace grate's own cage ID.
 pub fn get_ns_cage_id() -> u64 {
-    *NS_CAGE_ID.lock().unwrap()
+    CLAMP_STATE.lock().unwrap().as_ref().unwrap().ns_cage_id
 }
 
-pub fn get_routing_prefix() -> String {
-    ROUTING_PREFIX
+/// Return the cage ID saved at the clamp entry point.
+pub fn get_clamp_entry() -> u64 {
+    CLAMP_STATE
         .lock()
         .unwrap()
         .as_ref()
-        .cloned()
-        .unwrap_or_default()
+        .unwrap()
+        .clamp_entry_cage
+}
+
+pub fn get_routing_prefix() -> String {
+    CLAMP_STATE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .routing_prefix
+        .as_ref()
+        .unwrap()
+        .clone()
 }
 
 /// Allocate the next available alt syscall number.
 pub fn alloc_alt_syscall() -> u64 {
-    let mut next = ALT_ALLOCATOR.lock().unwrap();
-    let nr = *next;
-    *next += 1;
+    let mut state = CLAMP_STATE.lock().unwrap();
+    let s = state.as_mut().unwrap();
+
+    let nr = s.alt_allocator;
+    s.alt_allocator += 1;
     nr
 }
 
@@ -69,72 +107,111 @@ pub fn alloc_alt_syscall() -> u64 {
 //  Cage tracking
 // =====================================================================
 
-/// Record that this cage is inside the clamp.
-pub fn register_clamped_cage(cage_id: u64) {
-    let mut cages = CLAMPED_CAGES.lock().unwrap();
-    cages.as_mut().unwrap().insert(cage_id, ());
+pub fn set_clamp_entry(cage_id: u64) {
+    let mut state = CLAMP_STATE.lock().unwrap();
+    let s = state.as_mut().expect("CLAMP_STATE not initialized");
+
+    s.clamp_entry_cage = cage_id;
 }
 
-/// Remove a cage's clamped status. Done when we hit %}
+pub fn register_clamped_cage(cage_id: u64) {
+    let mut state = CLAMP_STATE.lock().unwrap();
+    let s = state.as_mut().expect("CLAMP_STATE not initialized");
+
+    s.clamped_cages
+        .get_or_insert_with(HashMap::new)
+        .insert(cage_id, ());
+}
+
 pub fn deregister_clamped_cage(cage_id: u64) {
-    let mut cages = CLAMPED_CAGES.lock().unwrap();
-    cages.as_mut().unwrap().remove(&cage_id);
+    let mut state = CLAMP_STATE.lock().unwrap();
+    let s = state.as_mut().expect("CLAMP_STATE not initialized");
+
+    if let Some(cages) = s.clamped_cages.as_mut() {
+        cages.remove(&cage_id);
+    }
 }
 
 pub fn is_cage_clamped(cage_id: u64) -> bool {
-    CLAMPED_CAGES
+    CLAMP_STATE
         .lock()
         .unwrap()
         .as_ref()
+        .and_then(|s| s.clamped_cages.as_ref())
         .map(|c| c.contains_key(&cage_id))
         .unwrap_or(false)
+}
+
+pub fn push_interposition_request(request: (u64, u64, u64, u64)) {
+    let mut state = CLAMP_STATE.lock().unwrap();
+    let s = state.as_mut().expect("CLAMP_STATE not initialized");
+
+    s.interposition_map.push(request);
+}
+
+pub fn get_interposition_request(target_cage: u64, fs_syscall: u64) -> Option<(u64, u64)> {
+    CLAMP_STATE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .expect("CLAMP_STATE not initialized")
+        .interposition_map
+        .iter()
+        .find(|(child_cage, syscall_number, _, _)| {
+            *child_cage == target_cage && *syscall_number == fs_syscall
+        })
+        .map(|(_, _, grate_id, handler_fn)| (*grate_id, *handler_fn))
 }
 
 // =====================================================================
 //  Route table
 // =====================================================================
 
-/// Store the alt syscall number for a (cage, syscall) pair.
-/// Returns whether an alt was already registered for this pair.
 pub fn set_route(cage_id: u64, syscall_nr: u64, alt_nr: u64) -> bool {
-    let mut routes = ROUTES.lock().unwrap();
-    routes
-        .as_mut()
-        .unwrap()
+    let mut state = CLAMP_STATE.lock().unwrap();
+    let s = state.as_mut().expect("CLAMP_STATE not initialized");
+
+    s.routes
+        .get_or_insert_with(HashMap::new)
         .insert((cage_id, syscall_nr), alt_nr)
         .is_some()
 }
 
-/// Look up the alt syscall number for a (cage, syscall) pair.
 pub fn get_route(cage_id: u64, syscall_nr: u64) -> Option<u64> {
-    ROUTES
+    CLAMP_STATE
         .lock()
         .unwrap()
         .as_ref()
+        .and_then(|s| s.routes.as_ref())
         .and_then(|r| r.get(&(cage_id, syscall_nr)).copied())
 }
 
-/// Copy all routes from parent cage to child cage.
 pub fn clone_cage_routes(parent: u64, child: u64) {
-    let mut routes = ROUTES.lock().unwrap();
-    if let Some(map) = routes.as_mut() {
+    let mut state = CLAMP_STATE.lock().unwrap();
+    let s = state.as_mut().expect("CLAMP_STATE not initialized");
+
+    if let Some(map) = s.routes.as_mut() {
         let parent_routes: Vec<(u64, u64)> = map
             .iter()
             .filter(|&(&(cid, _), _)| cid == parent)
             .map(|(&(_, nr), &alt)| (nr, alt))
             .collect();
+
         for (nr, alt) in parent_routes {
             map.insert((child, nr), alt);
         }
     }
 }
 
-/// Remove all state for a cage (routes + clamped status).
 pub fn remove_cage_state(cage_id: u64) {
-    if let Some(routes) = ROUTES.lock().unwrap().as_mut() {
+    let mut state = CLAMP_STATE.lock().unwrap();
+    let s = state.as_mut().expect("CLAMP_STATE not initialized");
+
+    if let Some(routes) = s.routes.as_mut() {
         routes.retain(|&(cid, _), _| cid != cage_id);
     }
-    if let Some(cages) = CLAMPED_CAGES.lock().unwrap().as_mut() {
+
+    if let Some(cages) = s.clamped_cages.as_mut() {
         cages.remove(&cage_id);
     }
 }
@@ -182,6 +259,32 @@ pub fn do_syscall(callingcage: u64, nr: u64, args: &[u64; 6], arg_cages: &[u64; 
         nr as u32,
         0,
         ns_cage,
+        callingcage,
+        args[0],
+        arg_cages[0],
+        args[1],
+        arg_cages[1],
+        args[2],
+        arg_cages[2],
+        args[3],
+        arg_cages[3],
+        args[4],
+        arg_cages[4],
+        args[5],
+        arg_cages[5],
+        0,
+    ) {
+        Ok(ret) => ret,
+        Err(_) => -1,
+    }
+}
+
+/// Make a syscall via threei, using the saved clamp-entry cage as source.
+pub fn do_clamp_syscall(callingcage: u64, nr: u64, args: &[u64; 6], arg_cages: &[u64; 6]) -> i32 {
+    match make_threei_call(
+        nr as u32,
+        0,
+        get_clamp_entry(),
         callingcage,
         args[0],
         arg_cages[0],
