@@ -32,6 +32,13 @@ static CLAMPED_CAGES: Mutex<Option<HashMap<u64, ()>>> = Mutex::new(None);
 /// Each intercepted register_handler call gets a unique alt number.
 static ALT_ALLOCATOR: Mutex<u64> = Mutex::new(2000);
 
+/// Recorded inner-grate handler registrations as
+/// `(target_cage, syscall_nr, grate_id, handler_fn_ptr)`.
+pub static INTERPOSITION_MAP: Mutex<Vec<(u64, u64, u64, u64)>> = Mutex::new(Vec::new());
+
+/// Cage ID captured at the clamp entry point.
+pub static CLAMP_ENTRY: Mutex<u64> = Mutex::new(0);
+
 /// Initialize all global state. Called once at startup.
 pub fn init_globals(ns_cage_id: u64, prefix: String) {
     *ROUTES.lock().unwrap() = Some(HashMap::new());
@@ -44,8 +51,14 @@ pub fn init_globals(ns_cage_id: u64, prefix: String) {
 //  Accessors
 // =====================================================================
 
+/// Return the namespace grate's own cage ID.
 pub fn get_ns_cage_id() -> u64 {
     *NS_CAGE_ID.lock().unwrap()
+}
+
+/// Return the cage ID saved at the clamp entry point.
+pub fn get_clamp_entry() -> u64 {
+    *CLAMP_ENTRY.lock().unwrap()
 }
 
 pub fn get_routing_prefix() -> String {
@@ -182,6 +195,32 @@ pub fn do_syscall(callingcage: u64, nr: u64, args: &[u64; 6], arg_cages: &[u64; 
         nr as u32,
         0,
         ns_cage,
+        callingcage,
+        args[0],
+        arg_cages[0],
+        args[1],
+        arg_cages[1],
+        args[2],
+        arg_cages[2],
+        args[3],
+        arg_cages[3],
+        args[4],
+        arg_cages[4],
+        args[5],
+        arg_cages[5],
+        0,
+    ) {
+        Ok(ret) => ret,
+        Err(_) => -1,
+    }
+}
+
+/// Make a syscall via threei, using the saved clamp-entry cage as source.
+pub fn do_clamp_syscall(callingcage: u64, nr: u64, args: &[u64; 6], arg_cages: &[u64; 6]) -> i32 {
+    match make_threei_call(
+        nr as u32,
+        0,
+        get_clamp_entry(),
         callingcage,
         args[0],
         arg_cages[0],
