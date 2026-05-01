@@ -1,10 +1,10 @@
-//! Namespace Clamping Grate
+//! FS Routing Clamp
 //!
 //! A meta-grate that selectively routes syscalls to clamped grates based on a
 //! path-prefix condition. This interposes on register_handler, exec, fork, and
 //! exit to dynamically build routing tables and conditionally dispatch syscalls.
 //!
-//! Usage: namespace-grate --prefix /tmp %{ imfs-grate strace-grate %} python
+//! Usage: fs-routing-clamp --prefix /tmp %{ imfs-grate strace-grate %} python
 
 mod handlers;
 mod helpers;
@@ -27,7 +27,7 @@ struct NamespaceConfig {
 
 /// Parse argv into a NamespaceConfig.
 ///
-/// Expected syntax: namespace-grate --prefix /tmp %{ imfs-grate strace-grate %} python
+/// Expected syntax: fs-routing-clamp --prefix /tmp %{ imfs-grate strace-grate %} python
 ///
 /// After parsing:
 ///   prefix = "/tmp"
@@ -102,7 +102,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.is_empty() {
-        eprintln!("Usage: namespace-grate --prefix <path> %{{ <grates...> %}} <program> [args...]");
+        eprintln!("Usage: fs-routing-clamp --prefix <path> %{{ <grates...> %}} <program> [args...]");
         std::process::exit(1);
     }
 

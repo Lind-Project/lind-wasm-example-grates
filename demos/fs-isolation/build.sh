@@ -1,38 +1,29 @@
 #!/usr/bin/env bash
 #
-# Build everything needed for the least-privilege demo.
-# Rust grates build with --release.
+# Build everything needed for the filesystem isolation demo.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-LINDFS="${LINDFS:-${LIND_WASM_ROOT:-$HOME/lind-wasm}/lindfs}"
 
-echo "=== Building Least-Privilege Demo ==="
+echo "=== Building Filesystem Isolation Demo ==="
 
-# Clean
 echo "Cleaning..."
 (cd "$REPO_ROOT/rust-grates/fs-routing-clamp" && cargo clean 2>/dev/null || true)
+(cd "$REPO_ROOT/rust-grates/fs-view-grate" && cargo clean 2>/dev/null || true)
 (cd "$REPO_ROOT/rust-grates/imfs-grate" && cargo clean 2>/dev/null || true)
 
-# C grate
-echo "Building seccomp-grate..."
-(cd "$REPO_ROOT/c-grates/seccomp-grate" && \
-  lind_compile -s --compile-grate --output-dir grates src/seccomp-grate.c src/seccomp.c)
-
-# Rust grates with --release
 echo "Building fs-routing-clamp (--release)..."
 (cd "$REPO_ROOT/rust-grates/fs-routing-clamp" && cargo lind_compile --release --output-dir grates)
+
+echo "Building fs-view-grate (--release)..."
+(cd "$REPO_ROOT/rust-grates/fs-view-grate" && cargo lind_compile --release --output-dir grates)
 
 echo "Building imfs-grate (--release)..."
 (cd "$REPO_ROOT/rust-grates/imfs-grate" && cargo lind_compile --release --output-dir grates)
 
-# Compile test binary
 echo "Compiling test..."
-lind-clang -s "$SCRIPT_DIR/least_privilege_test.c"
-
-# Copy config to lindfs
-cp "$SCRIPT_DIR/seccomp_fs_deny.conf" "$LINDFS/"
+lind-clang -s "$SCRIPT_DIR/fs_isolation_test.c"
 
 echo "Done."

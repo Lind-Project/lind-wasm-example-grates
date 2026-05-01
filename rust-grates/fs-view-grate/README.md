@@ -7,7 +7,7 @@ opening `/tmp/foo` access completely independent files.
 Designed to be composed with imfs-grate or any filesystem grate:
 
 ```bash
-lind-wasm grates/namespace-grate.cwasm --prefix /tmp %{ \
+lind-wasm grates/fs-routing-clamp.cwasm --prefix /tmp %{ \
   grates/fs-view-grate.cwasm \
   grates/imfs-grate.cwasm \
 %} my-program.cwasm

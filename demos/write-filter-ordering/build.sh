@@ -9,6 +9,10 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 echo "=== Building Write Filter Ordering Demo ==="
 
+echo "Cleaning..."
+(cd "$REPO_ROOT/rust-grates/strace-grate" && cargo clean 2>/dev/null || true)
+(cd "$REPO_ROOT/rust-grates/write-filter-grate" && cargo clean 2>/dev/null || true)
+
 echo "Building strace-grate (Rust, --release)..."
 (cd "$REPO_ROOT/rust-grates/strace-grate" && cargo lind_compile --release --output-dir grates)
 

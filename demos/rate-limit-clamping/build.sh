@@ -10,8 +10,12 @@ LINDFS="${LINDFS:-${LIND_WASM_ROOT:-$HOME/lind-wasm}/lindfs}"
 
 echo "=== Building Rate-Limit Clamping Demo ==="
 
-echo "Building net-namespace-grate (--release)..."
-(cd "$REPO_ROOT/rust-grates/net-namespace-grate" && cargo lind_compile --release --output-dir grates)
+echo "Cleaning..."
+(cd "$REPO_ROOT/rust-grates/net-routing-clamp" && cargo clean 2>/dev/null || true)
+(cd "$REPO_ROOT/rust-grates/resource-grate" && cargo clean 2>/dev/null || true)
+
+echo "Building net-routing-clamp (--release)..."
+(cd "$REPO_ROOT/rust-grates/net-routing-clamp" && cargo lind_compile --release --output-dir grates)
 
 # resource-grate is built without --release because the busy-wait
 # rate limiter loop gets partially optimized out in release mode.

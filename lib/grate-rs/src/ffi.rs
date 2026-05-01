@@ -75,6 +75,9 @@ unsafe extern "C" {
         copytype: u64,
     ) -> c_int;
 
+    #[link_name = "copy_handler_table_to_cage"]
+    pub(crate) fn cp_handler_impl(srccage: u64, targetcage: u64) -> c_int;
+
     #[link_name = "make_threei_call"]
     pub(crate) fn make_syscall_impl(
         callnumber: c_uint,

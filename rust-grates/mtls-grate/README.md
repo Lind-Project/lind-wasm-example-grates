@@ -20,7 +20,7 @@ code changes. For example:
   mTLS to encrypt traffic to the database server.
 - A microservice that communicates over plain HTTP can get mTLS
   enforcement at the sandbox boundary.
-- Combined with `net-namespace-grate`, mtls can be scoped to specific
+- Combined with `net-routing-clamp`, mtls can be scoped to specific
   ports — e.g., only encrypt traffic to port 5432 while leaving local
   connections unaffected.
 
