@@ -63,7 +63,16 @@ static LOGGING_ENABLED: AtomicBool = AtomicBool::new(false);
 macro_rules! log {
     ($($arg:tt)*) => {
         if $crate::helpers::logging_enabled() {
-            println!($($arg)*);
+            println!("[ns-grate] {}", format_args!($($arg)*));
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! log_error {
+    ($($arg:tt)*) => {
+        if $crate::helpers::logging_enabled() {
+            eprintln!("[ns-grate] {}", format_args!($($arg)*));
         }
     };
 }
@@ -71,6 +80,10 @@ macro_rules! log {
 /// Initialize all global state. Called once at startup.
 pub fn init_globals(ns_cage_id: u64, prefix: String, logging_enabled: bool) {
     *CLAMP_STATE.lock().unwrap() = Some(NSClampState::new(ns_cage_id, prefix));
+    LOGGING_ENABLED.store(logging_enabled, Ordering::Relaxed);
+}
+
+pub fn init_logging(logging_enabled: bool) {
     LOGGING_ENABLED.store(logging_enabled, Ordering::Relaxed);
 }
 

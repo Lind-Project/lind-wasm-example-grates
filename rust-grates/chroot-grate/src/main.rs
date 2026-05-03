@@ -17,6 +17,7 @@ use std::sync::Mutex;
 
 mod paths;
 mod sockets;
+mod logging;
 
 use crate::paths::{
     chroot_path, get_cage_cwd, init_cwd, normalize_path, read_path_from_cage, register_cage,
@@ -567,15 +568,25 @@ extern "C" fn chroot_handler(
     -1 // EPERM - operation not permitted
 }
 
-fn parse_args() -> (String, Vec<String>) {
-    let args: Vec<String> = std::env::args().collect();
+struct Config {
+    chroot_dir: String,
+    remaining_args: Vec<String>,
+    log_enabled: bool,
+}
+
+fn parse_args() -> Config {
+    let args: Vec<String> = std::env::args().skip(1).collect();
 
     let mut chroot_dir = String::new();
     let mut remaining_args = Vec::new();
-    let mut i = 1;
+    let mut log_enabled = false;
+    let mut i = 0;
 
     while i < args.len() {
-        if args[i] == "--chroot-dir" && i + 1 < args.len() {
+        if args[i] == "--log" {
+            log_enabled = true;
+            i += 1;
+        } else if args[i] == "--chroot-dir" && i + 1 < args.len() {
             chroot_dir = args[i + 1].clone();
             i += 2;
         } else {
@@ -584,29 +595,31 @@ fn parse_args() -> (String, Vec<String>) {
         }
     }
 
-    (chroot_dir, remaining_args)
+    Config {
+        chroot_dir,
+        remaining_args,
+        log_enabled,
+    }
 }
 
 fn main() {
-    let (chroot_dir, remaining_args) = parse_args();
+    let config = parse_args();
+    logging::init(config.log_enabled);
 
-    if chroot_dir.is_empty() {
-        eprintln!("Usage: chroot-grate --chroot-dir <path> <program> [args...]");
+    if config.chroot_dir.is_empty() {
+        log_error!("Usage: chroot-grate [--log] --chroot-dir <path> <program> [args...]");
         std::process::exit(1);
     }
 
-    println!(
-        "[chroot-grate] Initializing with chroot dir: {}",
-        chroot_dir
-    );
+    log!("Initializing with chroot dir: {}", config.chroot_dir);
 
-    init_state(chroot_dir);
+    init_state(config.chroot_dir);
 
     // Get initial cwd via syscall and add to table
     let cageid = getcageid();
     let initial_cwd = init_cwd(cageid);
 
-    println!("[chroot-grate] Initial cwd: {}", initial_cwd);
+    log!("Initial cwd: {}", initial_cwd);
 
     let builder = GrateBuilder::new()
         // Process management
@@ -640,8 +653,8 @@ fn main() {
         .register(SYS_GETPEERNAME, getpeername_handler)
         .register(SYS_RECVFROM, recvfrom_handler)
         .teardown(|result| {
-            println!("[chroot-grate] Result: {:#?}", result);
+            log!("Result: {:#?}", result);
         });
 
-    builder.run(remaining_args);
+    builder.run(config.remaining_args);
 }

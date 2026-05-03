@@ -68,7 +68,7 @@ fn main() {
         .register(SYS_CLONE, handlers::fork_handler)
         .register(SYS_EXEC, handlers::exec_handler)
         .teardown(|result: Result<i32, GrateError>| {
-            log!("[imfs-grate] exited: {:?}", result);
+            log!("exited: {:?}", result);
         })
         .run(config.argv);
 }
@@ -84,13 +84,13 @@ fn load_preloads(preloads: &str) {
             continue;
         }
 
-        log!("[imfs-grate] preloading: {}", path);
+        log!("preloading: {}", path);
 
         // Read the file from the host filesystem.
         let data = match std::fs::read(path) {
             Ok(d) => d,
             Err(e) => {
-                log!("[imfs-grate] failed to read {}: {}", path, e);
+                log!("failed to read {}: {}", path, e);
                 continue;
             }
         };

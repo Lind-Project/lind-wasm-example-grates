@@ -139,7 +139,7 @@ pub fn register_target_handlers(target_cage: u64) -> i32 {
         match register_handler(target_cage, fs_syscall, ns_cage, ns_handler.unwrap()) {
             Ok(_) => {}
             Err(e) => {
-                log!("[ns-grate] failed to register ns handler: {:?}", e);
+                log!("failed to register ns handler: {:?}", e);
                 return -1;
             }
         }
@@ -336,7 +336,7 @@ pub fn register_lifecycle_handlers(cage_id: u64) {
             Ok(_) => {}
             Err(e) => {
                 log!(
-                    "[ns-grate] failed to register lifecycle handler {} on cage {}: {:?}",
+                    "failed to register lifecycle handler {} on cage {}: {:?}",
                     syscall_nr, cage_id, e
                 );
             }

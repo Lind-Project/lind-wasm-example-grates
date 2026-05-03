@@ -91,7 +91,7 @@ fn parse_argv(args: Vec<String>) -> Result<NamespaceConfig, String> {
     })
 }
 
-unsafe fn mmap_shared<T>(log_enabled: bool) -> *mut T {
+unsafe fn mmap_shared<T>() -> *mut T {
     let ptr = unsafe {
         mmap(
             ptr::null_mut(),
@@ -103,9 +103,7 @@ unsafe fn mmap_shared<T>(log_enabled: bool) -> *mut T {
         )
     };
     if ptr == MAP_FAILED {
-        if log_enabled {
-            eprintln!("[ns-grate] mmap failed");
-        }
+        log_error!("mmap failed");
         std::process::exit(-1);
     }
     ptr as *mut T
@@ -114,22 +112,19 @@ unsafe fn mmap_shared<T>(log_enabled: bool) -> *mut T {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let log_enabled = args.iter().any(|arg| arg == "--log");
+    helpers::init_logging(log_enabled);
 
     if args.is_empty() {
-        if log_enabled {
-            eprintln!(
-                "Usage: fs-routing-clamp [--log] --prefix <path> %{{ <grates...> %}} <program> [args...]"
-            );
-        }
+        eprintln!(
+            "Usage: fs-routing-clamp [--log] --prefix <path> %{{ <grates...> %}} <program> [args...]"
+        );
         std::process::exit(1);
     }
 
     let config = match parse_argv(args) {
         Ok(c) => c,
         Err(e) => {
-            if log_enabled {
-                eprintln!("[ns-grate] argument error: {}", e);
-            }
+            eprintln!("argument error: {}", e);
             std::process::exit(1);
         }
     };
@@ -138,7 +133,7 @@ fn main() {
     let exec_chain = config.exec_chain;
     let log_enabled = config.log_enabled;
 
-    log!("[ns-grate] prefix={}, exec_chain={:?}", prefix, exec_chain);
+    log!("prefix={}, exec_chain={:?}", prefix, exec_chain);
 
     // Initialize global state.
     let ns_cage_id = getcageid();
@@ -154,20 +149,16 @@ fn main() {
     let path = c_argv[0];
 
     // Allocate shared semaphore for synchronization.
-    let sem: *mut sem_t = unsafe { mmap_shared::<sem_t>(log_enabled) };
+    let sem: *mut sem_t = unsafe { mmap_shared::<sem_t>() };
     if unsafe { sem_init(sem, 1, 0) } < 0 {
-        if log_enabled {
-            eprintln!("[ns-grate] sem_init failed");
-        }
+        log_error!("sem_init failed");
         std::process::exit(-1);
     }
 
     // Fork the child cage.
     let child_pid = unsafe { fork() };
     if child_pid < 0 {
-        if log_enabled {
-            eprintln!("[ns-grate] fork failed");
-        }
+        log_error!("fork failed");
         std::process::exit(-1);
     }
 
@@ -178,9 +169,7 @@ fn main() {
         // Exec the first clamped grate (or %} if no clamped grates).
         let ret = unsafe { execv(path, c_argv.as_ptr()) };
         if ret < 0 {
-            if log_enabled {
-                eprintln!("[ns-grate] execv failed");
-            }
+            log_error!("execv failed");
         }
         std::process::exit(-1);
     }
@@ -188,7 +177,7 @@ fn main() {
     let child_cage_id = child_pid as u64;
 
     log!(
-        "[ns-grate] forked child cage {} (ns_cage={})",
+        "forked child cage {} (ns_cage={})",
         child_cage_id,
         ns_cage_id
     );
@@ -210,7 +199,7 @@ fn main() {
         if ret <= 0 {
             break;
         }
-        log!("[ns-grate] child {} exited with status {}", ret, status);
+        log!("child {} exited with status {}", ret, status);
     }
 
     // Cleanup.
@@ -219,6 +208,6 @@ fn main() {
         munmap(sem as *mut c_void, std::mem::size_of::<sem_t>());
     }
 
-    log!("[ns-grate] exiting");
+    log!("exiting");
     std::process::exit(0);
 }
