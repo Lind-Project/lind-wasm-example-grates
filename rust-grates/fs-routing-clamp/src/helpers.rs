@@ -158,7 +158,7 @@ pub fn read_path_from_cage(path_ptr: u64, path_cage: u64) -> Option<String> {
         buf.as_mut_ptr() as u64,
         ns_cage,
         MAX_PATH_LEN as u64,
-        0,
+        1,
     ) {
         Ok(_) => {}
         Err(_) => return None,
