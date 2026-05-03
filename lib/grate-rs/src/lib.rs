@@ -375,7 +375,7 @@ impl GrateBuilder {
     /// - Must always be called from the parent grate.
     fn run_teardown(callback: Option<GrateTeardownCallback>, result: Result<i32, GrateError>) -> ! {
         let exit_code = match &result {
-            Ok(status) => *status,
+            Ok(status) => (*status >> 8) & 0xff, // WEXITSTATUS
             Err(_) => 1,
         };
         match callback {
