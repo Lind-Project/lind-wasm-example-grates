@@ -111,8 +111,6 @@ unsafe fn mmap_shared<T>() -> *mut T {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let log_enabled = args.iter().any(|arg| arg == "--log");
-    helpers::init_logging(log_enabled);
 
     if args.is_empty() {
         eprintln!(

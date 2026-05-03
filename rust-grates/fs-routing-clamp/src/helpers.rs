@@ -83,10 +83,6 @@ pub fn init_globals(ns_cage_id: u64, prefix: String, logging_enabled: bool) {
     LOGGING_ENABLED.store(logging_enabled, Ordering::Relaxed);
 }
 
-pub fn init_logging(logging_enabled: bool) {
-    LOGGING_ENABLED.store(logging_enabled, Ordering::Relaxed);
-}
-
 // =====================================================================
 //  Accessors
 // =====================================================================
