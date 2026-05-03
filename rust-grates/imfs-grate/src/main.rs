@@ -10,11 +10,39 @@
 
 mod handlers;
 mod imfs;
+mod logging;
 
 use grate_rs::constants::*;
 use grate_rs::{GrateBuilder, GrateError};
 
+struct Config {
+    argv: Vec<String>,
+    log_enabled: bool,
+}
+
+fn parse_argv(args: Vec<String>) -> Config {
+    let mut log_enabled = false;
+    let mut i = 0;
+
+    while i < args.len() {
+        if args[i] == "--log" {
+            log_enabled = true;
+            i += 1;
+        } else {
+            break;
+        }
+    }
+
+    Config {
+        argv: args[i..].to_vec(),
+        log_enabled,
+    }
+}
+
 fn main() {
+    let config = parse_argv(std::env::args().skip(1).collect());
+    logging::init(config.log_enabled);
+
     // Initialize the in-memory filesystem.
     imfs::init();
 
@@ -22,8 +50,6 @@ fn main() {
     if let Ok(preloads) = std::env::var("PRELOADS") {
         load_preloads(&preloads);
     }
-
-    let argv: Vec<String> = std::env::args().skip(1).collect();
 
     // Build and run the grate. Registers handlers for all filesystem syscalls,
     // forks a child cage, and waits for it to exit.
@@ -42,9 +68,9 @@ fn main() {
         .register(SYS_CLONE, handlers::fork_handler)
         .register(SYS_EXEC, handlers::exec_handler)
         .teardown(|result: Result<i32, GrateError>| {
-            println!("[imfs-grate] exited: {:?}", result);
+            log!("exited: {:?}", result);
         })
-        .run(argv);
+        .run(config.argv);
 }
 
 /// Load files from the host filesystem into IMFS.
@@ -58,13 +84,13 @@ fn load_preloads(preloads: &str) {
             continue;
         }
 
-        eprintln!("[imfs-grate] preloading: {}", path);
+        log!("preloading: {}", path);
 
         // Read the file from the host filesystem.
         let data = match std::fs::read(path) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("[imfs-grate] failed to read {}: {}", path, e);
+                log!("failed to read {}: {}", path, e);
                 continue;
             }
         };

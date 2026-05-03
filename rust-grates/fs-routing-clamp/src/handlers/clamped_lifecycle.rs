@@ -7,6 +7,7 @@ use fdtables;
 
 use crate::handlers::get_ns_handler;
 use crate::helpers::{self};
+use crate::log;
 
 // =====================================================================
 //  1. LIFECYCLE HANDLERS
@@ -138,7 +139,7 @@ pub fn register_target_handlers(target_cage: u64) -> i32 {
         match register_handler(target_cage, fs_syscall, ns_cage, ns_handler.unwrap()) {
             Ok(_) => {}
             Err(e) => {
-                println!("[ns-grate] failed to register ns handler: {:?}", e);
+                log!("failed to register ns handler: {:?}", e);
                 return -1;
             }
         }
@@ -210,7 +211,7 @@ pub extern "C" fn exec_handler(
             ) {
                 Ok(_) => {}
                 Err(_) => {
-                    println!("Invalid command line arguments detected.");
+                    log!("Invalid command line arguments detected.");
                     return -2;
                 }
             };
@@ -239,9 +240,9 @@ pub extern "C" fn exec_handler(
                 &[arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
             );
         }
-    } else {
-        panic!("[ns-grate] Unable to read the execve path");
     }
+
+    panic!("[ns-grate] unable to read execve path");
 }
 
 /// Handler for syscall 57 (fork).
@@ -334,8 +335,8 @@ pub fn register_lifecycle_handlers(cage_id: u64) {
         match register_handler(cage_id, syscall_nr, ns_cage, handler) {
             Ok(_) => {}
             Err(e) => {
-                println!(
-                    "[ns-grate] failed to register lifecycle handler {} on cage {}: {:?}",
+                log!(
+                    "failed to register lifecycle handler {} on cage {}: {:?}",
                     syscall_nr, cage_id, e
                 );
             }

@@ -23,6 +23,8 @@ struct NamespaceConfig {
     prefix: String,
     /// The full exec chain: [clamped_grates..., "%}", unclamped_argv...].
     exec_chain: Vec<String>,
+    /// Whether internal logging is enabled.
+    log_enabled: bool,
 }
 
 /// Parse argv into a NamespaceConfig.
@@ -34,6 +36,7 @@ struct NamespaceConfig {
 ///   exec_chain = ["imfs-grate", "strace-grate", "%}", "python"]
 fn parse_argv(args: Vec<String>) -> Result<NamespaceConfig, String> {
     let mut prefix: Option<String> = None;
+    let mut log_enabled = false;
     let mut i = 0;
 
     // Parse options before %{
@@ -45,6 +48,10 @@ fn parse_argv(args: Vec<String>) -> Result<NamespaceConfig, String> {
                     return Err("--prefix requires an argument".into());
                 }
                 prefix = Some(args[i].clone());
+                i += 1;
+            }
+            "--log" => {
+                log_enabled = true;
                 i += 1;
             }
             "%{" => {
@@ -77,7 +84,11 @@ fn parse_argv(args: Vec<String>) -> Result<NamespaceConfig, String> {
         return Err("missing %} in command line".into());
     }
 
-    Ok(NamespaceConfig { prefix, exec_chain })
+    Ok(NamespaceConfig {
+        prefix,
+        exec_chain,
+        log_enabled,
+    })
 }
 
 unsafe fn mmap_shared<T>() -> *mut T {
@@ -92,7 +103,7 @@ unsafe fn mmap_shared<T>() -> *mut T {
         )
     };
     if ptr == MAP_FAILED {
-        println!("[ns-grate] mmap failed");
+        log_error!("mmap failed");
         std::process::exit(-1);
     }
     ptr as *mut T
@@ -102,30 +113,32 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.is_empty() {
-        eprintln!("Usage: fs-routing-clamp --prefix <path> %{{ <grates...> %}} <program> [args...]");
+        eprintln!(
+            "Usage: fs-routing-clamp [--log] --prefix <path> %{{ <grates...> %}} <program> [args...]"
+        );
         std::process::exit(1);
     }
 
     let config = match parse_argv(args) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[ns-grate] argument error: {}", e);
+            eprintln!("argument error: {}", e);
             std::process::exit(1);
         }
     };
 
-    println!(
-        "[ns-grate] prefix={}, exec_chain={:?}",
-        config.prefix, config.exec_chain
-    );
+    let prefix = config.prefix;
+    let exec_chain = config.exec_chain;
+    let log_enabled = config.log_enabled;
+
+    log!("prefix={}, exec_chain={:?}", prefix, exec_chain);
 
     // Initialize global state.
     let ns_cage_id = getcageid();
-    helpers::init_globals(ns_cage_id, config.prefix);
+    helpers::init_globals(ns_cage_id, prefix, log_enabled);
 
     // Prepare the exec chain as C strings.
-    let cstrings: Vec<CString> = config
-        .exec_chain
+    let cstrings: Vec<CString> = exec_chain
         .iter()
         .map(|s| CString::new(s.as_str()).unwrap())
         .collect();
@@ -136,14 +149,14 @@ fn main() {
     // Allocate shared semaphore for synchronization.
     let sem: *mut sem_t = unsafe { mmap_shared::<sem_t>() };
     if unsafe { sem_init(sem, 1, 0) } < 0 {
-        eprintln!("[ns-grate] sem_init failed");
+        log_error!("sem_init failed");
         std::process::exit(-1);
     }
 
     // Fork the child cage.
     let child_pid = unsafe { fork() };
     if child_pid < 0 {
-        eprintln!("[ns-grate] fork failed");
+        log_error!("fork failed");
         std::process::exit(-1);
     }
 
@@ -154,16 +167,17 @@ fn main() {
         // Exec the first clamped grate (or %} if no clamped grates).
         let ret = unsafe { execv(path, c_argv.as_ptr()) };
         if ret < 0 {
-            eprintln!("[ns-grate] execv failed");
+            log_error!("execv failed");
         }
         std::process::exit(-1);
     }
 
     let child_cage_id = child_pid as u64;
 
-    println!(
-        "[ns-grate] forked child cage {} (ns_cage={})",
-        child_cage_id, ns_cage_id
+    log!(
+        "forked child cage {} (ns_cage={})",
+        child_cage_id,
+        ns_cage_id
     );
 
     // Mark the child cage as clamped, initialize fdtable entry.
@@ -183,7 +197,7 @@ fn main() {
         if ret <= 0 {
             break;
         }
-        println!("[ns-grate] child {} exited with status {}", ret, status);
+        log!("child {} exited with status {}", ret, status);
     }
 
     // Cleanup.
@@ -192,6 +206,6 @@ fn main() {
         munmap(sem as *mut c_void, std::mem::size_of::<sem_t>());
     }
 
-    println!("[ns-grate] exiting");
+    log!("exiting");
     std::process::exit(0);
 }
