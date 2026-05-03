@@ -574,7 +574,7 @@ struct Config {
     log_enabled: bool,
 }
 
-fn parse_args() -> Config {
+fn parse_args() -> Result<Config, &'static str> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     let mut chroot_dir = String::new();
@@ -586,7 +586,10 @@ fn parse_args() -> Config {
         if args[i] == "--log" {
             log_enabled = true;
             i += 1;
-        } else if args[i] == "--chroot-dir" && i + 1 < args.len() {
+        } else if args[i] == "--chroot-dir" {
+            if i + 1 >= args.len() {
+                return Err("--chroot-dir requires an argument");
+            }
             chroot_dir = args[i + 1].clone();
             i += 2;
         } else {
@@ -595,19 +598,26 @@ fn parse_args() -> Config {
         }
     }
 
-    Config {
+    Ok(Config {
         chroot_dir,
         remaining_args,
         log_enabled,
-    }
+    })
 }
 
 fn main() {
-    let config = parse_args();
+    let config = match parse_args() {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("argument error: {}", err);
+            eprintln!("Usage: chroot-grate [--log] --chroot-dir <path> <program> [args...]");
+            std::process::exit(1);
+        }
+    };
     logging::init(config.log_enabled);
 
     if config.chroot_dir.is_empty() {
-        log_error!("Usage: chroot-grate [--log] --chroot-dir <path> <program> [args...]");
+        eprintln!("Usage: chroot-grate [--log] --chroot-dir <path> <program> [args...]");
         std::process::exit(1);
     }
 
