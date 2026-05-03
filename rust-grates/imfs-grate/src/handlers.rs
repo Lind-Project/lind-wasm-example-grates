@@ -263,6 +263,53 @@ pub extern "C" fn fcntl_handler(
 }
 
 // =====================================================================
+//  getdents (syscall 78)
+//
+//  arg1 = fd, arg1cage = cage_id
+//  arg2 = dirent buffer ptr, arg2cage = cage that owns the buffer
+//  arg3 = count
+// =====================================================================
+
+pub extern "C" fn getdents_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let cage_id = arg1cage;
+    let fd = arg1;
+    let count = arg3 as usize;
+    let this_cage = getcageid();
+    let mut buf = vec![0u8; count];
+
+    let ret = imfs::with_imfs(|state| state.getdents(cage_id, fd, &mut buf));
+
+    if ret > 0 && arg2 != 0 {
+        let _ = copy_data_between_cages(
+            this_cage,
+            arg2cage,
+            buf.as_ptr() as u64,
+            this_cage,
+            arg2,
+            arg2cage,
+            ret as u64,
+            0,
+        );
+    }
+
+    ret
+}
+
+// =====================================================================
 //  unlink (syscall 87)
 //
 //  arg1 = pathname ptr, arg1cage = cage_id

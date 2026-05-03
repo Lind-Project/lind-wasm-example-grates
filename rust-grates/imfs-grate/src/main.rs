@@ -60,6 +60,7 @@ fn main() {
         .register(SYS_WRITE, handlers::write_handler)
         .register(SYS_LSEEK, handlers::lseek_handler)
         .register(SYS_FCNTL, handlers::fcntl_handler)
+        .register(SYS_GETDENTS, handlers::getdents_handler)
         .register(SYS_UNLINK, handlers::unlink_handler)
         .register(SYS_LINK, handlers::link_handler)
         .register(SYS_PREAD, handlers::pread_handler)

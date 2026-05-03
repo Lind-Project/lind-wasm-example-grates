@@ -38,6 +38,8 @@ pub struct FDInfo {
     offset: i64,
 }
 
+const DIRENT64_FIXED_SIZE: usize = 8 + 8 + 2 + 1;
+
 /// The complete IMFS state.
 pub struct ImfsState {
     pub nodes: Vec<Node>,
@@ -82,6 +84,49 @@ pub fn init() {
 }
 
 impl ImfsState {
+    fn dirent_type(&self, node_idx: usize) -> u8 {
+        let mut idx = node_idx;
+
+        while let NodeInfo::Lnk { target } = &self.nodes[idx].info {
+            idx = *target;
+        }
+
+        match self.nodes[idx].node_type {
+            NodeType::Dir => libc::DT_DIR,
+            NodeType::Reg => libc::DT_REG,
+            NodeType::Lnk => libc::DT_LNK,
+            _ => libc::DT_UNKNOWN,
+        }
+    }
+
+    fn dirent_reclen(name_len: usize) -> usize {
+        let reclen = DIRENT64_FIXED_SIZE + name_len + 1;
+        (reclen + 7) & !7
+    }
+
+    fn write_dirent_record(
+        buf: &mut [u8],
+        ino: u64,
+        next_offset: u64,
+        d_type: u8,
+        name: &str,
+    ) -> usize {
+        let reclen = Self::dirent_reclen(name.len());
+        let record = &mut buf[..reclen];
+
+        record.fill(0);
+        record[0..8].copy_from_slice(&ino.to_ne_bytes());
+        record[8..16].copy_from_slice(&next_offset.to_ne_bytes());
+        record[16..18].copy_from_slice(&(reclen as u16).to_ne_bytes());
+        record[18] = d_type;
+
+        let name_start = DIRENT64_FIXED_SIZE;
+        let name_end = name_start + name.len();
+        record[name_start..name_end].copy_from_slice(name.as_bytes());
+
+        reclen
+    }
+
     // =====================================================================
     //  Node management
     // =====================================================================
@@ -642,6 +687,65 @@ impl ImfsState {
             }
             _ => -1,
         }
+    }
+
+    /// getdents: serialize directory entries into Linux dirent records.
+    pub fn getdents(&mut self, cage_id: u64, fd: u64, buf: &mut [u8]) -> i32 {
+        let (node_idx, flags) = match self.get_node_and_flags(cage_id, fd) {
+            Ok((n, f)) => (n, f),
+            Err(e) => return e,
+        };
+
+        match &self.nodes[node_idx].info {
+            NodeInfo::Dir { .. } => {}
+            _ => return -20, // ENOTDIR
+        }
+
+        if (flags & O_ACCMODE) == O_WRONLY {
+            return -9; // EBADF
+        }
+
+        let start = self.get_offset(cage_id, fd);
+        if start < 0 {
+            return -22; // EINVAL
+        }
+
+        let children = match &self.nodes[node_idx].info {
+            NodeInfo::Dir { children } => children.clone(),
+            _ => unreachable!(),
+        };
+
+        let mut entry_idx = start as usize;
+        let mut written = 0usize;
+
+        while entry_idx < children.len() {
+            let entry = &children[entry_idx];
+            let reclen = Self::dirent_reclen(entry.name.len());
+
+            if reclen > buf.len() {
+                return -22; // EINVAL
+            }
+            if written + reclen > buf.len() {
+                break;
+            }
+
+            let next_offset = (entry_idx + 1) as u64;
+            let d_type = self.dirent_type(entry.node_idx);
+            let ino = (entry.node_idx as u64) + 1;
+
+            written += Self::write_dirent_record(
+                &mut buf[written..written + reclen],
+                ino,
+                next_offset,
+                d_type,
+                &entry.name,
+            );
+            entry_idx += 1;
+        }
+
+        self.set_offset(cage_id, fd, entry_idx as i64);
+
+        written as i32
     }
 
     /// unlink: remove a file or directory.
