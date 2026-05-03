@@ -280,6 +280,8 @@ pub extern "C" fn fork_handler(
         if helpers::is_cage_clamped(arg1cage) {
             helpers::clone_cage_routes(arg1cage, child_cage_id);
         }
+
+        helpers::clone_cage_cwd(arg1cage, child_cage_id);
     }
 
     child_cage_id as i32
@@ -337,7 +339,9 @@ pub fn register_lifecycle_handlers(cage_id: u64) {
             Err(e) => {
                 log!(
                     "failed to register lifecycle handler {} on cage {}: {:?}",
-                    syscall_nr, cage_id, e
+                    syscall_nr,
+                    cage_id,
+                    e
                 );
             }
         }

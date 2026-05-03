@@ -31,7 +31,7 @@ macro_rules! define_path_handler {
             let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
             let nr = match helpers::get_route(arg1cage, $sysno) {
-                Some(alt) => match helpers::read_path_from_cage(arg1, arg1cage) {
+                Some(alt) => match helpers::resolve_path_from_cage(arg2cage, arg1, arg1cage) {
                     Some(path) if helpers::path_matches_prefix(&path) => alt,
                     _ => $sysno,
                 },
@@ -51,10 +51,49 @@ define_path_handler!(ns_rmdir_handler, SYS_RMDIR);
 define_path_handler!(ns_rename_handler, SYS_RENAME);
 define_path_handler!(ns_truncate_handler, SYS_TRUNCATE);
 define_path_handler!(ns_chmod_handler, SYS_CHMOD);
-define_path_handler!(ns_chdir_handler, SYS_CHDIR);
 define_path_handler!(ns_readlink_handler, SYS_READLINK);
 define_path_handler!(ns_unlinkat_handler, SYS_UNLINKAT);
 define_path_handler!(ns_readlinkat_handler, SYS_READLINKAT);
+
+pub extern "C" fn ns_chdir_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    let resolved_path = helpers::resolve_path_from_cage(arg2cage, arg1, arg1cage);
+    let matches = resolved_path
+        .as_ref()
+        .map(|path| helpers::path_matches_prefix(path))
+        .unwrap_or(false);
+
+    let nr = match helpers::get_route(arg1cage, SYS_CHDIR) {
+        Some(alt) if matches => alt,
+        _ => SYS_CHDIR,
+    };
+
+    let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
+
+    if ret == 0 {
+        if let Some(path) = resolved_path {
+            helpers::set_cage_cwd(arg2cage, path);
+        }
+    }
+
+    ret
+}
 
 // =====================================================================
 //  FD-BASED SYSCALL HANDLERS
@@ -146,7 +185,7 @@ pub extern "C" fn ns_open_handler(
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
     // Check if the path matches the clamped prefix.
-    let matches = helpers::read_path_from_cage(arg1, arg1cage)
+    let matches = helpers::resolve_path_from_cage(arg2cage, arg1, arg1cage)
         .map(|p| helpers::path_matches_prefix(&p))
         .unwrap_or(false);
 
@@ -374,6 +413,7 @@ pub extern "C" fn ns_clone_handler(
         // Route cloning only — fdtables copy is handled by the lifecycle
         // fork_handler to avoid double-init when inner grates also handle fork.
         helpers::clone_cage_routes(arg1cage, child_cage_id);
+        helpers::clone_cage_cwd(arg1cage, child_cage_id);
     }
 
     ret
