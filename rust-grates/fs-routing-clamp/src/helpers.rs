@@ -7,6 +7,7 @@
 //!   - Helpers for reading paths from cage memory and making syscalls
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use grate_rs::{copy_data_between_cages, make_threei_call};
@@ -56,10 +57,21 @@ impl NSClampState {
 }
 
 pub static CLAMP_STATE: Mutex<Option<NSClampState>> = Mutex::new(None);
+static LOGGING_ENABLED: AtomicBool = AtomicBool::new(false);
+
+#[macro_export]
+macro_rules! log {
+    ($($arg:tt)*) => {
+        if $crate::helpers::logging_enabled() {
+            println!($($arg)*);
+        }
+    };
+}
 
 /// Initialize all global state. Called once at startup.
-pub fn init_globals(ns_cage_id: u64, prefix: String) {
+pub fn init_globals(ns_cage_id: u64, prefix: String, logging_enabled: bool) {
     *CLAMP_STATE.lock().unwrap() = Some(NSClampState::new(ns_cage_id, prefix));
+    LOGGING_ENABLED.store(logging_enabled, Ordering::Relaxed);
 }
 
 // =====================================================================
@@ -101,6 +113,10 @@ pub fn alloc_alt_syscall() -> u64 {
     let nr = s.alt_allocator;
     s.alt_allocator += 1;
     nr
+}
+
+pub fn logging_enabled() -> bool {
+    LOGGING_ENABLED.load(Ordering::Relaxed)
 }
 
 // =====================================================================
