@@ -502,14 +502,31 @@ pub extern "C" fn poll_handler(
 
         // Write the modified pollfd[] back to the cage so the kernel
         // can read it, then forward.
-        let _ = copy_data_between_cages(
-            this_cage, arg1cage,
-            pollfds.as_ptr() as u64, this_cage,
-            arg1, arg1cage,
-            bytes, 0,
-        );
-        let args = [arg1, arg2, kernel_timeout as u64, arg4, arg5, arg6];
-        let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+        // let _ = copy_data_between_cages(
+        //     this_cage, arg1cage,
+        //     pollfds.as_ptr() as u64, this_cage,
+        //     arg1, arg1cage,
+        //     bytes, 0,
+        // );
+        // let args = [arg1, arg2, kernel_timeout as u64, arg4, arg5, arg6];
+        let args = [
+            pollfds.as_mut_ptr() as u64,
+            arg2,
+            kernel_timeout as u64,
+            arg4,
+            arg5,
+            arg6,
+        ];
+
+        // let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+        let arg_cages = [
+            this_cage,   // pollfds pointer belongs to ipc-grate cage
+            arg2cage,
+            arg3cage,
+            arg4cage,
+            arg5cage,
+            arg6cage,
+        ];
         let kernel_ret = forward_syscall(SYS_POLL, cage_id, &args, &arg_cages);
         if kernel_ret < 0 {
             return kernel_ret;
@@ -518,12 +535,12 @@ pub extern "C" fn poll_handler(
 
         // Read back the cage's modified pollfd[] (kernel filled in
         // revents for the kernel fds; IPC fds have fd=-1 so revents=0).
-        let _ = copy_data_between_cages(
-            this_cage, arg1cage,
-            arg1, arg1cage,
-            pollfds.as_mut_ptr() as u64, this_cage,
-            bytes, 0,
-        );
+        // let _ = copy_data_between_cages(
+        //     this_cage, arg1cage,
+        //     arg1, arg1cage,
+        //     pollfds.as_mut_ptr() as u64, this_cage,
+        //     bytes, 0,
+        // );
     }
 
     // Restore original fd values for ALL entries (kernel saw runtime vfds
