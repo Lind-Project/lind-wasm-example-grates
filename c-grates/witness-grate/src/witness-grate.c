@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <semaphore.h>
 #include <sys/mman.h>
+#include <stdarg.h>
 
 #include "ed25519.h"
 
@@ -35,6 +36,18 @@
 
 static FILE *witness_log = NULL;
 static pthread_mutex_t witness_log_lock = PTHREAD_MUTEX_INITIALIZER;
+static int witness_debug_enabled = 0;
+
+static void debug_printf(const char *fmt, ...) {
+    if (!witness_debug_enabled) {
+        return;
+    }
+
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+}
 
 static void init_witness_log(void) {
     if (witness_log != NULL) {
@@ -56,7 +69,7 @@ static void init_witness_log(void) {
     fflush(witness_log);
 }
 
-static void log_line(const char *line) {
+static void log_line_to_file(const char *line) {
     pthread_mutex_lock(&witness_log_lock);
 
     init_witness_log();
@@ -185,7 +198,7 @@ static void emit_public_key_for_cage(uint64_t cageid, const uint8_t pubkey[PUBKE
     bytes_to_hex(pubkey, PUBKEY_LEN, pub_hex, sizeof(pub_hex));
     snprintf(line, sizeof(line), "PUBKEY cage=%llu %s",
              (unsigned long long)cageid, pub_hex);
-    log_line(line);
+    log_line_to_file(line);
 }
 
 /* ============================================================
@@ -219,7 +232,7 @@ static witness_ctx_t *alloc_witness_ctx_locked(uint64_t cageid) {
         }
     }
 
-    fprintf(stderr, "[WitnessGrate] witness ctx table full\n");
+    debug_printf("[WitnessGrate] witness ctx table full\n");
     assert(0);
     return NULL;
 }
@@ -343,7 +356,7 @@ static void emit_signed_record(const syscall_record_t *rec,
              (unsigned long long)rec->arg_cages[5],
              sig_hex);
 
-    log_line(line);
+    log_line_to_file(line);
 }
 
 /* ============================================================
@@ -509,7 +522,7 @@ static void register_witness_handlers(int cageid, int grateid) {
         assert(0);
     }
 
-    printf("[WitnessGrate] Registered handlers for cage=%d via grate=%d\n",
+    debug_printf("[WitnessGrate] Registered handlers for cage=%d via grate=%d\n",
            cageid, grateid);
 }
 
@@ -540,7 +553,7 @@ int main(int argc, char *argv[]) {
     init_witness_runtime();
 
     grateid = getpid();
-    printf("[WitnessGrate] Start grate pid=%d\n", grateid);
+    debug_printf("[WitnessGrate] Start grate pid=%d\n", grateid);
 
     /* shared unnamed semaphore for parent-child sync after fork */
     start_sem = mmap(NULL, sizeof(sem_t),
@@ -582,11 +595,11 @@ int main(int argc, char *argv[]) {
     {
         int cageid = pid;
 
-        printf("[WitnessGrate] Parent preparing child cage=%d with grate=%d\n",
+        debug_printf("[WitnessGrate] Parent preparing child cage=%d with grate=%d\n",
                cageid, grateid);
 
         (void)get_or_create_witness_ctx((uint64_t)cageid);
-        log_line("=== witness keypair generated for cage ===");
+        log_line_to_file("=== witness keypair generated for cage ===");
 
         register_witness_handlers(cageid, grateid);
 
@@ -610,7 +623,7 @@ int main(int argc, char *argv[]) {
 
     munmap(start_sem, sizeof(sem_t));
 
-    log_line("=== witness grate finished successfully ===");
-    printf("[WitnessGrate] PASS\n");
+    log_line_to_file("=== witness grate finished successfully ===");
+    debug_printf("[WitnessGrate] PASS\n");
     return 0;
 }
