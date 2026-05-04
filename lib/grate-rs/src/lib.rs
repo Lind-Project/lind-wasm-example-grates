@@ -259,10 +259,20 @@ pub fn getcageid() -> u64 {
 ///
 /// In Lind, `arg1` of SYS_CLONE is a pointer to `struct clone_args` in the
 /// calling cage's memory. The `flags` field is the first u64 in the struct.
-/// If `CLONE_VM` (0x100) is set, it's a thread; otherwise it's a process fork.
 ///
-/// Grates should only copy fdtables on process forks, not thread clones
-/// (threads share the parent's fd table).
+/// We check `CLONE_THREAD` rather than `CLONE_VM` because `posix_spawn`
+/// (used by libc `popen`, `system`, etc.) issues
+/// `clone(CLONE_VM | CLONE_VFORK | SIGCHLD)` — vfork-style — which sets
+/// `CLONE_VM` but is NOT a thread.  Treating it as a thread skips the
+/// per-cage state setup grates need to do for the spawned process,
+/// breaking pipes/fdtables for popen children.
+///
+/// Real threads (pthread_create) set `CLONE_THREAD`; vfork-style spawns
+/// do not.  `CLONE_FILES` would be an equivalent check (threads share
+/// the fd table, vfork-spawns don't).
+///
+/// Grates should only skip per-cage state copy on actual thread clones,
+/// not on vfork-style process spawns.
 pub fn is_thread_clone(clone_args_ptr: u64, clone_args_cage: u64) -> bool {
     let grate_cage = getcageid();
     let mut flags: u64 = 0;
@@ -276,7 +286,7 @@ pub fn is_thread_clone(clone_args_ptr: u64, clone_args_cage: u64) -> bool {
         8,
         0,
     );
-    (flags & constants::process::CLONE_VM) != 0
+    (flags & constants::process::CLONE_THREAD) != 0
 }
 
 /// Dispatch function required by 3i to invoke registered syscall handlers.

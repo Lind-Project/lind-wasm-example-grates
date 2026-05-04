@@ -1,9 +1,17 @@
+//! Linux x86_64 syscall numbers, kept in sync with
+//! `lind-wasm/src/sysdefs/src/constants/syscall_const.rs`,
+//! `glibc/lind_syscall_num.h`, and the RawPOSIX dispatcher.
+//!
+//! Source of truth: Linux x86_64 syscall table
+//!   https://github.com/torvalds/linux/blob/v6.16-rc1/arch/x86/entry/syscalls/syscall_64.tbl
+
 pub const SYS_READ: u64 = 0;
 pub const SYS_WRITE: u64 = 1;
 pub const SYS_OPEN: u64 = 2;
 pub const SYS_CLOSE: u64 = 3;
-pub const SYS_XSTAT: u64 = 4;
-pub const SYS_FXSTAT: u64 = 5;
+pub const SYS_STAT: u64 = 4;
+pub const SYS_FSTAT: u64 = 5;
+pub const SYS_LSTAT: u64 = 6;
 pub const SYS_POLL: u64 = 7;
 pub const SYS_LSEEK: u64 = 8;
 pub const SYS_MMAP: u64 = 9;
@@ -29,7 +37,7 @@ pub const SYS_SHMCTL: u64 = 31;
 pub const SYS_DUP: u64 = 32;
 pub const SYS_DUP2: u64 = 33;
 
-pub const SYS_NANOSLEEP_TIME64: u64 = 35;
+pub const SYS_NANOSLEEP: u64 = 35;
 pub const SYS_SETITIMER: u64 = 38;
 pub const SYS_GETPID: u64 = 39;
 
@@ -74,6 +82,7 @@ pub const SYS_RMDIR: u64 = 84;
 
 pub const SYS_LINK: u64 = 86;
 pub const SYS_UNLINK: u64 = 87;
+pub const SYS_SYMLINK: u64 = 88;
 pub const SYS_READLINK: u64 = 89;
 pub const SYS_CHMOD: u64 = 90;
 pub const SYS_FCHMOD: u64 = 91;
@@ -83,6 +92,7 @@ pub const SYS_GETGID: u64 = 104;
 pub const SYS_GETEUID: u64 = 107;
 pub const SYS_GETEGID: u64 = 108;
 pub const SYS_GETPPID: u64 = 110;
+pub const SYS_GETPGID: u64 = 121;
 pub const SYS_MKNOD: u64 = 133;
 pub const SYS_STATFS: u64 = 137;
 pub const SYS_FSTATFS: u64 = 138;
@@ -91,15 +101,31 @@ pub const SYS_GETHOSTNAME: u64 = 170;
 pub const SYS_FUTEX: u64 = 202;
 pub const SYS_EPOLL_CREATE: u64 = 213;
 pub const SYS_CLOCK_GETTIME: u64 = 228;
+pub const SYS_EXIT_GROUP: u64 = 231;
 pub const SYS_EPOLL_WAIT: u64 = 232;
 pub const SYS_EPOLL_CTL: u64 = 233;
+pub const SYS_OPENAT: u64 = 257;
 pub const SYS_UNLINKAT: u64 = 263;
+pub const SYS_SYMLINKAT: u64 = 266;
 pub const SYS_READLINKAT: u64 = 267;
+pub const SYS_PPOLL: u64 = 271;
 pub const SYS_SYNC_FILE_RANGE: u64 = 277;
+pub const SYS_ACCEPT4: u64 = 288;
 pub const SYS_EPOLL_CREATE1: u64 = 291;
 pub const SYS_DUP3: u64 = 292;
 pub const SYS_PIPE2: u64 = 293;
+pub const SYS_PREADV: u64 = 295;
+pub const SYS_PWRITEV: u64 = 296;
+pub const SYS_PRLIMIT64: u64 = 302;
 pub const SYS_GETRANDOM: u64 = 318;
+
+// --- Backwards-compat aliases ---
+//
+// Older grates referenced SYS_XSTAT / SYS_FXSTAT / SYS_NANOSLEEP_TIME64.
+// Keep these as aliases so existing code keeps compiling.
+pub const SYS_XSTAT: u64 = SYS_STAT;
+pub const SYS_FXSTAT: u64 = SYS_FSTAT;
+pub const SYS_NANOSLEEP_TIME64: u64 = SYS_NANOSLEEP;
 
 /* Lind-specific syscalls (not part of the Linux syscall table) */
 pub const SYS_REGISTER_HANDLER: u64 = 1001;

@@ -176,6 +176,7 @@ type = "rust"
 
 [[grate.tests]]
 test_src = "test/ipc_test.c"
+files = ["test/pipe_stdin_reader.c", "test/file_collision_reader.c"]
 timeout = 120
 
 # ── Net Routing Clamp (Rust) ────────────────────────────────────────
