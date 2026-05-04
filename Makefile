@@ -10,6 +10,7 @@
 #   make c/<name>                # build a C grate
 #   make rust/<name>             # build a Rust grate
 #   make all                     # build all grates
+#   make install                 # copy built .cwasm grates into lindfs/grates
 #   make clean                   # remove build artifacts
 
 SHELL := /bin/bash
@@ -27,7 +28,7 @@ ALL_TARGETS := $(C_TARGETS) $(RUST_TARGETS)
 # All demo directories
 DEMOS := $(shell find demos -name Makefile -exec dirname {} \; 2>/dev/null | sort)
 
-.PHONY: all test list clean clean-lindfs help demos demos-build demos-run $(ALL_TARGETS)
+.PHONY: all test list install clean clean-lindfs help demos demos-build demos-run $(ALL_TARGETS)
 
 help:
 	@echo "Usage:"
@@ -40,6 +41,7 @@ help:
 	@echo "  make demos                     Build and run all demos"
 	@echo "  make demos-build               Build all demos"
 	@echo "  make demos-run                 Run all demos (build first)"
+	@echo "  make install                   Copy built .cwasm grates into lindfs/grates"
 	@echo "  make clean                     Remove build artifacts"
 	@echo ""
 	@echo "Available grates:"
@@ -102,15 +104,46 @@ endif
 list:
 	@./test/run_tests.sh --list
 
+install:
+	@LINDFS="$${LINDFS:-$${LIND_WASM_ROOT:-$$HOME/lind-wasm}/lindfs}"; \
+	INSTALL_DIR="$$LINDFS/grates"; \
+	mkdir -p "$$INSTALL_DIR"; \
+	echo "Installing .cwasm files to $$INSTALL_DIR"; \
+	echo ""; \
+	echo "Installing Rust grate outputs..."; \
+	for g in $(RUST_GRATES); do \
+		files=$$(find "$$g" -name "*.cwasm" 2>/dev/null); \
+		if [ -n "$$files" ]; then \
+			echo "  $$g"; \
+			while IFS= read -r f; do \
+				echo "    $$(basename "$$f")"; \
+				cp "$$f" "$$INSTALL_DIR/"; \
+			done <<< "$$files"; \
+		fi; \
+	done; \
+	echo "Installing C grate outputs..."; \
+	for g in $(C_GRATES); do \
+		files=$$(find "$$g" -name "*.cwasm" 2>/dev/null); \
+		if [ -n "$$files" ]; then \
+			echo "  $$g"; \
+			while IFS= read -r f; do \
+				echo "    $$(basename "$$f")"; \
+				cp "$$f" "$$INSTALL_DIR/"; \
+			done <<< "$$files"; \
+		fi; \
+	done; \
+	echo "Done."
+
 # Clean lindfs artifacts (called after test and by clean)
 clean-lindfs:
 	@LINDFS="$${LINDFS:-$${LIND_WASM_ROOT:-$$HOME/lind-wasm}/lindfs}"; \
 	rm -rf "$$LINDFS/grates/"*.cwasm 2>/dev/null || true; \
 	rm -f "$$LINDFS/"*.cwasm 2>/dev/null || true; \
-	chmod -R u+w "$$LINDFS/cage-"* 2>/dev/null || true; \
-	rm -rf "$$LINDFS/cage-"* 2>/dev/null || true; \
-	rm -f "$$LINDFS/"*.cfg "$$LINDFS/"*.conf 2>/dev/null || true; \
-	rm -rf "$$LINDFS/certs" 2>/dev/null || true
+	sudo chmod -R u+w "$$LINDFS/"cage-* || true; \
+	sudo rm -rf "$$LINDFS/"cage-* || true; \
+	rm -rf "$$LINDFS/"tmp/* || true; \
+	rm -f "$$LINDFS/"*.cfg "$$LINDFS/"*.conf || true; \
+	rm -rf "$$LINDFS/certs" || true
 
 # Clean everything
 clean: clean-lindfs
