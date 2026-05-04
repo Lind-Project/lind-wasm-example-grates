@@ -143,14 +143,28 @@ impl IpcState {
 /// Check if a fd belongs to the IPC grate (pipe endpoint or socket).
 /// Returns (underfd, fdkind, flags) or None if it's not ours.
 ///
-/// If the cage doesn't exist in fdtables yet (fork in progress on another
-/// runtime thread), spin-waits until it appears.  DashMap's internal locking
-/// provides the cross-thread visibility that std::sync::Mutex and POSIX
-/// semaphores cannot in the Lind WASM environment.
+/// If the cage doesn't exist in fdtables yet, init it empty.  This
+/// covers the vfork-spawn case: posix_spawn issues
+/// `clone(CLONE_VM | CLONE_VFORK)` which suspends the parent inside
+/// the runtime's clone until the child execs.  The child runs
+/// syscalls (dup2/close for redirection, etc.) before our parent
+/// fork_handler returns from forward_syscall and gets to call
+/// `copy_fdtable_for_cage`.  Without on-demand init, the child either
+/// spins forever (with the old spin-wait) or panics in
+/// `translate_virtual_fd`'s `check_cage_exists` assert.
+///
+/// Init-on-demand here means the spawned cage starts with an empty
+/// fdtable in our grate.  IPC operations on inherited fds will not
+/// find entries (so they fall through to forward_syscall, which is
+/// fine — under CLONE_VM the runtime handles fd state via the
+/// shared VM with the parent).
 pub fn lookup_ipc_fd(cage_id: u64, fd: u64) -> Option<(u64, u32, i32)> {
-    // Spin until cage is set up by fork_handler on the parent's thread.
-    while !fdtables::check_cage_exists(cage_id) {
-        std::thread::yield_now();
+    if !fdtables::check_cage_exists(cage_id) {
+        // Vfork-spawn child may run syscalls before our parent
+        // fork_handler can copy_fdtable_for_cage; init the cage empty
+        // on demand and let the syscall fall through to forward.
+        fdtables::init_empty_cage(cage_id);
+        return None;
     }
     match fdtables::translate_virtual_fd(cage_id, fd) {
         Ok(entry) if entry.fdkind == IPC_PIPE || entry.fdkind == IPC_SOCKET => {
