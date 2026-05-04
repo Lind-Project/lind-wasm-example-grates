@@ -8,11 +8,31 @@
 #   make demos-run               # run all demos (build first!)
 #   make list                    # list available grates
 #   make c/<name>                # build a C grate
-#   make rust/<name>             # build a Rust grate
+#   make rust/<name>             # build a Rust grate (release by default)
+#   make rust/<name> DEBUG=1     # build a Rust grate in debug mode
 #   make all                     # build all grates
 #   make clean                   # remove build artifacts
+#
+# Build profile (Rust grates only):
+#   PROFILE=release   default
+#   PROFILE=debug     or DEBUG=1
 
 SHELL := /bin/bash
+
+# Build profile for Rust grates.  Default is release because debug builds
+# enable Rust's `assert_unsafe_precondition!` checks, which fire on Lind
+# runtime threads (e.g. lind-fork-N) that aren't spawned via std::thread
+# and so have uninitialized TLS — see the ptr::replace null-pointer panic.
+PROFILE ?= release
+ifeq ($(DEBUG),1)
+PROFILE := debug
+endif
+
+ifeq ($(PROFILE),release)
+CARGO_PROFILE_FLAG := --release
+else
+CARGO_PROFILE_FLAG :=
+endif
 
 # All grate directories
 C_GRATES := $(shell find c-grates -name "compile_grate.sh" -exec dirname {} \; 2>/dev/null | sort)
@@ -35,12 +55,16 @@ help:
 	@echo "  make test GRATE=<name>         Run tests for one grate"
 	@echo "  make list                      List available grates"
 	@echo "  make c/<grate-name>            Build a C grate"
-	@echo "  make rust/<grate-name>         Build a Rust grate"
+	@echo "  make rust/<grate-name>         Build a Rust grate (release)"
+	@echo "  make rust/<grate-name> DEBUG=1 Build a Rust grate in debug mode"
 	@echo "  make all                       Build all grates"
 	@echo "  make demos                     Build and run all demos"
 	@echo "  make demos-build               Build all demos"
 	@echo "  make demos-run                 Run all demos (build first)"
 	@echo "  make clean                     Remove build artifacts"
+	@echo ""
+	@echo "Profile (Rust grates): PROFILE=release (default) or DEBUG=1"
+	@echo "  Current: PROFILE=$(PROFILE)"
 	@echo ""
 	@echo "Available grates:"
 	@for g in $(ALL_TARGETS); do echo "  $$g"; done
@@ -59,11 +83,11 @@ endef
 
 define build_rust_grate
 rust/$(notdir $(1)):
-	@echo "Building rust/$(notdir $(1))..."
+	@echo "Building rust/$(notdir $(1)) (profile: $(PROFILE))..."
 	@if [ -f "$(1)/compile_grate.sh" ]; then \
 		cd "$(1)" && bash compile_grate.sh; \
 	else \
-		cd "$(1)" && cargo lind_compile --output-dir grates; \
+		cd "$(1)" && cargo lind_compile $(CARGO_PROFILE_FLAG) --output-dir grates; \
 	fi
 endef
 
