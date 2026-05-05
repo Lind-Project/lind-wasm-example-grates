@@ -371,6 +371,47 @@ pub extern "C" fn chmod_handler(
     imfs::with_imfs(|state| state.chmod(arg2cage, &pathname, mode))
 }
 
+pub extern "C" fn truncate_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let pathname = match copy_path_from_cage(arg1, arg1cage) {
+        Some(p) => p,
+        None => return -14, // EFAULT
+    };
+
+    imfs::with_imfs(|state| state.truncate(arg2cage, &pathname, arg2 as i64))
+}
+
+pub extern "C" fn ftruncate_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    imfs::with_imfs(|state| state.ftruncate(arg1cage, arg1, arg2 as i64))
+}
+
 pub extern "C" fn stat_handler(
     _cageid: u64,
     arg1: u64,
@@ -722,6 +763,24 @@ pub extern "C" fn mkdir_handler(
     let mode = arg2 as u32;
 
     imfs::with_imfs(|state| state.mkdir(arg2cage, &pathname, mode))
+}
+
+pub extern "C" fn mknod_handler(
+    _cageid: u64,
+    _arg1: u64,
+    _arg1cage: u64,
+    _arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    -38 // ENOSYS
 }
 
 // =====================================================================

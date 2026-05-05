@@ -67,6 +67,7 @@ fn main() {
         .register(SYS_UNLINK, handlers::unlink_handler)
         .register(SYS_LINK, handlers::link_handler)
         .register(SYS_RENAME, handlers::rename_handler)
+        .register(SYS_MKNOD, handlers::mknod_handler)
         .register(SYS_PREAD, handlers::pread_handler)
         .register(SYS_PWRITE, handlers::pwrite_handler)
         .register(SYS_MKDIR, handlers::mkdir_handler)
@@ -77,6 +78,8 @@ fn main() {
         .register(SYS_XSTAT, handlers::stat_handler)
         .register(SYS_RMDIR, handlers::rmdir_handler)
         .register(SYS_CHMOD, handlers::chmod_handler)
+        .register(SYS_TRUNCATE, handlers::truncate_handler)
+        .register(SYS_FTRUNCATE, handlers::ftruncate_handler)
         .preexec(|cageid: i32| {
             imfs::with_imfs(|s| {
                 s.cwd_info.insert(cageid as u64, "/".to_string());

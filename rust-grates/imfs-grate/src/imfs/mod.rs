@@ -207,6 +207,19 @@ impl ImfsState {
         }
     }
 
+    fn reclaim_chunk(&mut self, idx: usize) {
+        self.chunks[idx] = Chunk::new();
+        self.chunk_free_list.push(idx);
+    }
+
+    fn reclaim_chunk_chain(&mut self, mut chunk_idx: Option<usize>) {
+        while let Some(ci) = chunk_idx {
+            let next = self.chunks[ci].next;
+            self.reclaim_chunk(ci);
+            chunk_idx = next;
+        }
+    }
+
     // =====================================================================
     //  Path resolution
     // =====================================================================
@@ -393,6 +406,86 @@ impl ImfsState {
         Ok(self.normalize_path_for_cage(cage_id, &format!("{}/{}", base, path)))
     }
 
+    fn open_resolved_path(&mut self, cage_id: u64, norm_path: &str, flags: i32, mode: u32) -> i32 {
+        let node_idx = if let Ok(idx) = self.find_node_result(norm_path) {
+            if (flags & O_EXCL) != 0 && (flags & O_CREAT) != 0 {
+                return -17; // EEXIST
+            }
+            if (flags & O_DIRECTORY) != 0 && self.nodes[idx].node_type != NodeType::Dir {
+                return -20; // ENOTDIR
+            }
+            if self.nodes[idx].node_type == NodeType::Dir {
+                match flags & O_ACCMODE {
+                    O_WRONLY | O_RDWR => return -21, // EISDIR
+                    _ => {}
+                }
+            }
+
+            // Check permissions.
+            let m = self.nodes[idx].mode;
+            match flags & O_ACCMODE {
+                O_RDONLY if m & S_IRUSR == 0 => return -13,
+                O_WRONLY if m & S_IWUSR == 0 => return -13,
+                O_RDWR if m & S_IRUSR == 0 || m & S_IWUSR == 0 => return -13,
+                _ => {}
+            }
+
+            if self.nodes[idx].node_type == NodeType::Reg
+                && (flags & O_TRUNC) != 0
+                && (flags & O_ACCMODE) != O_RDONLY
+            {
+                self.nodes[idx].total_size = 0;
+                self.update_mtime(idx);
+                self.update_ctime(idx);
+            }
+
+            idx
+        } else {
+            if (flags & O_CREAT) == 0 {
+                return -2; // ENOENT
+            }
+            let (parent_idx, filename) = match self.find_parent_and_name_result(norm_path) {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
+            if filename.len() >= MAX_NODE_NAME {
+                return -36; // ENAMETOOLONG
+            }
+            let new_idx = self.create_node(&filename, NodeType::Reg, mode);
+            self.add_child(parent_idx, new_idx);
+            self.update_mtime(parent_idx);
+            self.update_ctime(parent_idx);
+            self.update_mtime(new_idx);
+            self.update_ctime(new_idx);
+            new_idx
+        };
+
+        self.nodes[node_idx].in_use += 1;
+
+        match fdtables::get_unused_virtual_fd(
+            cage_id,
+            IMFS_FDKIND,
+            node_idx as u64,
+            false,
+            0,
+        ) {
+            Ok(vfd) => {
+                let new_fdinfo = Arc::new(Mutex::new(FDInfo {
+                    flags: flags as u64,
+                    offset: 0,
+                }));
+
+                self.fd_info.insert((cage_id, vfd), new_fdinfo.clone());
+
+                vfd as i32
+            }
+            Err(_) => {
+                self.nodes[node_idx].in_use -= 1;
+                -24 // EMFILE
+            }
+        }
+    }
+
     // =====================================================================
     //  Internal chunk read/write
     // =====================================================================
@@ -531,6 +624,74 @@ impl ImfsState {
         }
 
         written
+    }
+
+    fn truncate_node(&mut self, node_idx: usize, new_size: usize) {
+        let old_size = self.nodes[node_idx].total_size;
+
+        if new_size == old_size {
+            return;
+        }
+
+        if new_size > old_size {
+            let zero = [0u8; 1];
+            let _ = self.write_to_node(node_idx, new_size - 1, &zero);
+            return;
+        }
+
+        if new_size == 0 {
+            let head = match &mut self.nodes[node_idx].info {
+                NodeInfo::Reg { head, tail } => {
+                    let old_head = *head;
+                    *head = None;
+                    *tail = None;
+                    old_head
+                }
+                _ => return,
+            };
+
+            self.reclaim_chunk_chain(head);
+            self.nodes[node_idx].total_size = 0;
+            return;
+        }
+
+        let mut remaining = new_size;
+        let mut current = match &self.nodes[node_idx].info {
+            NodeInfo::Reg { head, .. } => *head,
+            _ => return,
+        };
+
+        let mut last_keep = None;
+
+        while let Some(ci) = current {
+            if remaining > CHUNK_SIZE {
+                remaining -= CHUNK_SIZE;
+                last_keep = Some(ci);
+                current = self.chunks[ci].next;
+                continue;
+            }
+
+            self.chunks[ci].used = remaining;
+            let to_reclaim = self.chunks[ci].next;
+            self.chunks[ci].next = None;
+            self.reclaim_chunk_chain(to_reclaim);
+
+            if let NodeInfo::Reg { tail, .. } = &mut self.nodes[node_idx].info {
+                *tail = Some(ci);
+            }
+
+            self.nodes[node_idx].total_size = new_size;
+            return;
+        }
+
+        if let Some(ci) = last_keep {
+            self.chunks[ci].next = None;
+            if let NodeInfo::Reg { tail, .. } = &mut self.nodes[node_idx].info {
+                *tail = Some(ci);
+            }
+        }
+
+        self.nodes[node_idx].total_size = new_size;
     }
 
     // Helper function to get the node_idx and flag for a give cageid and fd.
@@ -690,69 +851,7 @@ impl ImfsState {
     /// open: create or open a file. Returns the fd allocated by fdtables.
     pub fn open(&mut self, cage_id: u64, path: &str, flags: i32, mode: u32) -> i32 {
         let norm_path = self.normalize_path_for_cage(cage_id, path);
-        let node_idx = if let Ok(idx) = self.find_node_result(&norm_path) {
-            if (flags & O_EXCL) != 0 && (flags & O_CREAT) != 0 {
-                return -17; // EEXIST
-            }
-            if self.nodes[idx].node_type == NodeType::Dir && (flags & O_DIRECTORY) == 0 {
-                return -21; // EISDIR
-            }
-
-            // Check permissions.
-            let m = self.nodes[idx].mode;
-            match flags & O_ACCMODE {
-                O_RDONLY if m & S_IRUSR == 0 => return -13,
-                O_WRONLY if m & S_IWUSR == 0 => return -13,
-                O_RDWR if m & S_IRUSR == 0 || m & S_IWUSR == 0 => return -13,
-                _ => {}
-            }
-            idx
-        } else {
-            if (flags & O_CREAT) == 0 {
-                return -2; // ENOENT
-            }
-            let (parent_idx, filename) = match self.find_parent_and_name_result(&norm_path) {
-                Ok(p) => p,
-                Err(e) => return e,
-            };
-            if filename.len() >= MAX_NODE_NAME {
-                return -36; // ENAMETOOLONG
-            }
-            let new_idx = self.create_node(&filename, NodeType::Reg, mode);
-            self.add_child(parent_idx, new_idx);
-            self.update_mtime(parent_idx);
-            self.update_ctime(parent_idx);
-            self.update_mtime(new_idx);
-            self.update_ctime(new_idx);
-            new_idx
-        };
-
-        self.nodes[node_idx].in_use += 1;
-
-        // Allocate fd via fdtables. underfd = node index, perfdinfo = flags.
-        match fdtables::get_unused_virtual_fd(
-            cage_id,
-            IMFS_FDKIND,
-            node_idx as u64, // underfd: which node
-            false,
-            0,
-        ) {
-            Ok(vfd) => {
-                // Track the offset for this fd.
-                let new_fdinfo = Arc::new(Mutex::new(FDInfo {
-                    flags: flags as u64,
-                    offset: 0,
-                }));
-
-                self.fd_info.insert((cage_id, vfd), new_fdinfo.clone());
-
-                vfd as i32
-            }
-            Err(_) => {
-                self.nodes[node_idx].in_use -= 1;
-                -24 // EMFILE
-            }
-        }
+        self.open_resolved_path(cage_id, &norm_path, flags, mode)
     }
 
     pub fn openat(&mut self, cage_id: u64, dirfd: i32, path: &str, flags: i32, mode: u32) -> i32 {
@@ -760,61 +859,7 @@ impl ImfsState {
             Ok(path) => path,
             Err(e) => return e,
         };
-
-        let node_idx = if let Ok(idx) = self.find_node_result(&norm_path) {
-            if (flags & O_EXCL) != 0 && (flags & O_CREAT) != 0 {
-                return -17; // EEXIST
-            }
-            if self.nodes[idx].node_type == NodeType::Dir && (flags & O_DIRECTORY) == 0 {
-                return -21; // EISDIR
-            }
-
-            let m = self.nodes[idx].mode;
-            match flags & O_ACCMODE {
-                O_RDONLY if m & S_IRUSR == 0 => return -13,
-                O_WRONLY if m & S_IWUSR == 0 => return -13,
-                O_RDWR if m & S_IRUSR == 0 || m & S_IWUSR == 0 => return -13,
-                _ => {}
-            }
-            idx
-        } else {
-            if (flags & O_CREAT) == 0 {
-                return -2; // ENOENT
-            }
-            let (parent_idx, filename) = match self.find_parent_and_name_result(&norm_path) {
-                Ok(p) => p,
-                Err(e) => return e,
-            };
-            if filename.len() >= MAX_NODE_NAME {
-                return -36; // ENAMETOOLONG
-            }
-            let new_idx = self.create_node(&filename, NodeType::Reg, mode);
-            self.add_child(parent_idx, new_idx);
-            self.update_mtime(parent_idx);
-            self.update_ctime(parent_idx);
-            self.update_mtime(new_idx);
-            self.update_ctime(new_idx);
-            new_idx
-        };
-
-        self.nodes[node_idx].in_use += 1;
-
-        match fdtables::get_unused_virtual_fd(cage_id, IMFS_FDKIND, node_idx as u64, false, 0) {
-            Ok(vfd) => {
-                let new_fdinfo = Arc::new(Mutex::new(FDInfo {
-                    flags: flags as u64,
-                    offset: 0,
-                }));
-
-                self.fd_info.insert((cage_id, vfd), new_fdinfo.clone());
-
-                vfd as i32
-            }
-            Err(_) => {
-                self.nodes[node_idx].in_use -= 1;
-                -24 // EMFILE
-            }
-        }
+        self.open_resolved_path(cage_id, &norm_path, flags, mode)
     }
 
     /// close: close an fd via fdtables and clean up the offset.
@@ -1291,6 +1336,57 @@ impl ImfsState {
         };
 
         self.nodes[node_idx].mode = (self.nodes[node_idx].mode & !0o777) | (mode & 0o777);
+        self.update_ctime(node_idx);
+
+        0
+    }
+
+    pub fn truncate(&mut self, cage_id: u64, path: &str, length: i64) -> i32 {
+        if length < 0 {
+            return -22; // EINVAL
+        }
+
+        let norm_path = self.normalize_path_for_cage(cage_id, path);
+        let node_idx = match self.find_node_result(&norm_path) {
+            Ok(idx) => idx,
+            Err(e) => return e,
+        };
+
+        match self.nodes[node_idx].node_type {
+            NodeType::Reg => {}
+            NodeType::Dir => return -21, // EISDIR
+            _ => return -22,             // EINVAL
+        }
+
+        self.truncate_node(node_idx, length as usize);
+        self.update_mtime(node_idx);
+        self.update_ctime(node_idx);
+
+        0
+    }
+
+    pub fn ftruncate(&mut self, cage_id: u64, fd: u64, length: i64) -> i32 {
+        if length < 0 {
+            return -22; // EINVAL
+        }
+
+        let (node_idx, flags) = match self.get_node_and_flags(cage_id, fd) {
+            Ok((n, f)) => (n, f),
+            Err(e) => return e,
+        };
+
+        if (flags & O_ACCMODE) == O_RDONLY {
+            return -9; // EBADF
+        }
+
+        match self.nodes[node_idx].node_type {
+            NodeType::Reg => {}
+            NodeType::Dir => return -21, // EISDIR
+            _ => return -22,             // EINVAL
+        }
+
+        self.truncate_node(node_idx, length as usize);
+        self.update_mtime(node_idx);
         self.update_ctime(node_idx);
 
         0
