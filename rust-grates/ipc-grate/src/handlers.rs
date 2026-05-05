@@ -1353,10 +1353,14 @@ pub extern "C" fn socket_handler(
 
     if domain == socket::AF_UNIX {
         // AF_UNIX: entirely ours. Create in registry, register in fdtables.
+        // SOCK_CLOEXEC and SOCK_NONBLOCK live in the type arg, mapped to
+        // O_CLOEXEC / O_NONBLOCK respectively (Linux convention).
+        let cloexec = (socktype & O_CLOEXEC) != 0;
+        let perfdinfo = (socktype as u64) & (O_NONBLOCK as u64);
         let socket_id = with_ipc(|s| s.sockets.create_socket(domain, socktype, 0));
 
         return match fdtables::get_unused_virtual_fd(
-            cage_id, socket::IPC_SOCKET, socket_id, false, 0,
+            cage_id, socket::IPC_SOCKET, socket_id, cloexec, perfdinfo,
         ) {
             Ok(fd) => fd as i32,
             Err(_) => {
@@ -1412,16 +1416,20 @@ pub extern "C" fn socketpair_handler(
         s.sockets.create_socketpair(domain, socktype, 0)
     });
 
+    // SOCK_CLOEXEC / SOCK_NONBLOCK in the type arg map to O_CLOEXEC / O_NONBLOCK.
+    let cloexec = (socktype & O_CLOEXEC) != 0;
+    let perfdinfo = (socktype as u64) & (O_NONBLOCK as u64);
+
     // Allocate two fds.
     let fd1 = match fdtables::get_unused_virtual_fd(
-        cage_id, socket::IPC_SOCKET, sid1, false, 0,
+        cage_id, socket::IPC_SOCKET, sid1, cloexec, perfdinfo,
     ) {
         Ok(fd) => fd as i32,
         Err(_) => return -24,
     };
 
     let fd2 = match fdtables::get_unused_virtual_fd(
-        cage_id, socket::IPC_SOCKET, sid2, false, 0,
+        cage_id, socket::IPC_SOCKET, sid2, cloexec, perfdinfo,
     ) {
         Ok(fd) => fd as i32,
         Err(_) => {
@@ -1546,9 +1554,19 @@ pub extern "C" fn bind_handler(
 
                 let addr_string = format!("127.0.0.1:{}", port);
 
+                // Preserve cloexec / perfdinfo from the existing FDKIND_KERNEL entry
+                // so SOCK_CLOEXEC / SOCK_NONBLOCK from the original socket() survive
+                // the take-over.
+                let (preserved_cloexec, preserved_perfdinfo) =
+                    match fdtables::translate_virtual_fd(cage_id, fd) {
+                        Ok(e) => (e.should_cloexec, e.perfdinfo),
+                        Err(_) => (false, 0),
+                    };
+
                 // Overwrite grate vfd's FDKIND_KERNEL entry with IPC_SOCKET.
                 let _ = fdtables::get_specific_virtual_fd(
-                    cage_id, fd, socket::IPC_SOCKET, socket_id, false, 0,
+                    cage_id, fd, socket::IPC_SOCKET, socket_id,
+                    preserved_cloexec, preserved_perfdinfo,
                 );
 
                 return with_ipc(|s| {
@@ -1663,12 +1681,19 @@ pub extern "C" fn connect_handler(
 
             if is_loopback {
                 // Take over: close runtime fd, overwrite grate entry as IPC_SOCKET.
+                // Preserve cloexec / perfdinfo from the existing entry.
+                let (preserved_cloexec, preserved_perfdinfo) =
+                    match fdtables::translate_virtual_fd(cage_id, fd) {
+                        Ok(e) => (e.should_cloexec, e.perfdinfo),
+                        Err(_) => (false, 0),
+                    };
                 if let Some(under) = translate_to_underfd(cage_id, fd) {
                     forward_syscall(SYS_CLOSE, cage_id,
                         &[under, 0, 0, 0, 0, 0], &[cage_id, 0, 0, 0, 0, 0]);
                 }
                 let _ = fdtables::get_specific_virtual_fd(
-                    cage_id, fd, socket::IPC_SOCKET, sid, false, 0,
+                    cage_id, fd, socket::IPC_SOCKET, sid,
+                    preserved_cloexec, preserved_perfdinfo,
                 );
                 with_ipc(|s| { s.pending_inet.remove(&(cage_id, fd)); });
                 sid
@@ -1777,7 +1802,22 @@ pub extern "C" fn accept_handler(
         return -88;
     }
 
-    let nonblocking = (flags & O_NONBLOCK) != 0;
+    // Plain accept() does not set CLOEXEC on the new fd; only accept4 with
+    // SOCK_CLOEXEC does (handled by accept4_handler).
+    accept_ipc_inner(cage_id, socket_id, flags, /*cloexec=*/false, /*extra_perfdinfo=*/0)
+}
+
+/// Body of an IPC-socket accept.  Extracted so accept4_handler can pass
+/// cloexec / SOCK_NONBLOCK from its flags arg without duplicating the
+/// pending-connection wait loop.
+fn accept_ipc_inner(
+    cage_id: u64,
+    socket_id: u64,
+    listen_flags: i32,
+    cloexec: bool,
+    extra_perfdinfo: u64,
+) -> i32 {
+    let nonblocking = (listen_flags & O_NONBLOCK) != 0;
 
     // Get the listening address.
     let listen_addr = with_ipc(|s| {
@@ -1821,7 +1861,7 @@ pub extern "C" fn accept_handler(
 
             // Allocate fd for the new socket.
             match fdtables::get_unused_virtual_fd(
-                cage_id, socket::IPC_SOCKET, new_socket_id, false, 0,
+                cage_id, socket::IPC_SOCKET, new_socket_id, cloexec, extra_perfdinfo,
             ) {
                 Ok(new_fd) => return new_fd as i32,
                 Err(_) => {
@@ -2108,12 +2148,15 @@ pub extern "C" fn accept4_handler(
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
     let info = lookup_ipc_fd(cage_id, fd);
-    if info.is_some() {
-        // Defer to accept_handler for IPC sockets (flags currently ignored).
-        return accept_handler(
-            _cageid, arg1, arg1cage, arg2, arg2cage, arg3, arg3cage,
-            arg4, arg4cage, arg5, arg5cage, arg6, arg6cage,
-        );
+    if let Some((socket_id, fdkind, listen_flags)) = info {
+        if fdkind != socket::IPC_SOCKET {
+            return -88;
+        }
+        // SOCK_CLOEXEC and SOCK_NONBLOCK are in arg4 (Linux convention:
+        // SOCK_CLOEXEC == O_CLOEXEC, SOCK_NONBLOCK == O_NONBLOCK).
+        let cloexec = (arg4 as i32 & O_CLOEXEC) != 0;
+        let extra_perfdinfo = (arg4) & (O_NONBLOCK as u64);
+        return accept_ipc_inner(cage_id, socket_id, listen_flags, cloexec, extra_perfdinfo);
     }
 
     let under = match translate_to_underfd(cage_id, fd) {
