@@ -104,9 +104,9 @@ pub struct Node {
 
     pub info: NodeInfo,
 
-    pub ctim: NodeTime,
-    pub atim: NodeTime,
-    pub mtim: NodeTime,
+    pub ctime: NodeTime,
+    pub atime: NodeTime,
+    pub mtime: NodeTime,
 }
 
 impl Node {
