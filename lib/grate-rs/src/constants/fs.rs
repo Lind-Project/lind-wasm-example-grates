@@ -22,5 +22,11 @@ pub const F_GETFL: i32 = 3;
 
 pub const S_IRUSR: u32 = 0o400;
 pub const S_IWUSR: u32 = 0o200;
+pub const S_IXUSR: u32 = 0o100;
 
 pub const S_IFDIR: u32 = 0o4_0000;
+
+pub const F_OK: i32 = 0;
+pub const R_OK: i32 = 4;
+pub const W_OK: i32 = 2;
+pub const X_OK: i32 = 1;
