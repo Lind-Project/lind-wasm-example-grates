@@ -570,8 +570,9 @@ impl ImfsState {
 
     /// chdir
     pub fn chdir(&mut self, cage_id: u64, path: &str) -> i32 {
+        let norm_path = self.normalize_path_for_cage(cage_id, path);
         if let Some(cwd) = self.cwd_info.get_mut(&cage_id) {
-            *cwd = path.to_string();
+            *cwd = norm_path.to_string();
             0
         } else {
             -1
@@ -588,8 +589,6 @@ impl ImfsState {
         };
 
         let node = &self.nodes[node_idx];
-
-        println!("IMFS_STAT: {:#?}", norm_path);
 
         *statbuf = stat {
             st_dev: 1,
@@ -618,8 +617,6 @@ impl ImfsState {
         };
 
         let node = &self.nodes[node_idx];
-
-        println!("IMFS_FSTAT: {} {:#?}", fd, node.name);
 
         *statbuf = stat {
             st_dev: 1,
