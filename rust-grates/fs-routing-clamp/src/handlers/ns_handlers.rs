@@ -1,5 +1,5 @@
 use crate::helpers;
-use grate_rs::{SyscallHandler, constants::*, is_thread_clone};
+use grate_rs::{SyscallHandler, constants::*, copy_data_between_cages, getcageid, is_thread_clone};
 
 // =====================================================================
 //  PATH-BASED SYSCALL HANDLERS
@@ -31,7 +31,7 @@ macro_rules! define_path_handler {
             let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
             let nr = match helpers::get_route(arg1cage, $sysno) {
-                Some(alt) => match helpers::read_path_from_cage(arg1, arg1cage) {
+                Some(alt) => match helpers::resolve_path_from_cage(arg2cage, arg1, arg1cage) {
                     Some(path) if helpers::path_matches_prefix(&path) => alt,
                     _ => $sysno,
                 },
@@ -46,15 +46,87 @@ macro_rules! define_path_handler {
 define_path_handler!(ns_stat_handler, SYS_XSTAT);
 define_path_handler!(ns_access_handler, SYS_ACCESS);
 define_path_handler!(ns_unlink_handler, SYS_UNLINK);
+define_path_handler!(ns_link_handler, SYS_LINK);
 define_path_handler!(ns_mkdir_handler, SYS_MKDIR);
 define_path_handler!(ns_rmdir_handler, SYS_RMDIR);
 define_path_handler!(ns_rename_handler, SYS_RENAME);
 define_path_handler!(ns_truncate_handler, SYS_TRUNCATE);
 define_path_handler!(ns_chmod_handler, SYS_CHMOD);
-define_path_handler!(ns_chdir_handler, SYS_CHDIR);
+define_path_handler!(ns_mknod_handler, SYS_MKNOD);
 define_path_handler!(ns_readlink_handler, SYS_READLINK);
 define_path_handler!(ns_unlinkat_handler, SYS_UNLINKAT);
 define_path_handler!(ns_readlinkat_handler, SYS_READLINKAT);
+define_path_handler!(ns_statfs_handler, SYS_STATFS);
+
+// =====================================================================
+//  SPECIAL PATH-BASED HANDLERS
+//
+//  These still resolve routing off a pathname, but need extra state
+//  management beyond the simple define_path_handler! passthrough.
+// =====================================================================
+
+pub extern "C" fn ns_chdir_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    let ns_cage = getcageid();
+    let mut buf = vec![0u8; 4096];
+
+    match copy_data_between_cages(
+        ns_cage,
+        arg1cage,
+        arg1,
+        arg1cage,
+        buf.as_mut_ptr() as u64,
+        ns_cage,
+        4096,
+        1,
+    ) {
+        Ok(_) => {}
+        Err(_) => {
+            return -14;
+        }
+    };
+
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(4096);
+    let pathstr = match String::from_utf8(buf[..len].to_vec()).ok() {
+        Some(v) => v,
+        None => {
+            return -14;
+        }
+    };
+
+    let resolved_path: String = helpers::resolve_path_for_cage(arg2cage, &pathstr);
+
+    let matches: bool = helpers::path_matches_prefix(&resolved_path);
+
+    let nr = match helpers::get_route(arg1cage, SYS_CHDIR) {
+        Some(alt) if matches => alt,
+        _ => SYS_CHDIR,
+    };
+
+    let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
+
+    if ret == 0 {
+        helpers::set_cage_cwd(arg2cage, resolved_path);
+    }
+
+    ret
+}
 
 // =====================================================================
 //  FD-BASED SYSCALL HANDLERS
@@ -110,6 +182,8 @@ macro_rules! fd_route_handler {
     };
 }
 
+fd_route_handler!(ns_openat_handler, SYS_OPENAT);
+fd_route_handler!(ns_getdents_handler, SYS_GETDENTS);
 fd_route_handler!(ns_read_handler, SYS_READ);
 fd_route_handler!(ns_write_handler, SYS_WRITE);
 fd_route_handler!(ns_pread_handler, SYS_PREAD);
@@ -119,8 +193,20 @@ fd_route_handler!(ns_fstat_handler, SYS_FXSTAT);
 fd_route_handler!(ns_fcntl_handler, SYS_FCNTL);
 fd_route_handler!(ns_ftruncate_handler, SYS_FTRUNCATE);
 fd_route_handler!(ns_fchmod_handler, SYS_FCHMOD);
+fd_route_handler!(ns_fchdir_handler, SYS_FCHDIR);
 fd_route_handler!(ns_readv_handler, SYS_READV);
 fd_route_handler!(ns_writev_handler, SYS_WRITEV);
+fd_route_handler!(ns_fsync_handler, SYS_FSYNC);
+fd_route_handler!(ns_fdatasync_handler, SYS_FDATASYNC);
+fd_route_handler!(ns_fstatfs_handler, SYS_FSTATFS);
+fd_route_handler!(ns_sync_file_range_handler, SYS_SYNC_FILE_RANGE);
+
+// =====================================================================
+//  SPECIAL FD-BASED HANDLERS
+//
+//  These route using fdtables state but also update fdtables or maintain
+//  additional namespace-grate state as a side effect.
+// =====================================================================
 
 /// open (syscall 2): open a file by path.
 ///
@@ -146,7 +232,7 @@ pub extern "C" fn ns_open_handler(
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
     // Check if the path matches the clamped prefix.
-    let matches = helpers::read_path_from_cage(arg1, arg1cage)
+    let matches = helpers::resolve_path_from_cage(arg2cage, arg1, arg1cage)
         .map(|p| helpers::path_matches_prefix(&p))
         .unwrap_or(false);
 
@@ -374,9 +460,48 @@ pub extern "C" fn ns_clone_handler(
         // Route cloning only — fdtables copy is handled by the lifecycle
         // fork_handler to avoid double-init when inner grates also handle fork.
         helpers::clone_cage_routes(arg1cage, child_cage_id);
+        helpers::clone_cage_cwd(arg1cage, child_cage_id);
     }
 
     ret
+}
+
+pub extern "C" fn ns_getcwd_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    _arg2: u64,
+    arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let ns_cage = getcageid();
+
+    let cwd = helpers::get_cage_cwd(arg2cage);
+
+    let cwd_bytes = cwd.as_bytes();
+    let mut buf = cwd_bytes.to_vec();
+    buf.push(0);
+
+    match copy_data_between_cages(
+        ns_cage,
+        arg1cage,
+        buf.as_ptr() as u64,
+        ns_cage,
+        arg1,
+        arg1cage,
+        4096,
+        1,
+    ) {
+        Ok(_) => return arg1cage as i32,
+        Err(_) => return -14,
+    }
 }
 
 // =====================================================================
@@ -389,20 +514,26 @@ pub extern "C" fn ns_clone_handler(
 
 pub fn get_ns_handler(syscall_nr: u64) -> Option<SyscallHandler> {
     match syscall_nr {
-        // Path-based
+        // Path-based and path-derived
         SYS_OPEN => Some(ns_open_handler),
+        SYS_OPENAT => Some(ns_openat_handler),
         SYS_XSTAT => Some(ns_stat_handler),
+        SYS_GETCWD => Some(ns_getcwd_handler),
         SYS_ACCESS => Some(ns_access_handler),
         SYS_UNLINK => Some(ns_unlink_handler),
+        SYS_LINK => Some(ns_link_handler),
         SYS_MKDIR => Some(ns_mkdir_handler),
         SYS_RMDIR => Some(ns_rmdir_handler),
         SYS_RENAME => Some(ns_rename_handler),
         SYS_TRUNCATE => Some(ns_truncate_handler),
         SYS_CHMOD => Some(ns_chmod_handler),
         SYS_CHDIR => Some(ns_chdir_handler),
+        SYS_MKNOD => Some(ns_mknod_handler),
         SYS_READLINK => Some(ns_readlink_handler),
         SYS_UNLINKAT => Some(ns_unlinkat_handler),
         SYS_READLINKAT => Some(ns_readlinkat_handler),
+        SYS_STATFS => Some(ns_statfs_handler),
+        SYS_GETDENTS => Some(ns_getdents_handler),
 
         // FD-based
         SYS_READ => Some(ns_read_handler),
@@ -415,8 +546,13 @@ pub fn get_ns_handler(syscall_nr: u64) -> Option<SyscallHandler> {
         SYS_FCNTL => Some(ns_fcntl_handler),
         SYS_FTRUNCATE => Some(ns_ftruncate_handler),
         SYS_FCHMOD => Some(ns_fchmod_handler),
+        SYS_FCHDIR => Some(ns_fchdir_handler),
         SYS_READV => Some(ns_readv_handler),
         SYS_WRITEV => Some(ns_writev_handler),
+        SYS_FSYNC => Some(ns_fsync_handler),
+        SYS_FDATASYNC => Some(ns_fdatasync_handler),
+        SYS_FSTATFS => Some(ns_fstatfs_handler),
+        SYS_SYNC_FILE_RANGE => Some(ns_sync_file_range_handler),
 
         // FD-based with fd-tracking side effects
         SYS_DUP => Some(ns_dup_handler),
