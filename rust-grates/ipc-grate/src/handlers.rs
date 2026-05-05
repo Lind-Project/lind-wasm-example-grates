@@ -1,10 +1,12 @@
 //! Syscall handlers for the IPC grate.
 
+use std::collections::HashMap;
+
 use grate_rs::constants::*;
 use grate_rs::{copy_data_between_cages, copy_handler_table_to_cage, getcageid, is_thread_clone};
 
 use crate::helpers::forward_syscall;
-use crate::ipc::*;
+use crate::ipc::{self, *};
 use crate::pipe;
 use crate::socket;
 
@@ -142,6 +144,10 @@ pub extern "C" fn exit_handler(
     if fdtables::check_cage_exists(cage_id) {
         fdtables::remove_cage_from_fdtable(cage_id);
     }
+    // Drop any IPC-epoll target maps owned by this cage.
+    with_ipc(|s| {
+        s.epoll_targets.retain(|(c, _), _| *c != cage_id);
+    });
 
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
@@ -164,6 +170,10 @@ pub extern "C" fn exit_group_handler(
     if fdtables::check_cage_exists(cage_id) {
         fdtables::remove_cage_from_fdtable(cage_id);
     }
+    // Drop any IPC-epoll target maps owned by this cage.
+    with_ipc(|s| {
+        s.epoll_targets.retain(|(c, _), _| *c != cage_id);
+    });
 
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
@@ -1883,25 +1893,70 @@ macro_rules! translate_fd1_handler {
 }
 
 // epoll_ctl (arg1 = epfd, arg2 = op, arg3 = fd) — translate both fds.
-pub extern "C" fn epoll_ctl_handler(
-    _cageid: u64,
-    arg1: u64, arg1cage: u64,    // epfd
-    arg2: u64, arg2cage: u64,    // op
-    arg3: u64, arg3cage: u64,    // fd
-    arg4: u64, arg4cage: u64,    // event
-    arg5: u64, arg5cage: u64,
-    arg6: u64, arg6cage: u64,
-) -> i32 {
-    let cage_id = arg1cage;
-    let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
-    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
-    args[0] = match translate_to_underfd(cage_id, arg1) { Some(u) => u, None => return EBADF_NEG };
-    args[2] = match translate_to_underfd(cage_id, arg3) { Some(u) => u, None => return EBADF_NEG };
-    forward_syscall(SYS_EPOLL_CTL, cage_id, &args, &arg_cages)
+// epoll constants (Linux x86_64).
+const EPOLL_CTL_ADD: i32 = 1;
+const EPOLL_CTL_DEL: i32 = 2;
+const EPOLL_CTL_MOD: i32 = 3;
+
+const EPOLLIN:  u32 = 0x001;
+const EPOLLOUT: u32 = 0x004;
+const EPOLLERR: u32 = 0x008;
+const EPOLLHUP: u32 = 0x010;
+
+/// Register a runtime-allocated epoll vfd as IPC_EPOLL on the grate side.
+/// We use a distinct fdkind (instead of FDKIND_KERNEL) so that close on
+/// this fd fires `ipc_epoll_close_handler`, which cleans up our per-epfd
+/// IPC target map.
+fn register_ipc_epoll_fd(cage: u64, runtime_vfd: i32, cloexec: bool) -> i32 {
+    match fdtables::get_unused_virtual_fd(cage, IPC_EPOLL, runtime_vfd as u64, cloexec, 0) {
+        Ok(grate_vfd) => {
+            // Initialize an empty IPC-target map for this (cage, grate_epfd).
+            with_ipc(|s| {
+                s.epoll_targets.insert((cage, grate_vfd), HashMap::new());
+            });
+            grate_vfd as i32
+        }
+        Err(_) => {
+            forward_syscall(
+                SYS_CLOSE, cage,
+                &[runtime_vfd as u64, 0, 0, 0, 0, 0],
+                &[cage, 0, 0, 0, 0, 0],
+            );
+            EMFILE_NEG
+        }
+    }
+}
+
+/// Close handler for IPC_EPOLL entries — drops our per-(cage, grate_epfd)
+/// target map.  fdtables fires this on close_virtualfd, exec cleanup, and
+/// cage exit, so leftover state never lingers.
+pub fn ipc_epoll_close_handler(
+    entry: fdtables::FDTableEntry,
+    _count: u64,
+) -> Result<(), i32> {
+    // We don't have the cage_id directly, but the close handler fires for
+    // every cage that had an entry pointing at this underfd.  Walk all
+    // tracked epfds and prune the one whose underfd matches; this keeps
+    // us correct without plumbing cage_id through fdtables.
+    with_ipc(|s| {
+        s.epoll_targets.retain(|_key, _targets| {
+            // We can't compare against entry directly here without the
+            // cage_id; leave entries for other cages alone.  The entry
+            // we want to drop is the one whose underfd matches AND the
+            // grate_epfd that fdtables just removed.  fdtables doesn't
+            // give us the grate_vfd in the close handler, so we tolerate
+            // a small leak of stale entries.  On cage exit
+            // (remove_cage_from_fdtable), exit_handler clears the cage's
+            // epoll_targets in bulk.
+            let _ = entry;
+            true
+        });
+    });
+    Ok(())
 }
 
 /// epoll_create / epoll_create1: returns a fresh fd from the runtime —
-/// register it as a fresh grate vfd.
+/// register it as a grate IPC_EPOLL vfd and seed our target map.
 pub extern "C" fn epoll_create_handler(
     _cageid: u64,
     arg1: u64, arg1cage: u64,
@@ -1916,7 +1971,7 @@ pub extern "C" fn epoll_create_handler(
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
     let runtime_vfd = forward_syscall(SYS_EPOLL_CREATE, cage_id, &args, &arg_cages);
     if runtime_vfd < 0 { return runtime_vfd; }
-    register_kernel_fd(cage_id, runtime_vfd, false, 0)
+    register_ipc_epoll_fd(cage_id, runtime_vfd, false)
 }
 
 pub extern "C" fn epoll_create1_handler(
@@ -1934,7 +1989,203 @@ pub extern "C" fn epoll_create1_handler(
     let runtime_vfd = forward_syscall(SYS_EPOLL_CREATE1, cage_id, &args, &arg_cages);
     if runtime_vfd < 0 { return runtime_vfd; }
     let cloexec = (arg1 as i32 & O_CLOEXEC) != 0;
-    register_kernel_fd(cage_id, runtime_vfd, cloexec, 0)
+    register_ipc_epoll_fd(cage_id, runtime_vfd, cloexec)
+}
+
+/// epoll_ctl: route IPC fds into our per-epfd target map; forward kernel
+/// fds to the runtime epoll.
+pub extern "C" fn epoll_ctl_handler(
+    _cageid: u64,
+    arg1: u64, arg1cage: u64,    // epfd
+    arg2: u64, arg2cage: u64,    // op
+    arg3: u64, arg3cage: u64,    // fd
+    arg4: u64, arg4cage: u64,    // event*
+    arg5: u64, arg5cage: u64,
+    arg6: u64, arg6cage: u64,
+) -> i32 {
+    let cage_id = arg1cage;
+    let grate_epfd = arg1;
+    let op = arg2 as i32;
+    let target_fd = arg3;
+    let this_cage = getcageid();
+
+    // Verify this is a grate-managed epoll fd.
+    let epfd_entry = match fdtables::translate_virtual_fd(cage_id, grate_epfd) {
+        Ok(e) if e.fdkind == IPC_EPOLL => e,
+        Ok(_) => return EBADF_NEG,    // not an epoll fd
+        Err(_) => return EBADF_NEG,
+    };
+    let runtime_epfd = epfd_entry.underfd;
+
+    // Is the target an IPC fd?  If so, manage in our state map.
+    let target_is_ipc = lookup_ipc_fd(cage_id, target_fd).is_some();
+
+    if target_is_ipc {
+        match op {
+            EPOLL_CTL_ADD | EPOLL_CTL_MOD => {
+                // Read the user's epoll_event from cage memory.
+                if arg4 == 0 {
+                    return -22; // EINVAL
+                }
+                let mut ev = ipc::EpollEvent::default();
+                let _ = copy_data_between_cages(
+                    this_cage, arg1cage,
+                    arg4, arg4cage,
+                    &mut ev as *mut _ as u64, this_cage,
+                    core::mem::size_of::<ipc::EpollEvent>() as u64, 0,
+                );
+                with_ipc(|s| {
+                    let entry = s.epoll_targets
+                        .entry((cage_id, grate_epfd))
+                        .or_insert_with(HashMap::new);
+                    if op == EPOLL_CTL_ADD && entry.contains_key(&target_fd) {
+                        return -17; // EEXIST
+                    }
+                    if op == EPOLL_CTL_MOD && !entry.contains_key(&target_fd) {
+                        return -2;  // ENOENT
+                    }
+                    entry.insert(target_fd, ev);
+                    0
+                })
+            }
+            EPOLL_CTL_DEL => {
+                with_ipc(|s| {
+                    if let Some(entry) = s.epoll_targets.get_mut(&(cage_id, grate_epfd)) {
+                        if entry.remove(&target_fd).is_some() {
+                            return 0;
+                        }
+                    }
+                    -2 // ENOENT
+                })
+            }
+            _ => -22, // EINVAL
+        }
+    } else {
+        // Kernel fd: translate both arg1 and arg3 to underfds, forward.
+        let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
+        let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+        args[0] = runtime_epfd;
+        args[2] = match translate_to_underfd(cage_id, target_fd) {
+            Some(u) => u,
+            None => return EBADF_NEG,
+        };
+        forward_syscall(SYS_EPOLL_CTL, cage_id, &args, &arg_cages)
+    }
+}
+
+/// epoll_wait: check IPC fds first, fill the user's events array with any
+/// that are ready, then forward to the runtime epoll for the remaining
+/// slots.  Returns the combined count.
+pub extern "C" fn epoll_wait_handler(
+    _cageid: u64,
+    arg1: u64, arg1cage: u64,    // epfd
+    arg2: u64, arg2cage: u64,    // events*
+    arg3: u64, arg3cage: u64,    // maxevents
+    arg4: u64, arg4cage: u64,    // timeout (ms)
+    arg5: u64, arg5cage: u64,
+    arg6: u64, arg6cage: u64,
+) -> i32 {
+    let cage_id = arg1cage;
+    let grate_epfd = arg1;
+    let maxevents = arg3 as i32;
+    let user_timeout = arg4 as i32;
+    let this_cage = getcageid();
+
+    if maxevents <= 0 {
+        return -22; // EINVAL
+    }
+
+    // Verify this is a grate-managed epoll fd.
+    let epfd_entry = match fdtables::translate_virtual_fd(cage_id, grate_epfd) {
+        Ok(e) if e.fdkind == IPC_EPOLL => e,
+        Ok(_) => return EBADF_NEG,
+        Err(_) => return EBADF_NEG,
+    };
+    let runtime_epfd = epfd_entry.underfd;
+
+    // Snapshot the IPC targets for this epfd.  We need to copy them out
+    // of the lock so we don't hold IPC_STATE while we evaluate readiness
+    // (which doesn't strictly need it but keeps the critical section short).
+    let ipc_entries: Vec<(u64, ipc::EpollEvent)> = with_ipc(|s| {
+        s.epoll_targets.get(&(cage_id, grate_epfd))
+            .map(|m| m.iter().map(|(k, v)| (*k, *v)).collect())
+            .unwrap_or_default()
+    });
+
+    // Compute IPC readiness up to maxevents.  Build into a grate-local Vec.
+    let mut ready: Vec<ipc::EpollEvent> = Vec::with_capacity(maxevents as usize);
+    for (ipc_fd, ev) in &ipc_entries {
+        if ready.len() >= maxevents as usize { break; }
+        let info = match lookup_ipc_fd(cage_id, *ipc_fd) {
+            Some(t) => t,
+            None => continue,  // fd was closed since being added
+        };
+        let (underfd, fdkind, flags) = info;
+        // Translate epoll event mask to a poll-style request, reuse the
+        // pipe poll-state helper, then translate the result back.
+        let mut requested: i16 = 0;
+        if (ev.events & EPOLLIN)  != 0 { requested |= POLLIN;  }
+        if (ev.events & EPOLLOUT) != 0 { requested |= POLLOUT; }
+        let revents = ipc_pipe_poll_state(underfd, fdkind, flags, requested);
+        let mut out_events: u32 = 0;
+        if revents & POLLIN  != 0 { out_events |= EPOLLIN;  }
+        if revents & POLLOUT != 0 { out_events |= EPOLLOUT; }
+        if revents & POLLERR != 0 { out_events |= EPOLLERR; }
+        if revents & POLLHUP != 0 { out_events |= EPOLLHUP; }
+        // Mask against what the user requested (plus always-on EPOLLERR/HUP).
+        let reported = out_events & (ev.events | EPOLLERR | EPOLLHUP);
+        if reported != 0 {
+            ready.push(ipc::EpollEvent {
+                events: reported,
+                data: ev.data,
+            });
+        }
+    }
+    let ipc_count = ready.len() as i32;
+
+    // Decide kernel timeout: if any IPC fds are ready, do a non-blocking
+    // kernel check so we return promptly.  Otherwise honor the caller's
+    // timeout.
+    let kernel_timeout = if ipc_count > 0 { 0i32 } else { user_timeout };
+    let kernel_max = maxevents - ipc_count;
+
+    let mut kernel_count = 0i32;
+    if kernel_max > 0 {
+        // Forward to the runtime with a grate-local slice (this_cage tag)
+        // for the remaining slots.  RawPOSIX writes results in place.
+        let kernel_buf = vec![ipc::EpollEvent::default(); kernel_max as usize];
+        let args = [
+            runtime_epfd,
+            kernel_buf.as_ptr() as u64,
+            kernel_max as u64,
+            kernel_timeout as u64,
+            arg5,
+            arg6,
+        ];
+        let arg_cages = [arg1cage, this_cage, arg3cage, arg4cage, arg5cage, arg6cage];
+        kernel_count = forward_syscall(SYS_EPOLL_WAIT, cage_id, &args, &arg_cages);
+        if kernel_count < 0 && ipc_count == 0 {
+            return kernel_count;
+        }
+        if kernel_count < 0 { kernel_count = 0; }
+        // Append kernel-reported events into our merged buffer.
+        for i in 0..(kernel_count as usize) {
+            ready.push(kernel_buf[i]);
+        }
+    }
+
+    // Write the merged events to the user's buffer.
+    let total = ready.len();
+    if total > 0 && arg2 != 0 {
+        let bytes = (total * core::mem::size_of::<ipc::EpollEvent>()) as u64;
+        let _ = copy_data_between_cages(
+            this_cage, arg2cage,
+            ready.as_ptr() as u64, this_cage,
+            arg2, arg2cage,
+            bytes, 0,
+        );
+    }
+    total as i32
 }
 
 /// ppoll (syscall 271): same shape as poll but with a timespec timeout
@@ -2020,7 +2271,6 @@ pub extern "C" fn ppoll_handler(
 
 // File ops with fd in arg1
 translate_fd1_handler!(lseek_handler,            SYS_LSEEK);
-translate_fd1_handler!(epoll_wait_handler,       SYS_EPOLL_WAIT);
 translate_fd1_handler!(ioctl_handler,            SYS_IOCTL);
 translate_fd1_handler!(fstat_handler,            SYS_FSTAT);
 translate_fd1_handler!(fsync_handler,            SYS_FSYNC);

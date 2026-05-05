@@ -40,6 +40,11 @@ fn main() {
         handlers::ipc_socket_close_handler,
         handlers::ipc_socket_close_handler,
     );
+    fdtables::register_close_handlers(
+        ipc::IPC_EPOLL,
+        handlers::ipc_epoll_close_handler,
+        handlers::ipc_epoll_close_handler,
+    );
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
 
