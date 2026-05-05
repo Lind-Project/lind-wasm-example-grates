@@ -1090,6 +1090,72 @@ pub extern "C" fn fcntl_handler(
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, _arg2cage, _arg3cage, arg4cage, arg5cage, arg6cage];
 
+    // F_DUPFD / F_DUPFD_CLOEXEC need the same grate-side bookkeeping as the
+    // dup-family syscalls: allocate a grate vfd ≥ arg3 backed by a fresh
+    // runtime-side dup.  Handle these first so the path is uniform for both
+    // IPC and FDKIND_KERNEL fds.
+    if op == F_DUPFD || op == F_DUPFD_CLOEXEC {
+        let cloexec = op == F_DUPFD_CLOEXEC;
+        let min_fd = arg3;
+
+        let info = lookup_ipc_fd(cage_id, fd);
+        if let Some((pipe_id, fdkind, flags)) = info {
+            let new_fd = match fdtables::get_unused_virtual_fd_from_startfd(
+                cage_id, fdkind, pipe_id, cloexec, flags as u64, min_fd,
+            ) {
+                Ok(fd) => fd as i32,
+                Err(_) => return -24,
+            };
+            // Bump refs for the duplicated entry so the IPC pipe/socket
+            // outlives both the original and the dup.
+            match fdkind {
+                IPC_PIPE => {
+                    if let Some(pipe) = with_ipc(|s| s.get_pipe(pipe_id)) {
+                        if is_read_end(flags) { pipe.incr_read_ref(); }
+                        else { pipe.incr_write_ref(); }
+                    }
+                }
+                socket::IPC_SOCKET => {
+                    with_ipc(|s| {
+                        if let Some(sock) = s.sockets.get(pipe_id) {
+                            if let Some(ref sp) = sock.sendpipe { sp.incr_write_ref(); }
+                            if let Some(ref rp) = sock.recvpipe { rp.incr_read_ref(); }
+                        }
+                    });
+                }
+                _ => {}
+            }
+            return new_fd;
+        }
+
+        // FDKIND_KERNEL or untracked: forward F_DUPFD(_CLOEXEC) to the
+        // runtime to get a fresh runtime vfd ≥ min_fd, then map to a fresh
+        // grate vfd ≥ min_fd.
+        let under = match translate_to_underfd(cage_id, fd) {
+            Some(u) => u,
+            None => return EBADF_NEG,
+        };
+        let mut t = args;
+        t[0] = under;
+        let new_runtime_vfd = forward_syscall(SYS_FCNTL, cage_id, &t, &arg_cages);
+        if new_runtime_vfd < 0 {
+            return new_runtime_vfd;
+        }
+        return match fdtables::get_unused_virtual_fd_from_startfd(
+            cage_id, FDKIND_KERNEL, new_runtime_vfd as u64, cloexec, 0, min_fd,
+        ) {
+            Ok(grate_vfd) => grate_vfd as i32,
+            Err(_) => {
+                forward_syscall(
+                    SYS_CLOSE, cage_id,
+                    &[new_runtime_vfd as u64, 0, 0, 0, 0, 0],
+                    &[cage_id, 0, 0, 0, 0, 0],
+                );
+                EMFILE_NEG
+            }
+        };
+    }
+
     let info = lookup_ipc_fd(cage_id, fd);
     if info.is_none() {
         return forward_with_fd1(SYS_FCNTL, cage_id, args, arg_cages);
@@ -1123,11 +1189,6 @@ pub extern "C" fn fcntl_handler(
             // Set FD_CLOEXEC.
             let _ = fdtables::set_cloexec(cage_id, fd, (arg3 & 1) != 0);
             0
-        }
-        F_DUPFD => {
-            // Like dup but use fd >= arg3.
-            dup_handler(cageid, arg1, arg1cage, arg2, _arg2cage,
-                        arg3, _arg3cage, arg4, arg4cage, arg5, arg5cage, arg6, arg6cage)
         }
         _ => -22, // EINVAL
     }
