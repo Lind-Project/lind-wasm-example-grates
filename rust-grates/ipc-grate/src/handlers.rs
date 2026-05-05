@@ -1314,31 +1314,38 @@ pub extern "C" fn fork_handler(
     let child_cage_id = ret as u64;
 
     if !is_thread {
-        // Snapshot the parent's IPC entries — copy_fdtable_for_cage on
-        // the shared fdtables instance might be a no-op if the child
-        // cage was already created by another grate (RawPOSIX's
-        // fork_syscall does its own copy).  We re-install the IPC
-        // entries explicitly to make sure they're there.
-        let parent_fds = fdtables::return_fdtable_copy(cage_id);
-        let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id);
+        // Copy parent's fdtable to child.  Our grate's fdtables instance
+        // is independent of RawPOSIX's, so this always succeeds (the
+        // child cage doesn't yet exist on our side).  copy_fdtable_for_cage
+        // bumps the internal realfd reference count for each entry but
+        // does NOT fire our registered close handler — so pipe/socket
+        // refcounts stay correct.
+        let copy_ok = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id).is_ok();
 
-        // Make sure cage exists; if RawPOSIX already populated it, the
-        // copy above was a no-op.  Either way we now overlay our IPC
-        // entries explicitly.
-        if !fdtables::check_cage_exists(child_cage_id) {
-            fdtables::init_empty_cage(child_cage_id);
-        }
-
-        for (fd, entry) in &parent_fds {
-            if entry.fdkind == IPC_PIPE || entry.fdkind == socket::IPC_SOCKET {
-                let _ = fdtables::get_specific_virtual_fd(
-                    child_cage_id,
-                    *fd,
-                    entry.fdkind,
-                    entry.underfd,
-                    entry.should_cloexec,
-                    entry.perfdinfo,
-                );
+        // Fallback: if the copy failed for any reason, initialize the
+        // child cage empty and explicitly install just the IPC entries.
+        // We deliberately do NOT use this path on the success case:
+        // get_specific_virtual_fd OVERWRITES whatever's at that fd, which
+        // fires our close handler on the (just-copied) old entry — that
+        // would spuriously decrement read_refs / write_refs and cause
+        // the parent's writes to fail with EPIPE or the child's reads
+        // to see early EOF.
+        if !copy_ok {
+            if !fdtables::check_cage_exists(child_cage_id) {
+                fdtables::init_empty_cage(child_cage_id);
+            }
+            let parent_fds = fdtables::return_fdtable_copy(cage_id);
+            for (fd, entry) in &parent_fds {
+                if entry.fdkind == IPC_PIPE || entry.fdkind == socket::IPC_SOCKET {
+                    let _ = fdtables::get_specific_virtual_fd(
+                        child_cage_id,
+                        *fd,
+                        entry.fdkind,
+                        entry.underfd,
+                        entry.should_cloexec,
+                        entry.perfdinfo,
+                    );
+                }
             }
         }
 
