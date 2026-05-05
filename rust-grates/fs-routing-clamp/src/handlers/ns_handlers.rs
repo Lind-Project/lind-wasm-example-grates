@@ -58,6 +58,13 @@ define_path_handler!(ns_unlinkat_handler, SYS_UNLINKAT);
 define_path_handler!(ns_readlinkat_handler, SYS_READLINKAT);
 define_path_handler!(ns_statfs_handler, SYS_STATFS);
 
+// =====================================================================
+//  SPECIAL PATH-BASED HANDLERS
+//
+//  These still resolve routing off a pathname, but need extra state
+//  management beyond the simple define_path_handler! passthrough.
+// =====================================================================
+
 pub extern "C" fn ns_chdir_handler(
     _cageid: u64,
     arg1: u64,
@@ -176,6 +183,7 @@ macro_rules! fd_route_handler {
 }
 
 fd_route_handler!(ns_openat_handler, SYS_OPENAT);
+fd_route_handler!(ns_getdents_handler, SYS_GETDENTS);
 fd_route_handler!(ns_read_handler, SYS_READ);
 fd_route_handler!(ns_write_handler, SYS_WRITE);
 fd_route_handler!(ns_pread_handler, SYS_PREAD);
@@ -188,11 +196,17 @@ fd_route_handler!(ns_fchmod_handler, SYS_FCHMOD);
 fd_route_handler!(ns_fchdir_handler, SYS_FCHDIR);
 fd_route_handler!(ns_readv_handler, SYS_READV);
 fd_route_handler!(ns_writev_handler, SYS_WRITEV);
-fd_route_handler!(ns_getdents_handler, SYS_GETDENTS);
 fd_route_handler!(ns_fsync_handler, SYS_FSYNC);
 fd_route_handler!(ns_fdatasync_handler, SYS_FDATASYNC);
 fd_route_handler!(ns_fstatfs_handler, SYS_FSTATFS);
 fd_route_handler!(ns_sync_file_range_handler, SYS_SYNC_FILE_RANGE);
+
+// =====================================================================
+//  SPECIAL FD-BASED HANDLERS
+//
+//  These route using fdtables state but also update fdtables or maintain
+//  additional namespace-grate state as a side effect.
+// =====================================================================
 
 /// open (syscall 2): open a file by path.
 ///
@@ -500,12 +514,11 @@ pub extern "C" fn ns_getcwd_handler(
 
 pub fn get_ns_handler(syscall_nr: u64) -> Option<SyscallHandler> {
     match syscall_nr {
-        // Path-based
-        SYS_OPENAT => Some(ns_openat_handler),
-        SYS_GETCWD => Some(ns_getcwd_handler),
-        SYS_GETDENTS => Some(ns_getdents_handler),
+        // Path-based and path-derived
         SYS_OPEN => Some(ns_open_handler),
+        SYS_OPENAT => Some(ns_openat_handler),
         SYS_XSTAT => Some(ns_stat_handler),
+        SYS_GETCWD => Some(ns_getcwd_handler),
         SYS_ACCESS => Some(ns_access_handler),
         SYS_UNLINK => Some(ns_unlink_handler),
         SYS_LINK => Some(ns_link_handler),
@@ -514,12 +527,13 @@ pub fn get_ns_handler(syscall_nr: u64) -> Option<SyscallHandler> {
         SYS_RENAME => Some(ns_rename_handler),
         SYS_TRUNCATE => Some(ns_truncate_handler),
         SYS_CHMOD => Some(ns_chmod_handler),
-        SYS_MKNOD => Some(ns_mknod_handler),
         SYS_CHDIR => Some(ns_chdir_handler),
+        SYS_MKNOD => Some(ns_mknod_handler),
         SYS_READLINK => Some(ns_readlink_handler),
         SYS_UNLINKAT => Some(ns_unlinkat_handler),
         SYS_READLINKAT => Some(ns_readlinkat_handler),
         SYS_STATFS => Some(ns_statfs_handler),
+        SYS_GETDENTS => Some(ns_getdents_handler),
 
         // FD-based
         SYS_READ => Some(ns_read_handler),

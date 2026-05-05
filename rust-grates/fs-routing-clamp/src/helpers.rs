@@ -13,13 +13,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use grate_rs::{GrateError, copy_data_between_cages, make_threei_call};
 
-// These are all the calls that the fs-namespace grate cares about, all the following calls from the target
-// must be routed through the grate regardless of whether the clamp interposed on them.
+// These are all the calls that the fs-namespace grate cares about. All of the
+// following calls from the target must be routed through the grate regardless
+// of whether the clamp interposed on them.
 pub const FS_CALLS: [u64; 40] = [
-    SYS_OPENAT,
-    SYS_GETDENTS,
     SYS_OPEN,
+    SYS_OPENAT,
     SYS_XSTAT,
+    SYS_GETCWD,
     SYS_ACCESS,
     SYS_UNLINK,
     SYS_LINK,
@@ -28,12 +29,13 @@ pub const FS_CALLS: [u64; 40] = [
     SYS_RENAME,
     SYS_TRUNCATE,
     SYS_CHMOD,
-    SYS_MKNOD,
     SYS_CHDIR,
+    SYS_MKNOD,
     SYS_READLINK,
     SYS_UNLINKAT,
     SYS_READLINKAT,
     SYS_STATFS,
+    SYS_GETDENTS,
     // FD-based
     SYS_READ,
     SYS_WRITE,
