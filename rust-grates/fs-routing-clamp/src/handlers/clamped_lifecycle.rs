@@ -49,7 +49,9 @@ pub extern "C" fn register_handler_handler(
 pub fn register_target_handlers(target_cage: u64) -> i32 {
     // These are all the calls that the fs-namespace grate cares about, all the following calls from the target
     // must be routed through the grate regardless of whether the clamp interposed on them.
-    const FS_CALLS: [u64; 29] = [
+    const FS_CALLS: [u64; 32] = [
+        SYS_OPENAT,
+        SYS_GETDENTS,
         SYS_OPEN,
         SYS_XSTAT,
         SYS_ACCESS,
@@ -82,6 +84,7 @@ pub fn register_target_handlers(target_cage: u64) -> i32 {
         SYS_DUP3,
         // Lifecycle — interpose so we track child cages
         SYS_CLONE,
+        SYS_GETCWD,
     ];
 
     let ns_cage = getcageid();
@@ -314,7 +317,7 @@ pub extern "C" fn exit_handler(
     // Forward exit to the runtime.
     helpers::do_syscall(
         arg1cage,
-        SYS_EXIT,
+        SYS_EXIT_GROUP,
         &[arg1, arg2, arg3, arg4, arg5, arg6],
         &[arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
     )
@@ -329,7 +332,7 @@ pub fn register_lifecycle_handlers(cage_id: u64) {
     let handlers: &[(u64, SyscallHandler)] = &[
         (SYS_EXEC, exec_handler),
         (SYS_CLONE, fork_handler),
-        (SYS_EXIT, exit_handler),
+        (SYS_EXIT_GROUP, exit_handler),
         (SYS_REGISTER_HANDLER, register_handler_handler),
     ];
 

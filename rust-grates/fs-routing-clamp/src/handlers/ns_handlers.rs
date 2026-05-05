@@ -1,5 +1,5 @@
 use crate::helpers;
-use grate_rs::{SyscallHandler, constants::*, is_thread_clone};
+use grate_rs::{SyscallHandler, constants::*, copy_data_between_cages, getcageid, is_thread_clone};
 
 // =====================================================================
 //  PATH-BASED SYSCALL HANDLERS
@@ -73,11 +73,44 @@ pub extern "C" fn ns_chdir_handler(
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
-    let resolved_path = helpers::resolve_path_from_cage(arg2cage, arg1, arg1cage);
-    let matches = resolved_path
-        .as_ref()
-        .map(|path| helpers::path_matches_prefix(path))
-        .unwrap_or(false);
+    let ns_cage = getcageid();
+    let mut buf = vec![0u8; 4096];
+
+    match copy_data_between_cages(
+        ns_cage,
+        arg1cage,
+        arg1,
+        arg1cage,
+        buf.as_mut_ptr() as u64,
+        ns_cage,
+        // MAX_PATH_LEN as u64,
+        4096,
+        1,
+    ) {
+        Ok(_) => {}
+        Err(e) => {
+            //println!("CHDIR HUH? {} {} {:#?}", arg1, arg1cage, e);
+            return -14;
+        }
+    };
+
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(4096);
+    let pathstr = match String::from_utf8(buf[..len].to_vec()).ok() {
+        Some(v) => v,
+        None => {
+            let losstr = String::from_utf8_lossy(&buf[..len]).to_string();
+            // println!("CHDIR HUH2? {} {} {} {:#?}", arg1, arg1cage, len, losstr);
+            return -14;
+        }
+    };
+
+    let resolved_path: String = helpers::resolve_path_for_cage(arg2cage, &pathstr);
+
+    // println!(
+    //    "CHDIR(Cage: {}): {:#?}", arg2cage, resolved_path.clone()
+    // );
+
+    let matches: bool = helpers::path_matches_prefix(&resolved_path);
 
     let nr = match helpers::get_route(arg1cage, SYS_CHDIR) {
         Some(alt) if matches => alt,
@@ -87,9 +120,9 @@ pub extern "C" fn ns_chdir_handler(
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
 
     if ret == 0 {
-        if let Some(path) = resolved_path {
-            helpers::set_cage_cwd(arg2cage, path);
-        }
+        //        if let Some(path) = resolved_path {
+        helpers::set_cage_cwd(arg2cage, resolved_path);
+        //       }
     }
 
     ret
@@ -149,6 +182,7 @@ macro_rules! fd_route_handler {
     };
 }
 
+fd_route_handler!(ns_openat_handler, SYS_OPENAT);
 fd_route_handler!(ns_read_handler, SYS_READ);
 fd_route_handler!(ns_write_handler, SYS_WRITE);
 fd_route_handler!(ns_pread_handler, SYS_PREAD);
@@ -160,6 +194,7 @@ fd_route_handler!(ns_ftruncate_handler, SYS_FTRUNCATE);
 fd_route_handler!(ns_fchmod_handler, SYS_FCHMOD);
 fd_route_handler!(ns_readv_handler, SYS_READV);
 fd_route_handler!(ns_writev_handler, SYS_WRITEV);
+fd_route_handler!(ns_getdents_handler, SYS_GETDENTS);
 
 /// open (syscall 2): open a file by path.
 ///
@@ -419,6 +454,51 @@ pub extern "C" fn ns_clone_handler(
     ret
 }
 
+pub extern "C" fn ns_getcwd_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    _arg2: u64,
+    arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let ns_cage = getcageid();
+
+    let cwd = helpers::get_cage_cwd(arg2cage);
+
+    let cwd_bytes = cwd.as_bytes();
+    let mut buf = cwd_bytes.to_vec();
+    buf.push(0);
+
+    //println!(
+    //   "GETCWD(Cage: {}): {:#?}", arg2cage, cwd
+    //);
+
+    match copy_data_between_cages(
+        ns_cage,
+        arg1cage,
+        buf.as_ptr() as u64,
+        // path_ptr,
+        ns_cage,
+        // path_cage,
+        arg1,
+        arg1cage,
+        // MAX_PATH_LEN as u64,
+        4096,
+        1,
+    ) {
+        Ok(_) => return arg1cage as i32,
+        Err(_) => return -14,
+    }
+}
+
 // =====================================================================
 //  HANDLER LOOKUP
 //
@@ -430,6 +510,9 @@ pub extern "C" fn ns_clone_handler(
 pub fn get_ns_handler(syscall_nr: u64) -> Option<SyscallHandler> {
     match syscall_nr {
         // Path-based
+        SYS_OPENAT => Some(ns_openat_handler),
+        SYS_GETCWD => Some(ns_getcwd_handler),
+        SYS_GETDENTS => Some(ns_getdents_handler),
         SYS_OPEN => Some(ns_open_handler),
         SYS_XSTAT => Some(ns_stat_handler),
         SYS_ACCESS => Some(ns_access_handler),

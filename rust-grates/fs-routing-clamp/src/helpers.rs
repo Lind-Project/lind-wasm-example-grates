@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use grate_rs::{copy_data_between_cages, make_threei_call};
+use grate_rs::{GrateError, copy_data_between_cages, make_threei_call};
 
 // =====================================================================
 //  Global state
@@ -370,7 +370,8 @@ pub fn do_syscall(callingcage: u64, nr: u64, args: &[u64; 6], arg_cages: &[u64; 
         0,
     ) {
         Ok(ret) => ret,
-        Err(_) => -1,
+        Err(GrateError::MakeSyscallError(ret)) => ret,
+        _ => -1,
     }
 }
 
@@ -396,6 +397,7 @@ pub fn do_clamp_syscall(callingcage: u64, nr: u64, args: &[u64; 6], arg_cages: &
         0,
     ) {
         Ok(ret) => ret,
-        Err(_) => -1,
+        Err(GrateError::MakeSyscallError(ret)) => ret,
+        _ => -1,
     }
 }
