@@ -26,6 +26,15 @@ const EMFILE_NEG: i32 = -24;
 /// *at family of syscalls; it must NOT be translated.
 const AT_FDCWD: i64 = -100;
 
+/// Translation flag for the cageid argument in `make_threei_call`.  When
+/// the MSB of a per-arg cageid is set, glibc's `TRANSLATE_ARG_TO_HOST`
+/// macro converts the corresponding arg from a wasm32 guest offset to a
+/// host pointer (`__lind_base + uaddr`) before passing it to the host
+/// trampoline.  Use this when forwarding a buffer that lives in our own
+/// wasm linear memory (e.g. a `Vec` we own) — without it, the host
+/// receives a tiny wasm offset and segfaults dereferencing it.
+const ARG_TRANSLATE_FLAG: u64 = 1u64 << 63;
+
 /// Translate a grate virt fd to the runtime's virt fd (the underfd).
 /// Returns None if the fd doesn't exist in our fdtable.
 fn translate_to_underfd(cage: u64, fd: u64) -> Option<u64> {
@@ -511,10 +520,11 @@ pub extern "C" fn poll_handler(
         let kernel_timeout = if total_ready > 0 { 0i32 } else { arg3 as i32 };
 
         // Forward SYS_POLL with a pointer into the grate's own pollfds Vec
-        // tagged with this_cage.  RawPOSIX resolves the pointer against
-        // the grate cage's wasm-memory base and reads/writes the buffer
-        // in place.  This avoids two `copy_data_between_cages` round-trips
-        // (write-back-pre-call + read-back-post-call) per poll.
+        // tagged with `this_cage | ARG_TRANSLATE_FLAG`.  The MSB tells
+        // glibc's `make_threei_call` wrapper to convert the wasm32 offset
+        // to a host pointer before it reaches RawPOSIX.  Without the flag
+        // the host dereferences a tiny wasm offset and segfaults.  This
+        // avoids two `copy_data_between_cages` round-trips per poll.
         let args = [
             pollfds.as_mut_ptr() as u64,
             arg2,
@@ -523,7 +533,10 @@ pub extern "C" fn poll_handler(
             arg5,
             arg6,
         ];
-        let arg_cages = [this_cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+        let arg_cages = [
+            this_cage | ARG_TRANSLATE_FLAG,
+            arg2cage, arg3cage, arg4cage, arg5cage, arg6cage,
+        ];
         let kernel_ret = forward_syscall(SYS_POLL, cage_id, &args, &arg_cages);
         if kernel_ret < 0 {
             return kernel_ret;
@@ -688,11 +701,13 @@ pub extern "C" fn select_handler(
     }
 
     // Forward SYS_SELECT with pointers into the grate's own k_* arrays
-    // tagged with this_cage.  RawPOSIX reads the input bitmaps in place
-    // and writes the result back into the same arrays.  This saves 6
-    // cross-cage copies: 3 input copies pre-call and 3 result copies
-    // post-call (we still do 3 final copies to write the translated
-    // grate-side result into the user's fd_set buffers).
+    // tagged with `this_cage | ARG_TRANSLATE_FLAG`.  The MSB tells
+    // glibc's `make_threei_call` wrapper to convert each wasm32 offset
+    // to a host pointer before it reaches RawPOSIX (without it, the
+    // host dereferences a tiny wasm offset and segfaults).  RawPOSIX
+    // reads the input bitmaps in place and writes the result back into
+    // the same arrays — this saves 6 cross-cage copies (3 input
+    // pre-call and 3 result post-call).
     //
     // Pass 0/this_cage for any set that's NULL — the kernel ignores
     // that set, but we keep the position so the cage tags match.
@@ -701,7 +716,12 @@ pub extern "C" fn select_handler(
     let w_ptr = if have_w { k_write.as_mut_ptr() as u64 } else { 0 };
     let e_ptr = if have_e { k_except.as_mut_ptr() as u64 } else { 0 };
     let args = [runtime_nfds, r_ptr, w_ptr, e_ptr, arg5, arg6];
-    let arg_cages = [arg1cage, this_cage, this_cage, this_cage, arg5cage, arg6cage];
+    let translated_cage = this_cage | ARG_TRANSLATE_FLAG;
+    let arg_cages = [
+        arg1cage,
+        translated_cage, translated_cage, translated_cage,
+        arg5cage, arg6cage,
+    ];
     let kernel_ret = forward_syscall(SYS_SELECT, cage_id, &args, &arg_cages);
     if kernel_ret < 0 {
         return kernel_ret;
@@ -2268,8 +2288,12 @@ pub extern "C" fn epoll_wait_handler(
 
     let mut kernel_count = 0i32;
     if kernel_max > 0 {
-        // Forward to the runtime with a grate-local slice (this_cage tag)
-        // for the remaining slots.  RawPOSIX writes results in place.
+        // Forward to the runtime with a grate-local slice tagged
+        // `this_cage | ARG_TRANSLATE_FLAG` for the remaining slots.  The
+        // MSB tells glibc's `make_threei_call` wrapper to convert the
+        // wasm32 offset to a host pointer before it reaches RawPOSIX —
+        // without it, the host dereferences a tiny wasm offset and
+        // segfaults.  RawPOSIX writes results in place.
         let kernel_buf = vec![ipc::EpollEvent::default(); kernel_max as usize];
         let args = [
             runtime_epfd,
@@ -2279,7 +2303,11 @@ pub extern "C" fn epoll_wait_handler(
             arg5,
             arg6,
         ];
-        let arg_cages = [arg1cage, this_cage, arg3cage, arg4cage, arg5cage, arg6cage];
+        let arg_cages = [
+            arg1cage,
+            this_cage | ARG_TRANSLATE_FLAG,
+            arg3cage, arg4cage, arg5cage, arg6cage,
+        ];
         kernel_count = forward_syscall(SYS_EPOLL_WAIT, cage_id, &args, &arg_cages);
         if kernel_count < 0 && ipc_count == 0 {
             return kernel_count;
@@ -2358,8 +2386,11 @@ pub extern "C" fn ppoll_handler(
     }
 
     // Forward SYS_PPOLL with a pointer into the grate's own pollfds Vec
-    // tagged with this_cage.  Same trick as poll_handler: RawPOSIX reads
-    // and writes the buffer in place, saving two cross-cage copies.
+    // tagged with `this_cage | ARG_TRANSLATE_FLAG`.  The MSB tells
+    // glibc's `make_threei_call` wrapper to convert the wasm32 offset
+    // to a host pointer before it reaches RawPOSIX.  Same trick as
+    // poll_handler: RawPOSIX reads and writes the buffer in place,
+    // saving two cross-cage copies.
     let args = [
         pollfds.as_mut_ptr() as u64,
         arg2,
@@ -2368,7 +2399,10 @@ pub extern "C" fn ppoll_handler(
         arg5,
         arg6,
     ];
-    let arg_cages = [this_cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+    let arg_cages = [
+        this_cage | ARG_TRANSLATE_FLAG,
+        arg2cage, arg3cage, arg4cage, arg5cage, arg6cage,
+    ];
     let kernel_ret = forward_syscall(SYS_PPOLL, cage_id, &args, &arg_cages);
     if kernel_ret < 0 && total_ready == 0 { return kernel_ret; }
     if kernel_ret > 0 { total_ready += kernel_ret; }
