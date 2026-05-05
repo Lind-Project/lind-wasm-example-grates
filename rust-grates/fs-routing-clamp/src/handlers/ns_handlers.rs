@@ -46,11 +46,13 @@ macro_rules! define_path_handler {
 define_path_handler!(ns_stat_handler, SYS_XSTAT);
 define_path_handler!(ns_access_handler, SYS_ACCESS);
 define_path_handler!(ns_unlink_handler, SYS_UNLINK);
+define_path_handler!(ns_link_handler, SYS_LINK);
 define_path_handler!(ns_mkdir_handler, SYS_MKDIR);
 define_path_handler!(ns_rmdir_handler, SYS_RMDIR);
 define_path_handler!(ns_rename_handler, SYS_RENAME);
 define_path_handler!(ns_truncate_handler, SYS_TRUNCATE);
 define_path_handler!(ns_chmod_handler, SYS_CHMOD);
+define_path_handler!(ns_mknod_handler, SYS_MKNOD);
 define_path_handler!(ns_readlink_handler, SYS_READLINK);
 define_path_handler!(ns_unlinkat_handler, SYS_UNLINKAT);
 define_path_handler!(ns_readlinkat_handler, SYS_READLINKAT);
@@ -517,11 +519,13 @@ pub fn get_ns_handler(syscall_nr: u64) -> Option<SyscallHandler> {
         SYS_XSTAT => Some(ns_stat_handler),
         SYS_ACCESS => Some(ns_access_handler),
         SYS_UNLINK => Some(ns_unlink_handler),
+        SYS_LINK => Some(ns_link_handler),
         SYS_MKDIR => Some(ns_mkdir_handler),
         SYS_RMDIR => Some(ns_rmdir_handler),
         SYS_RENAME => Some(ns_rename_handler),
         SYS_TRUNCATE => Some(ns_truncate_handler),
         SYS_CHMOD => Some(ns_chmod_handler),
+        SYS_MKNOD => Some(ns_mknod_handler),
         SYS_CHDIR => Some(ns_chdir_handler),
         SYS_READLINK => Some(ns_readlink_handler),
         SYS_UNLINKAT => Some(ns_unlinkat_handler),

@@ -49,18 +49,20 @@ pub extern "C" fn register_handler_handler(
 pub fn register_target_handlers(target_cage: u64) -> i32 {
     // These are all the calls that the fs-namespace grate cares about, all the following calls from the target
     // must be routed through the grate regardless of whether the clamp interposed on them.
-    const FS_CALLS: [u64; 32] = [
+    const FS_CALLS: [u64; 34] = [
         SYS_OPENAT,
         SYS_GETDENTS,
         SYS_OPEN,
         SYS_XSTAT,
         SYS_ACCESS,
         SYS_UNLINK,
+        SYS_LINK,
         SYS_MKDIR,
         SYS_RMDIR,
         SYS_RENAME,
         SYS_TRUNCATE,
         SYS_CHMOD,
+        SYS_MKNOD,
         SYS_CHDIR,
         SYS_READLINK,
         SYS_UNLINKAT,
