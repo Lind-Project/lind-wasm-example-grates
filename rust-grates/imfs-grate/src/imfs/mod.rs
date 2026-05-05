@@ -92,6 +92,18 @@ pub fn init() {
 }
 
 impl ImfsState {
+    fn update_atime(&mut self, node_idx: usize) {
+        self.nodes[node_idx].atime = NodeTime::now();
+    }
+
+    fn update_mtime(&mut self, node_idx: usize) {
+        self.nodes[node_idx].mtime = NodeTime::now();
+    }
+
+    fn update_ctime(&mut self, node_idx: usize) {
+        self.nodes[node_idx].ctime = NodeTime::now();
+    }
+
     fn dirent_type(&self, node_idx: usize) -> u8 {
         let mut idx = node_idx;
 
@@ -601,9 +613,9 @@ impl ImfsState {
             st_size: node.total_size as u64,
             st_blksize: IMFS_BLOCK_SIZE,
             st_blocks: (node.total_size / IMFS_BLOCK_SIZE as usize) as u32,
-            st_atim: [0, 0],
-            st_mtim: [0, 0],
-            st_ctim: [0, 0],
+            st_atim: node.atime.as_stat_pair(),
+            st_mtim: node.mtime.as_stat_pair(),
+            st_ctim: node.ctime.as_stat_pair(),
         };
 
         0
@@ -629,9 +641,9 @@ impl ImfsState {
             st_size: node.total_size as u64,
             st_blksize: IMFS_BLOCK_SIZE,
             st_blocks: (node.total_size / IMFS_BLOCK_SIZE as usize) as u32,
-            st_atim: [0, 0],
-            st_mtim: [0, 0],
-            st_ctim: [0, 0],
+            st_atim: node.atime.as_stat_pair(),
+            st_mtim: node.mtime.as_stat_pair(),
+            st_ctim: node.ctime.as_stat_pair(),
         };
 
         0
@@ -661,7 +673,11 @@ impl ImfsState {
             return -39; // ENOTEMPTY
         }
 
+        let parent_idx = self.nodes[node_idx].parent_idx;
         self.remove_child(node_idx);
+        self.update_mtime(parent_idx);
+        self.update_ctime(parent_idx);
+        self.update_ctime(node_idx);
         self.nodes[node_idx].doomed = true;
 
         if self.nodes[node_idx].in_use == 0 {
@@ -704,6 +720,10 @@ impl ImfsState {
             }
             let new_idx = self.create_node(&filename, NodeType::Reg, mode);
             self.add_child(parent_idx, new_idx);
+            self.update_mtime(parent_idx);
+            self.update_ctime(parent_idx);
+            self.update_mtime(new_idx);
+            self.update_ctime(new_idx);
             new_idx
         };
 
@@ -770,6 +790,10 @@ impl ImfsState {
             }
             let new_idx = self.create_node(&filename, NodeType::Reg, mode);
             self.add_child(parent_idx, new_idx);
+            self.update_mtime(parent_idx);
+            self.update_ctime(parent_idx);
+            self.update_mtime(new_idx);
+            self.update_ctime(new_idx);
             new_idx
         };
 
@@ -840,6 +864,9 @@ impl ImfsState {
         let offset = self.get_offset(cage_id, fd);
 
         let n = self.read_from_node(node_idx, offset as usize, buf);
+        if n > 0 {
+            self.update_atime(node_idx);
+        }
 
         // Advance the offset.
         self.set_offset(cage_id, fd, offset + n as i64);
@@ -866,7 +893,12 @@ impl ImfsState {
             return -9;
         }
 
-        self.read_from_node(node_idx, offset as usize, buf) as i32
+        let n = self.read_from_node(node_idx, offset as usize, buf);
+        if n > 0 {
+            self.update_atime(node_idx);
+        }
+
+        n as i32
     }
 
     /// write: write to a file at the current offset.
@@ -894,6 +926,10 @@ impl ImfsState {
         };
 
         let n = self.write_to_node(node_idx, offset as usize, buf);
+        if n > 0 {
+            self.update_mtime(node_idx);
+            self.update_ctime(node_idx);
+        }
 
         self.set_offset(cage_id, fd, offset + n as i64);
 
@@ -919,7 +955,13 @@ impl ImfsState {
             return -9;
         }
 
-        self.write_to_node(node_idx, offset as usize, buf) as i32
+        let n = self.write_to_node(node_idx, offset as usize, buf);
+        if n > 0 {
+            self.update_mtime(node_idx);
+            self.update_ctime(node_idx);
+        }
+
+        n as i32
     }
 
     /// lseek: reposition the fd offset.
@@ -1064,6 +1106,9 @@ impl ImfsState {
         };
 
         self.remove_child(node_idx);
+        self.update_mtime(parent_idx);
+        self.update_ctime(parent_idx);
+        self.update_ctime(node_idx);
         self.nodes[node_idx].doomed = true;
 
         if self.nodes[node_idx].in_use == 0 {
@@ -1116,6 +1161,11 @@ impl ImfsState {
         if let NodeInfo::Lnk { target } = &mut self.nodes[new_idx].info {
             *target = old_idx;
         }
+        self.update_mtime(parent_idx);
+        self.update_ctime(parent_idx);
+        self.update_ctime(old_idx);
+        self.update_mtime(new_idx);
+        self.update_ctime(new_idx);
 
         0
     }
@@ -1205,6 +1255,9 @@ impl ImfsState {
                 }
 
                 self.remove_child(existing_idx);
+                self.update_mtime(new_parent_idx);
+                self.update_ctime(new_parent_idx);
+                self.update_ctime(existing_idx);
                 self.nodes[existing_idx].doomed = true;
 
                 if self.nodes[existing_idx].in_use == 0 {
@@ -1218,6 +1271,13 @@ impl ImfsState {
         self.remove_child(old_idx);
         self.nodes[old_idx].name = new_name;
         self.add_child(new_parent_idx, old_idx);
+        self.update_mtime(old_parent_idx);
+        self.update_ctime(old_parent_idx);
+        if new_parent_idx != old_parent_idx {
+            self.update_mtime(new_parent_idx);
+            self.update_ctime(new_parent_idx);
+        }
+        self.update_ctime(old_idx);
 
         0
     }
@@ -1231,6 +1291,7 @@ impl ImfsState {
         };
 
         self.nodes[node_idx].mode = (self.nodes[node_idx].mode & !0o777) | (mode & 0o777);
+        self.update_ctime(node_idx);
 
         0
     }
@@ -1281,6 +1342,10 @@ impl ImfsState {
         let dotdot_idx = self.create_node("..", NodeType::Lnk, 0);
         self.nodes[dotdot_idx].info = NodeInfo::Lnk { target: parent_idx };
         self.add_child(dir_idx, dotdot_idx);
+        self.update_mtime(parent_idx);
+        self.update_ctime(parent_idx);
+        self.update_mtime(dir_idx);
+        self.update_ctime(dir_idx);
 
         0
     }

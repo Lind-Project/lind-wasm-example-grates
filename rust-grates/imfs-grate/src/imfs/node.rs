@@ -3,6 +3,7 @@
 //! The filesystem is a tree of Nodes (directories, regular files, symlinks, pipes).
 //! Regular file data is stored in linked-list chains of 1024-byte Chunks.
 //! All nodes and chunks live in arena-style Vec storage and are referenced by index.
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const CHUNK_SIZE: usize = 1024;
 pub const MAX_NODE_NAME: usize = 65;
@@ -34,6 +35,29 @@ pub enum NodeType {
 pub struct DirEntry {
     pub name: String,
     pub node_idx: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct NodeTime {
+    pub secs: u64,
+    pub nanos: u64,
+}
+
+impl NodeTime {
+    pub fn now() -> Self {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+
+        Self {
+            secs: now.as_secs(),
+            nanos: now.subsec_nanos() as u64,
+        }
+    }
+
+    pub fn as_stat_pair(self) -> [u64; 2] {
+        [self.secs, self.nanos]
+    }
 }
 
 /// Type-specific data for a node.
@@ -79,6 +103,10 @@ pub struct Node {
     pub group: u32,
 
     pub info: NodeInfo,
+
+    pub ctim: NodeTime,
+    pub atim: NodeTime,
+    pub mtim: NodeTime,
 }
 
 impl Node {
@@ -107,6 +135,8 @@ impl Node {
             NodeType::Free => NodeInfo::Free,
         };
 
+        let now = NodeTime::now();
+
         Node {
             node_type,
             index,
@@ -119,6 +149,9 @@ impl Node {
             owner: GET_UID,
             group: GET_GID,
             info,
+            atim: now,
+            ctim: now,
+            mtim: now,
         }
     }
 
