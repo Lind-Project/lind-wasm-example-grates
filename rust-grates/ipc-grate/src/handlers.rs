@@ -658,6 +658,12 @@ pub extern "C" fn select_handler(
     // since runtime vfds are also bounded by the same limit.
     let mut rev_map: Vec<Option<usize>> = vec![None; FD_SETSIZE];
     let mut max_under: usize = 0;
+    // Tracks whether any kernel-backed fd was added.  We can't infer this
+    // from `max_under` alone since a kernel fd with underfd 0 leaves it
+    // at the initial 0.  Without this flag, an all-IPC select would
+    // forward to RawPOSIX with empty kernel fd_sets — `prepare_bitmasks_for_select`
+    // returns an error in that case, surfacing as EINVAL.
+    let mut have_kernel_fds = false;
 
     for fd in 0..nfds {
         let want_r = have_r && fd_isset(fd, &read_set);
@@ -697,7 +703,43 @@ pub extern "C" fn select_handler(
             if want_r { fd_set_bit(under, &mut k_read); }
             if want_w { fd_set_bit(under, &mut k_write); }
             if want_e { fd_set_bit(under, &mut k_except); }
+            have_kernel_fds = true;
         }
+    }
+
+    // No kernel fds at all: skip the kernel forward and return whatever
+    // IPC fds are ready.  RawPOSIX's select_syscall would reject empty
+    // fd_sets with EINVAL via `prepare_bitmasks_for_select`.  Note: this
+    // doesn't honor the caller's timeout when ipc_ready == 0 — an
+    // all-IPC blocking select would currently return 0 instead of
+    // sleeping.  Callers needing real blocking on IPC-only sets should
+    // be revisited (could libc::poll(NULL, 0, ms) here).
+    if !have_kernel_fds {
+        if have_r {
+            let _ = copy_data_between_cages(
+                this_cage, arg1cage,
+                ipc_read.as_ptr() as u64, this_cage,
+                arg2, arg1cage,
+                FD_SET_BYTES as u64, 0,
+            );
+        }
+        if have_w {
+            let _ = copy_data_between_cages(
+                this_cage, arg1cage,
+                ipc_write.as_ptr() as u64, this_cage,
+                arg3, arg1cage,
+                FD_SET_BYTES as u64, 0,
+            );
+        }
+        if have_e {
+            let _ = copy_data_between_cages(
+                this_cage, arg1cage,
+                ipc_except.as_ptr() as u64, this_cage,
+                arg4, arg1cage,
+                FD_SET_BYTES as u64, 0,
+            );
+        }
+        return ipc_ready;
     }
 
     // Forward SYS_SELECT with pointers into the grate's own k_* arrays

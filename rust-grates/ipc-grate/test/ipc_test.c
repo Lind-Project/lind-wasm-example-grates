@@ -985,45 +985,11 @@ static void test_epoll_pipe(void) {
     close(epfd); close(p[0]); close(p[1]);
 }
 
-/* ── Test: epoll on mixed IPC pipe + kernel fd ────────────────────── */
-
-static void test_epoll_mixed_fds(void) {
-    printf("\n[test_epoll_mixed_fds]\n");
-
-    int p[2];
-    if (pipe(p) != 0) { printf("  FAIL: pipe()\n"); tests_run++; return; }
-
-    const char *path = "epoll_mixed_test.tmp";
-    int kfd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
-    CHECK("open temp kernel fd for epoll", kfd >= 0);
-    if (kfd < 0) { close(p[0]); close(p[1]); return; }
-
-    int epfd = epoll_create1(0);
-    CHECK("epoll_create1 for mixed", epfd >= 0);
-    if (epfd < 0) { close(kfd); close(p[0]); close(p[1]); return; }
-
-    struct epoll_event ev_p = { .events = EPOLLIN, .data.fd = p[0] };
-    struct epoll_event ev_k = { .events = EPOLLIN, .data.fd = kfd  };
-    CHECK("epoll_ctl ADD pipe", epoll_ctl(epfd, EPOLL_CTL_ADD, p[0], &ev_p) == 0);
-    CHECK("epoll_ctl ADD kernel fd", epoll_ctl(epfd, EPOLL_CTL_ADD, kfd, &ev_k) == 0);
-
-    char b = 'X';
-    CHECK("write to pipe (mixed)", write(p[1], &b, 1) == 1);
-
-    struct epoll_event events[4] = {0};
-    int rc = epoll_wait(epfd, events, 4, 500);
-    CHECK("epoll_wait returns >= 2 in mixed set", rc >= 2);
-    int saw_pipe = 0, saw_kernel = 0;
-    for (int i = 0; i < rc && i < 4; i++) {
-        if (events[i].data.fd == p[0]) saw_pipe = 1;
-        if (events[i].data.fd == kfd)  saw_kernel = 1;
-    }
-    CHECK("saw IPC pipe event", saw_pipe);
-    CHECK("saw kernel fd event", saw_kernel);
-
-    close(epfd); close(kfd); close(p[0]); close(p[1]);
-    unlink(path);
-}
+/* No test for mixed IPC + kernel fd in epoll: Lind doesn't implement
+   eventfd/timerfd/signalfd/inotify, the IPC grate intercepts pipe and
+   socket, and regular files aren't epoll-able (Linux returns EPERM).
+   That leaves no available kernel fd to exercise the optimized
+   epoll_wait forward path with this_cage-tagged kernel_buf. */
 
 /* ── Test: epoll EPOLL_CTL_DEL ────────────────────────────────────── */
 
@@ -1092,9 +1058,8 @@ int main(void) {
     test_select_pipe();
     test_select_mixed_fds();
 
-    /* epoll — IPC pipe, mixed, and CTL_DEL */
+    /* epoll — IPC pipe and CTL_DEL */
     test_epoll_pipe();
-    test_epoll_mixed_fds();
     test_epoll_ctl_del();
 
     printf("\n=== results: %d/%d passed ===\n", tests_passed, tests_run);
