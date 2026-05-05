@@ -1261,13 +1261,19 @@ pub extern "C" fn fork_handler(
                 _ => {}
             }
         }
+    }
 
-        // Bump refcounts BEFORE forking so the child can't race a close()
-        // ahead of our bump and drive write_refs / read_refs to zero.
-        // decr_write_ref permanently latches eof=true on the 1→0
-        // transition, which would make the child's reads return 0 (EOF)
-        // even after the parent later writes data.  This was the
-        // pipepong corruption bug.
+    // --- Phase 2: fork, bump refcounts, THEN create child cage in fdtables.
+    let ret = forward_syscall(SYS_CLONE, cage_id, &args, &arg_cages);
+
+    if ret <= 0 {
+        return ret;
+    }
+
+    let child_cage_id = ret as u64;
+
+    if !is_thread {
+        // Bump refcounts FIRST (child is spinning, can't interfere).
         for bump in &bumps {
             match bump {
                 RefBump::Pipe { pipe, is_read } => {
@@ -1287,33 +1293,7 @@ pub extern "C" fn fork_handler(
                 }
             }
         }
-    }
 
-    // --- Phase 2: fork.  If it fails, undo the pre-bumps so we don't
-    //     leak references on the parent's pipes/sockets.
-    let ret = forward_syscall(SYS_CLONE, cage_id, &args, &arg_cages);
-
-    if ret <= 0 {
-        if !is_thread {
-            for bump in &bumps {
-                match bump {
-                    RefBump::Pipe { pipe, is_read } => {
-                        if *is_read { pipe.decr_read_ref(); }
-                        else { pipe.decr_write_ref(); }
-                    }
-                    RefBump::Socket { sendpipe, recvpipe } => {
-                        if let Some(sp) = sendpipe { sp.decr_write_ref(); }
-                        if let Some(rp) = recvpipe { rp.decr_read_ref(); }
-                    }
-                }
-            }
-        }
-        return ret;
-    }
-
-    let child_cage_id = ret as u64;
-
-    if !is_thread {
         // Snapshot the parent's IPC entries — copy_fdtable_for_cage on
         // the shared fdtables instance might be a no-op if the child
         // cage was already created by another grate (RawPOSIX's
