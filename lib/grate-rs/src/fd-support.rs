@@ -13,8 +13,7 @@ pub enum FdArgKind {
     /// Existing fd that must be translated, e.g. dup oldfd.
     OldFd,
 
-    /// Target fd number supplied by the user, e.g. dup2/dup3 newfd.
-    /// This is usually NOT translated the same way as an existing fd.
+    /// todo: integrate with current logic
     NewFd,
 }
 
