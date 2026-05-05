@@ -51,10 +51,13 @@ fn main() {
         load_preloads(&preloads);
     }
 
+    imfs::with_imfs(|s| s.mkdir(0, "/tmp", 0755));
+
     // Build and run the grate. Registers handlers for all filesystem syscalls,
     // forks a child cage, and waits for it to exit.
     GrateBuilder::new()
         .register(SYS_OPEN, handlers::open_handler)
+        .register(SYS_OPENAT, handlers::openat_handler)
         .register(SYS_CLOSE, handlers::close_handler)
         .register(SYS_READ, handlers::read_handler)
         .register(SYS_WRITE, handlers::write_handler)
@@ -63,11 +66,22 @@ fn main() {
         .register(SYS_GETDENTS, handlers::getdents_handler)
         .register(SYS_UNLINK, handlers::unlink_handler)
         .register(SYS_LINK, handlers::link_handler)
+        .register(SYS_RENAME, handlers::rename_handler)
         .register(SYS_PREAD, handlers::pread_handler)
         .register(SYS_PWRITE, handlers::pwrite_handler)
         .register(SYS_MKDIR, handlers::mkdir_handler)
         .register(SYS_CLONE, handlers::fork_handler)
         .register(SYS_EXEC, handlers::exec_handler)
+        .register(SYS_CHDIR, handlers::chdir_handler)
+        .register(SYS_FXSTAT, handlers::fstat_handler)
+        .register(SYS_XSTAT, handlers::stat_handler)
+        .register(SYS_RMDIR, handlers::rmdir_handler)
+        .register(SYS_CHMOD, handlers::chmod_handler)
+        .preexec(|cageid: i32| {
+            imfs::with_imfs(|s| {
+                s.cwd_info.insert(cageid as u64, "/".to_string());
+            });
+        })
         .teardown(|result: Result<i32, GrateError>| {
             log!("exited: {:?}", result);
         })
@@ -106,7 +120,7 @@ fn load_preloads(preloads: &str) {
                 // Try to create as directory — will fail silently if it exists or
                 // if this is the final component (a file).
                 if dir_path != path {
-                    let _ = state.mkdir(&dir_path, 0o755);
+                    let _ = state.mkdir(0, &dir_path, 0o755);
                 }
             }
 
