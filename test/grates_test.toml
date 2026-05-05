@@ -179,6 +179,24 @@ test_src = "test/ipc_test.c"
 files = ["test/pipe_stdin_reader.c", "test/file_collision_reader.c"]
 timeout = 120
 
+[[grate.tests]]
+test_src = "test/fcntl_setfl_test.c"
+
+[[grate.tests]]
+test_src = "test/poll_pipe_test.c"
+
+[[grate.tests]]
+test_src = "test/select_pipe_test.c"
+
+[[grate.tests]]
+test_src = "test/sock_cloexec_test.c"
+
+[[grate.tests]]
+test_src = "test/fcntl_dupfd_test.c"
+
+[[grate.tests]]
+test_src = "test/fork_pipe_race_test.c"
+
 # ── Net Routing Clamp (Rust) ────────────────────────────────────────
 
 [[grate]]
