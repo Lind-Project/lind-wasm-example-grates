@@ -56,6 +56,7 @@ define_path_handler!(ns_mknod_handler, SYS_MKNOD);
 define_path_handler!(ns_readlink_handler, SYS_READLINK);
 define_path_handler!(ns_unlinkat_handler, SYS_UNLINKAT);
 define_path_handler!(ns_readlinkat_handler, SYS_READLINKAT);
+define_path_handler!(ns_statfs_handler, SYS_STATFS);
 
 pub extern "C" fn ns_chdir_handler(
     _cageid: u64,
@@ -85,13 +86,11 @@ pub extern "C" fn ns_chdir_handler(
         arg1cage,
         buf.as_mut_ptr() as u64,
         ns_cage,
-        // MAX_PATH_LEN as u64,
         4096,
         1,
     ) {
         Ok(_) => {}
-        Err(e) => {
-            //println!("CHDIR HUH? {} {} {:#?}", arg1, arg1cage, e);
+        Err(_) => {
             return -14;
         }
     };
@@ -100,17 +99,11 @@ pub extern "C" fn ns_chdir_handler(
     let pathstr = match String::from_utf8(buf[..len].to_vec()).ok() {
         Some(v) => v,
         None => {
-            let losstr = String::from_utf8_lossy(&buf[..len]).to_string();
-            // println!("CHDIR HUH2? {} {} {} {:#?}", arg1, arg1cage, len, losstr);
             return -14;
         }
     };
 
     let resolved_path: String = helpers::resolve_path_for_cage(arg2cage, &pathstr);
-
-    // println!(
-    //    "CHDIR(Cage: {}): {:#?}", arg2cage, resolved_path.clone()
-    // );
 
     let matches: bool = helpers::path_matches_prefix(&resolved_path);
 
@@ -122,9 +115,7 @@ pub extern "C" fn ns_chdir_handler(
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
 
     if ret == 0 {
-        //        if let Some(path) = resolved_path {
         helpers::set_cage_cwd(arg2cage, resolved_path);
-        //       }
     }
 
     ret
@@ -194,9 +185,14 @@ fd_route_handler!(ns_fstat_handler, SYS_FXSTAT);
 fd_route_handler!(ns_fcntl_handler, SYS_FCNTL);
 fd_route_handler!(ns_ftruncate_handler, SYS_FTRUNCATE);
 fd_route_handler!(ns_fchmod_handler, SYS_FCHMOD);
+fd_route_handler!(ns_fchdir_handler, SYS_FCHDIR);
 fd_route_handler!(ns_readv_handler, SYS_READV);
 fd_route_handler!(ns_writev_handler, SYS_WRITEV);
 fd_route_handler!(ns_getdents_handler, SYS_GETDENTS);
+fd_route_handler!(ns_fsync_handler, SYS_FSYNC);
+fd_route_handler!(ns_fdatasync_handler, SYS_FDATASYNC);
+fd_route_handler!(ns_fstatfs_handler, SYS_FSTATFS);
+fd_route_handler!(ns_sync_file_range_handler, SYS_SYNC_FILE_RANGE);
 
 /// open (syscall 2): open a file by path.
 ///
@@ -479,20 +475,13 @@ pub extern "C" fn ns_getcwd_handler(
     let mut buf = cwd_bytes.to_vec();
     buf.push(0);
 
-    //println!(
-    //   "GETCWD(Cage: {}): {:#?}", arg2cage, cwd
-    //);
-
     match copy_data_between_cages(
         ns_cage,
         arg1cage,
         buf.as_ptr() as u64,
-        // path_ptr,
         ns_cage,
-        // path_cage,
         arg1,
         arg1cage,
-        // MAX_PATH_LEN as u64,
         4096,
         1,
     ) {
@@ -530,6 +519,7 @@ pub fn get_ns_handler(syscall_nr: u64) -> Option<SyscallHandler> {
         SYS_READLINK => Some(ns_readlink_handler),
         SYS_UNLINKAT => Some(ns_unlinkat_handler),
         SYS_READLINKAT => Some(ns_readlinkat_handler),
+        SYS_STATFS => Some(ns_statfs_handler),
 
         // FD-based
         SYS_READ => Some(ns_read_handler),
@@ -542,8 +532,13 @@ pub fn get_ns_handler(syscall_nr: u64) -> Option<SyscallHandler> {
         SYS_FCNTL => Some(ns_fcntl_handler),
         SYS_FTRUNCATE => Some(ns_ftruncate_handler),
         SYS_FCHMOD => Some(ns_fchmod_handler),
+        SYS_FCHDIR => Some(ns_fchdir_handler),
         SYS_READV => Some(ns_readv_handler),
         SYS_WRITEV => Some(ns_writev_handler),
+        SYS_FSYNC => Some(ns_fsync_handler),
+        SYS_FDATASYNC => Some(ns_fdatasync_handler),
+        SYS_FSTATFS => Some(ns_fstatfs_handler),
+        SYS_SYNC_FILE_RANGE => Some(ns_sync_file_range_handler),
 
         // FD-based with fd-tracking side effects
         SYS_DUP => Some(ns_dup_handler),

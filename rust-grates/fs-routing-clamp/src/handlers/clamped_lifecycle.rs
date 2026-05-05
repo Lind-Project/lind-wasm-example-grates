@@ -6,7 +6,7 @@ use grate_rs::{
 use fdtables;
 
 use crate::handlers::get_ns_handler;
-use crate::helpers::{self};
+use crate::helpers::{self, FS_CALLS};
 use crate::log;
 
 // =====================================================================
@@ -47,48 +47,6 @@ pub extern "C" fn register_handler_handler(
 }
 
 pub fn register_target_handlers(target_cage: u64) -> i32 {
-    // These are all the calls that the fs-namespace grate cares about, all the following calls from the target
-    // must be routed through the grate regardless of whether the clamp interposed on them.
-    const FS_CALLS: [u64; 34] = [
-        SYS_OPENAT,
-        SYS_GETDENTS,
-        SYS_OPEN,
-        SYS_XSTAT,
-        SYS_ACCESS,
-        SYS_UNLINK,
-        SYS_LINK,
-        SYS_MKDIR,
-        SYS_RMDIR,
-        SYS_RENAME,
-        SYS_TRUNCATE,
-        SYS_CHMOD,
-        SYS_MKNOD,
-        SYS_CHDIR,
-        SYS_READLINK,
-        SYS_UNLINKAT,
-        SYS_READLINKAT,
-        // FD-based
-        SYS_READ,
-        SYS_WRITE,
-        SYS_CLOSE,
-        SYS_PREAD,
-        SYS_PWRITE,
-        SYS_LSEEK,
-        SYS_FXSTAT,
-        SYS_FCNTL,
-        SYS_FTRUNCATE,
-        SYS_FCHMOD,
-        SYS_READV,
-        SYS_WRITEV,
-        // FD-based with fd-tracking side effects
-        SYS_DUP,
-        SYS_DUP2,
-        SYS_DUP3,
-        // Lifecycle — interpose so we track child cages
-        SYS_CLONE,
-        SYS_GETCWD,
-    ];
-
     let ns_cage = getcageid();
 
     // Reinstall namespace-grate handlers for the syscall set we clamp.
