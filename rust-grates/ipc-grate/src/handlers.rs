@@ -1294,31 +1294,47 @@ pub extern "C" fn fork_handler(
             }
         }
 
-        // Snapshot the parent's IPC entries — copy_fdtable_for_cage on
-        // the shared fdtables instance might be a no-op if the child
-        // cage was already created by another grate (RawPOSIX's
-        // fork_syscall does its own copy).  We re-install the IPC
-        // entries explicitly to make sure they're there.
-        let parent_fds = fdtables::return_fdtable_copy(cage_id);
-        let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id);
+        // Copy parent's fdtable to child.  This bumps the (fdkind, underfd)
+        // refcount in fdtables for each entry but does NOT fire our
+        // registered close handler.  When this succeeds (the normal path)
+        // the child cage has all the IPC entries the parent did.
+        //
+        // We deliberately do NOT re-install the IPC entries via
+        // get_specific_virtual_fd on the success path: that call decrements
+        // the OLD entry's refcount, which fires our intermediate close
+        // handler — which calls decr_read_ref / decr_write_ref.  The
+        // post-fork incr_*_ref bumps above expect those refs to land at
+        // (parent_count + child_count) after the fork; the spurious
+        // close-handler firings drag them back down by one per IPC entry,
+        // leaving the read or write end one short.  The first subsequent
+        // close in either parent or child then drives the ref to 0 →
+        // eof latches / write returns EPIPE.  This was the root cause of
+        // pipepong, test_pipe_large, test_pipe_pipeline, test_socketpair_fork,
+        // test_popen_exec etc. all failing the same way.
+        let copy_ok = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id).is_ok();
 
-        // Make sure cage exists; if RawPOSIX already populated it, the
-        // copy above was a no-op.  Either way we now overlay our IPC
-        // entries explicitly.
-        if !fdtables::check_cage_exists(child_cage_id) {
-            fdtables::init_empty_cage(child_cage_id);
-        }
-
-        for (fd, entry) in &parent_fds {
-            if entry.fdkind == IPC_PIPE || entry.fdkind == socket::IPC_SOCKET {
-                let _ = fdtables::get_specific_virtual_fd(
-                    child_cage_id,
-                    *fd,
-                    entry.fdkind,
-                    entry.underfd,
-                    entry.should_cloexec,
-                    entry.perfdinfo,
-                );
+        if !copy_ok {
+            // Fallback for the rare case copy_fdtable_for_cage fails (e.g.
+            // the child cage was somehow created by another path before
+            // we got here).  Init empty and overlay IPC entries.  This
+            // path WILL fire close handlers, but the entries it overwrites
+            // are the empty ones from init_empty_cage so the firings are
+            // no-ops on our refs.
+            if !fdtables::check_cage_exists(child_cage_id) {
+                fdtables::init_empty_cage(child_cage_id);
+            }
+            let parent_fds = fdtables::return_fdtable_copy(cage_id);
+            for (fd, entry) in &parent_fds {
+                if entry.fdkind == IPC_PIPE || entry.fdkind == socket::IPC_SOCKET {
+                    let _ = fdtables::get_specific_virtual_fd(
+                        child_cage_id,
+                        *fd,
+                        entry.fdkind,
+                        entry.underfd,
+                        entry.should_cloexec,
+                        entry.perfdinfo,
+                    );
+                }
             }
         }
 
