@@ -3,7 +3,6 @@
 //! The filesystem is a tree of Nodes (directories, regular files, symlinks, pipes).
 //! Regular file data is stored in linked-list chains of 1024-byte Chunks.
 //! All nodes and chunks live in arena-style Vec storage and are referenced by index.
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const CHUNK_SIZE: usize = 1024;
 pub const MAX_NODE_NAME: usize = 65;
@@ -45,14 +44,7 @@ pub struct NodeTime {
 
 impl NodeTime {
     pub fn now() -> Self {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-
-        Self {
-            secs: now.as_secs(),
-            nanos: now.subsec_nanos() as u64,
-        }
+        Self { secs: 0, nanos: 0 }
     }
 
     pub fn as_stat_pair(self) -> [u64; 2] {
