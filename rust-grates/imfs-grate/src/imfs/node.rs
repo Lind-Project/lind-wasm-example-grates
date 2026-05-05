@@ -149,9 +149,9 @@ impl Node {
             owner: GET_UID,
             group: GET_GID,
             info,
-            atim: now,
-            ctim: now,
-            mtim: now,
+            atime: now,
+            ctime: now,
+            mtime: now,
         }
     }
 
