@@ -9,15 +9,19 @@
  *
  * Each test prints PASS/FAIL. Exit code 0 if all pass.
  */
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <poll.h>
 #include <sys/wait.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/epoll.h>
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -723,6 +727,333 @@ static void test_large_pipe_correctness(void) {
     test_large_pipe_correctness_helper("512KB pipe transfer correct", 512 * 1024);
 }
 
+/* ── Test: fcntl(F_SETFL) preserves access mode ───────────────────── */
+
+static void test_fcntl_setfl_preservation(void) {
+    printf("\n[test_fcntl_setfl_preservation]\n");
+
+    int p[2];
+    if (pipe(p) != 0) { printf("  FAIL: pipe()\n"); tests_run++; return; }
+
+    int read_flags  = fcntl(p[0], F_GETFL, 0);
+    int write_flags = fcntl(p[1], F_GETFL, 0);
+    CHECK("read end is O_RDONLY before F_SETFL",  (read_flags  & O_ACCMODE) == O_RDONLY);
+    CHECK("write end is O_WRONLY before F_SETFL", (write_flags & O_ACCMODE) == O_WRONLY);
+
+    CHECK("F_SETFL O_NONBLOCK on read end",  fcntl(p[0], F_SETFL, O_NONBLOCK) == 0);
+    CHECK("F_SETFL O_NONBLOCK on write end", fcntl(p[1], F_SETFL, O_NONBLOCK) == 0);
+
+    read_flags  = fcntl(p[0], F_GETFL, 0);
+    write_flags = fcntl(p[1], F_GETFL, 0);
+    CHECK("read end access mode preserved after F_SETFL",
+          (read_flags  & O_ACCMODE) == O_RDONLY);
+    CHECK("write end access mode preserved after F_SETFL",
+          (write_flags & O_ACCMODE) == O_WRONLY);
+    CHECK("O_NONBLOCK set on read end after F_SETFL",
+          (read_flags  & O_NONBLOCK) != 0);
+    CHECK("O_NONBLOCK set on write end after F_SETFL",
+          (write_flags & O_NONBLOCK) != 0);
+
+    /* write/read still work — proves we didn't clobber direction bits. */
+    char b = 'Z';
+    CHECK("write to write-end after F_SETFL",  write(p[1], &b, 1) == 1);
+    char rb = 0;
+    CHECK("read from read-end after F_SETFL", read(p[0], &rb, 1) == 1 && rb == 'Z');
+
+    close(p[0]);
+    close(p[1]);
+}
+
+/* ── Test: fcntl F_DUPFD / F_DUPFD_CLOEXEC ────────────────────────── */
+
+static void test_fcntl_dupfd(void) {
+    printf("\n[test_fcntl_dupfd]\n");
+
+    const char *path = "fcntl_dupfd_test.tmp";
+    int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    CHECK("open temp file for dup test", fd >= 0);
+    if (fd < 0) return;
+
+    int dup_fd = fcntl(fd, F_DUPFD, 100);
+    CHECK("fcntl(F_DUPFD, 100) returns >= 100", dup_fd >= 100);
+    if (dup_fd >= 0) {
+        int flags = fcntl(dup_fd, F_GETFD);
+        CHECK("fcntl(F_GETFD) on dup'd fd succeeds (was EBADF)", flags >= 0);
+        CHECK("F_DUPFD does not set FD_CLOEXEC",
+              flags >= 0 && (flags & FD_CLOEXEC) == 0);
+        CHECK("write through dup'd fd works", write(dup_fd, "x", 1) == 1);
+        close(dup_fd);
+    }
+
+    int dup_cex = fcntl(fd, F_DUPFD_CLOEXEC, 200);
+    CHECK("fcntl(F_DUPFD_CLOEXEC, 200) returns >= 200", dup_cex >= 200);
+    if (dup_cex >= 0) {
+        int flags = fcntl(dup_cex, F_GETFD);
+        CHECK("F_DUPFD_CLOEXEC sets FD_CLOEXEC",
+              flags >= 0 && (flags & FD_CLOEXEC) != 0);
+        close(dup_cex);
+    }
+
+    close(fd);
+    unlink(path);
+}
+
+/* ── Test: SOCK_CLOEXEC across IPC sockets ───────────────────────── */
+
+static void test_sock_cloexec(void) {
+    printf("\n[test_sock_cloexec]\n");
+
+    int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    CHECK("socket(AF_UNIX, SOCK_CLOEXEC)", s >= 0);
+    if (s >= 0) {
+        int flags = fcntl(s, F_GETFD);
+        CHECK("FD_CLOEXEC set after SOCK_CLOEXEC",
+              flags >= 0 && (flags & FD_CLOEXEC) != 0);
+        close(s);
+    }
+
+    int s_plain = socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK("socket(AF_UNIX) without SOCK_CLOEXEC", s_plain >= 0);
+    if (s_plain >= 0) {
+        int flags = fcntl(s_plain, F_GETFD);
+        CHECK("FD_CLOEXEC NOT set without SOCK_CLOEXEC",
+              flags >= 0 && (flags & FD_CLOEXEC) == 0);
+        close(s_plain);
+    }
+
+    int sv[2];
+    int rc = socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv);
+    CHECK("socketpair(SOCK_CLOEXEC)", rc == 0);
+    if (rc == 0) {
+        int f0 = fcntl(sv[0], F_GETFD);
+        int f1 = fcntl(sv[1], F_GETFD);
+        CHECK("socketpair[0] FD_CLOEXEC", f0 >= 0 && (f0 & FD_CLOEXEC));
+        CHECK("socketpair[1] FD_CLOEXEC", f1 >= 0 && (f1 & FD_CLOEXEC));
+        close(sv[0]); close(sv[1]);
+    }
+}
+
+/* ── Test: poll on IPC pipe ───────────────────────────────────────── */
+
+static void test_poll_pipe(void) {
+    printf("\n[test_poll_pipe]\n");
+
+    int p[2];
+    if (pipe(p) != 0) { printf("  FAIL: pipe()\n"); tests_run++; return; }
+
+    char b = 'X';
+    CHECK("write 1 byte to pipe", write(p[1], &b, 1) == 1);
+
+    struct pollfd pfd = { .fd = p[0], .events = POLLIN, .revents = 0 };
+    int rc = poll(&pfd, 1, 500);
+    CHECK("poll returns >= 1 on pipe with data", rc >= 1);
+    CHECK("POLLIN set on pipe with data", (pfd.revents & POLLIN) != 0);
+
+    close(p[0]); close(p[1]);
+}
+
+/* ── Test: poll on mixed IPC pipe + kernel fd ─────────────────────── */
+/* Exercises the optimized forward path (this_cage pollfd pointer). */
+
+static void test_poll_mixed_fds(void) {
+    printf("\n[test_poll_mixed_fds]\n");
+
+    int p[2];
+    if (pipe(p) != 0) { printf("  FAIL: pipe()\n"); tests_run++; return; }
+
+    const char *path = "poll_mixed_test.tmp";
+    int kfd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    CHECK("open temp kernel fd", kfd >= 0);
+    if (kfd < 0) { close(p[0]); close(p[1]); return; }
+    /* Regular files are always read-ready, so kfd should report POLLIN. */
+
+    char b = 'Y';
+    CHECK("write to pipe write-end", write(p[1], &b, 1) == 1);
+
+    struct pollfd pfds[2] = {
+        { .fd = p[0], .events = POLLIN, .revents = 0 },
+        { .fd = kfd,  .events = POLLIN, .revents = 0 },
+    };
+    int rc = poll(pfds, 2, 500);
+    CHECK("poll returns >= 2 (both ready)", rc >= 2);
+    CHECK("IPC pipe POLLIN", (pfds[0].revents & POLLIN) != 0);
+    CHECK("kernel fd POLLIN", (pfds[1].revents & POLLIN) != 0);
+
+    close(p[0]); close(p[1]); close(kfd);
+    unlink(path);
+}
+
+/* ── Test: ppoll on IPC pipe ──────────────────────────────────────── */
+
+static void test_ppoll_pipe(void) {
+    printf("\n[test_ppoll_pipe]\n");
+
+    int p[2];
+    if (pipe(p) != 0) { printf("  FAIL: pipe()\n"); tests_run++; return; }
+
+    char b = 'Z';
+    CHECK("write 1 byte for ppoll", write(p[1], &b, 1) == 1);
+
+    struct pollfd pfd = { .fd = p[0], .events = POLLIN, .revents = 0 };
+    struct timespec to = { .tv_sec = 0, .tv_nsec = 500 * 1000 * 1000 };
+    int rc = ppoll(&pfd, 1, &to, NULL);
+    CHECK("ppoll returns >= 1 on pipe with data", rc >= 1);
+    CHECK("ppoll POLLIN set", (pfd.revents & POLLIN) != 0);
+
+    close(p[0]); close(p[1]);
+}
+
+/* ── Test: select on IPC pipe ─────────────────────────────────────── */
+
+static void test_select_pipe(void) {
+    printf("\n[test_select_pipe]\n");
+
+    int p[2];
+    if (pipe(p) != 0) { printf("  FAIL: pipe()\n"); tests_run++; return; }
+
+    char b = 'X';
+    CHECK("write 1 byte", write(p[1], &b, 1) == 1);
+
+    fd_set rfds; FD_ZERO(&rfds); FD_SET(p[0], &rfds);
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 500 * 1000 };
+    int rc = select(p[0] + 1, &rfds, NULL, NULL, &tv);
+    CHECK("select returns >= 1", rc >= 1);
+    CHECK("read-end set in fd_set", FD_ISSET(p[0], &rfds));
+
+    char rb = 0;
+    CHECK("read drains the byte", read(p[0], &rb, 1) == 1 && rb == 'X');
+
+    close(p[0]); close(p[1]);
+}
+
+/* ── Test: select on mixed IPC pipe + kernel fd ───────────────────── */
+/* Exercises the optimized this_cage fd_set pointer path. */
+
+static void test_select_mixed_fds(void) {
+    printf("\n[test_select_mixed_fds]\n");
+
+    int p[2];
+    if (pipe(p) != 0) { printf("  FAIL: pipe()\n"); tests_run++; return; }
+
+    const char *path = "select_mixed_test.tmp";
+    int kfd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    CHECK("open temp kernel fd for select", kfd >= 0);
+    if (kfd < 0) { close(p[0]); close(p[1]); return; }
+
+    char b = 'M';
+    CHECK("write to pipe", write(p[1], &b, 1) == 1);
+
+    int max = (p[0] > kfd ? p[0] : kfd) + 1;
+    fd_set rfds; FD_ZERO(&rfds);
+    FD_SET(p[0], &rfds);
+    FD_SET(kfd,  &rfds);
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 500 * 1000 };
+    int rc = select(max, &rfds, NULL, NULL, &tv);
+    CHECK("select returns >= 2 (both ready)", rc >= 2);
+    CHECK("IPC pipe in fd_set", FD_ISSET(p[0], &rfds));
+    CHECK("kernel fd in fd_set", FD_ISSET(kfd, &rfds));
+
+    close(p[0]); close(p[1]); close(kfd);
+    unlink(path);
+}
+
+/* ── Test: epoll on IPC pipe ──────────────────────────────────────── */
+
+static void test_epoll_pipe(void) {
+    printf("\n[test_epoll_pipe]\n");
+
+    int p[2];
+    if (pipe(p) != 0) { printf("  FAIL: pipe()\n"); tests_run++; return; }
+
+    int epfd = epoll_create1(0);
+    CHECK("epoll_create1", epfd >= 0);
+    if (epfd < 0) { close(p[0]); close(p[1]); return; }
+
+    struct epoll_event ev = { .events = EPOLLIN, .data.fd = p[0] };
+    CHECK("epoll_ctl ADD on IPC pipe read-end",
+          epoll_ctl(epfd, EPOLL_CTL_ADD, p[0], &ev) == 0);
+
+    char b = 'E';
+    CHECK("write to pipe for epoll", write(p[1], &b, 1) == 1);
+
+    struct epoll_event events[4] = {0};
+    int rc = epoll_wait(epfd, events, 4, 500);
+    CHECK("epoll_wait returns >= 1", rc >= 1);
+    CHECK("event has EPOLLIN", rc >= 1 && (events[0].events & EPOLLIN) != 0);
+    CHECK("event data carries fd", rc >= 1 && events[0].data.fd == p[0]);
+
+    close(epfd); close(p[0]); close(p[1]);
+}
+
+/* ── Test: epoll on mixed IPC pipe + kernel fd ────────────────────── */
+
+static void test_epoll_mixed_fds(void) {
+    printf("\n[test_epoll_mixed_fds]\n");
+
+    int p[2];
+    if (pipe(p) != 0) { printf("  FAIL: pipe()\n"); tests_run++; return; }
+
+    const char *path = "epoll_mixed_test.tmp";
+    int kfd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    CHECK("open temp kernel fd for epoll", kfd >= 0);
+    if (kfd < 0) { close(p[0]); close(p[1]); return; }
+
+    int epfd = epoll_create1(0);
+    CHECK("epoll_create1 for mixed", epfd >= 0);
+    if (epfd < 0) { close(kfd); close(p[0]); close(p[1]); return; }
+
+    struct epoll_event ev_p = { .events = EPOLLIN, .data.fd = p[0] };
+    struct epoll_event ev_k = { .events = EPOLLIN, .data.fd = kfd  };
+    CHECK("epoll_ctl ADD pipe", epoll_ctl(epfd, EPOLL_CTL_ADD, p[0], &ev_p) == 0);
+    CHECK("epoll_ctl ADD kernel fd", epoll_ctl(epfd, EPOLL_CTL_ADD, kfd, &ev_k) == 0);
+
+    char b = 'X';
+    CHECK("write to pipe (mixed)", write(p[1], &b, 1) == 1);
+
+    struct epoll_event events[4] = {0};
+    int rc = epoll_wait(epfd, events, 4, 500);
+    CHECK("epoll_wait returns >= 2 in mixed set", rc >= 2);
+    int saw_pipe = 0, saw_kernel = 0;
+    for (int i = 0; i < rc && i < 4; i++) {
+        if (events[i].data.fd == p[0]) saw_pipe = 1;
+        if (events[i].data.fd == kfd)  saw_kernel = 1;
+    }
+    CHECK("saw IPC pipe event", saw_pipe);
+    CHECK("saw kernel fd event", saw_kernel);
+
+    close(epfd); close(kfd); close(p[0]); close(p[1]);
+    unlink(path);
+}
+
+/* ── Test: epoll EPOLL_CTL_DEL ────────────────────────────────────── */
+
+static void test_epoll_ctl_del(void) {
+    printf("\n[test_epoll_ctl_del]\n");
+
+    int p[2];
+    if (pipe(p) != 0) { printf("  FAIL: pipe()\n"); tests_run++; return; }
+
+    int epfd = epoll_create1(0);
+    CHECK("epoll_create1 for DEL test", epfd >= 0);
+    if (epfd < 0) { close(p[0]); close(p[1]); return; }
+
+    struct epoll_event ev = { .events = EPOLLIN, .data.fd = p[0] };
+    CHECK("ADD then DEL — ADD",
+          epoll_ctl(epfd, EPOLL_CTL_ADD, p[0], &ev) == 0);
+    CHECK("ADD then DEL — DEL",
+          epoll_ctl(epfd, EPOLL_CTL_DEL, p[0], NULL) == 0);
+
+    /* Put data in the pipe; epoll_wait should NOT report it (we just removed it). */
+    char b = 'D';
+    CHECK("write to pipe after DEL", write(p[1], &b, 1) == 1);
+
+    struct epoll_event events[4] = {0};
+    int rc = epoll_wait(epfd, events, 4, 100);
+    CHECK("epoll_wait returns 0 after DEL (no events)", rc == 0);
+
+    close(epfd); close(p[0]); close(p[1]);
+}
+
 /* ── Main ──────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -748,6 +1079,23 @@ int main(void) {
     test_file_io_basic();
     test_fd_collision_after_exec();
     test_large_pipe_correctness();
+
+    /* fcntl / cloexec regression coverage */
+    test_fcntl_setfl_preservation();
+    test_fcntl_dupfd();
+    test_sock_cloexec();
+
+    /* poll / select / ppoll — IPC and mixed-fd coverage */
+    test_poll_pipe();
+    test_poll_mixed_fds();
+    test_ppoll_pipe();
+    test_select_pipe();
+    test_select_mixed_fds();
+
+    /* epoll — IPC pipe, mixed, and CTL_DEL */
+    test_epoll_pipe();
+    test_epoll_mixed_fds();
+    test_epoll_ctl_del();
 
     printf("\n=== results: %d/%d passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
