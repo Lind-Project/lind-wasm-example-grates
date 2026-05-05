@@ -26,6 +26,15 @@ const EMFILE_NEG: i32 = -24;
 /// *at family of syscalls; it must NOT be translated.
 const AT_FDCWD: i64 = -100;
 
+/// Translation flag for the cageid argument in `make_threei_call`.  When
+/// the MSB of a per-arg cageid is set, glibc's `TRANSLATE_ARG_TO_HOST`
+/// macro converts the corresponding arg from a wasm32 guest offset to a
+/// host pointer (`__lind_base + uaddr`) before passing it to the host
+/// trampoline.  Use this when forwarding a buffer that lives in our own
+/// wasm linear memory (e.g. a `Vec` we own) — without it, the host
+/// receives a tiny wasm offset and segfaults dereferencing it.
+const ARG_TRANSLATE_FLAG: u64 = 1u64 << 63;
+
 /// Translate a grate virt fd to the runtime's virt fd (the underfd).
 /// Returns None if the fd doesn't exist in our fdtable.
 fn translate_to_underfd(cage: u64, fd: u64) -> Option<u64> {
@@ -511,10 +520,11 @@ pub extern "C" fn poll_handler(
         let kernel_timeout = if total_ready > 0 { 0i32 } else { arg3 as i32 };
 
         // Forward SYS_POLL with a pointer into the grate's own pollfds Vec
-        // tagged with this_cage.  RawPOSIX resolves the pointer against
-        // the grate cage's wasm-memory base and reads/writes the buffer
-        // in place.  This avoids two `copy_data_between_cages` round-trips
-        // (write-back-pre-call + read-back-post-call) per poll.
+        // tagged with `this_cage | ARG_TRANSLATE_FLAG`.  The MSB tells
+        // glibc's `make_threei_call` wrapper to convert the wasm32 offset
+        // to a host pointer before it reaches RawPOSIX.  Without the flag
+        // the host dereferences a tiny wasm offset and segfaults.  This
+        // avoids two `copy_data_between_cages` round-trips per poll.
         let args = [
             pollfds.as_mut_ptr() as u64,
             arg2,
@@ -523,7 +533,10 @@ pub extern "C" fn poll_handler(
             arg5,
             arg6,
         ];
-        let arg_cages = [this_cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+        let arg_cages = [
+            this_cage | ARG_TRANSLATE_FLAG,
+            arg2cage, arg3cage, arg4cage, arg5cage, arg6cage,
+        ];
         let kernel_ret = forward_syscall(SYS_POLL, cage_id, &args, &arg_cages);
         if kernel_ret < 0 {
             return kernel_ret;
@@ -645,6 +658,12 @@ pub extern "C" fn select_handler(
     // since runtime vfds are also bounded by the same limit.
     let mut rev_map: Vec<Option<usize>> = vec![None; FD_SETSIZE];
     let mut max_under: usize = 0;
+    // Tracks whether any kernel-backed fd was added.  We can't infer this
+    // from `max_under` alone since a kernel fd with underfd 0 leaves it
+    // at the initial 0.  Without this flag, an all-IPC select would
+    // forward to RawPOSIX with empty kernel fd_sets — `prepare_bitmasks_for_select`
+    // returns an error in that case, surfacing as EINVAL.
+    let mut have_kernel_fds = false;
 
     for fd in 0..nfds {
         let want_r = have_r && fd_isset(fd, &read_set);
@@ -684,15 +703,53 @@ pub extern "C" fn select_handler(
             if want_r { fd_set_bit(under, &mut k_read); }
             if want_w { fd_set_bit(under, &mut k_write); }
             if want_e { fd_set_bit(under, &mut k_except); }
+            have_kernel_fds = true;
         }
     }
 
+    // No kernel fds at all: skip the kernel forward and return whatever
+    // IPC fds are ready.  RawPOSIX's select_syscall would reject empty
+    // fd_sets with EINVAL via `prepare_bitmasks_for_select`.  Note: this
+    // doesn't honor the caller's timeout when ipc_ready == 0 — an
+    // all-IPC blocking select would currently return 0 instead of
+    // sleeping.  Callers needing real blocking on IPC-only sets should
+    // be revisited (could libc::poll(NULL, 0, ms) here).
+    if !have_kernel_fds {
+        if have_r {
+            let _ = copy_data_between_cages(
+                this_cage, arg1cage,
+                ipc_read.as_ptr() as u64, this_cage,
+                arg2, arg1cage,
+                FD_SET_BYTES as u64, 0,
+            );
+        }
+        if have_w {
+            let _ = copy_data_between_cages(
+                this_cage, arg1cage,
+                ipc_write.as_ptr() as u64, this_cage,
+                arg3, arg1cage,
+                FD_SET_BYTES as u64, 0,
+            );
+        }
+        if have_e {
+            let _ = copy_data_between_cages(
+                this_cage, arg1cage,
+                ipc_except.as_ptr() as u64, this_cage,
+                arg4, arg1cage,
+                FD_SET_BYTES as u64, 0,
+            );
+        }
+        return ipc_ready;
+    }
+
     // Forward SYS_SELECT with pointers into the grate's own k_* arrays
-    // tagged with this_cage.  RawPOSIX reads the input bitmaps in place
-    // and writes the result back into the same arrays.  This saves 6
-    // cross-cage copies: 3 input copies pre-call and 3 result copies
-    // post-call (we still do 3 final copies to write the translated
-    // grate-side result into the user's fd_set buffers).
+    // tagged with `this_cage | ARG_TRANSLATE_FLAG`.  The MSB tells
+    // glibc's `make_threei_call` wrapper to convert each wasm32 offset
+    // to a host pointer before it reaches RawPOSIX (without it, the
+    // host dereferences a tiny wasm offset and segfaults).  RawPOSIX
+    // reads the input bitmaps in place and writes the result back into
+    // the same arrays — this saves 6 cross-cage copies (3 input
+    // pre-call and 3 result post-call).
     //
     // Pass 0/this_cage for any set that's NULL — the kernel ignores
     // that set, but we keep the position so the cage tags match.
@@ -701,7 +758,12 @@ pub extern "C" fn select_handler(
     let w_ptr = if have_w { k_write.as_mut_ptr() as u64 } else { 0 };
     let e_ptr = if have_e { k_except.as_mut_ptr() as u64 } else { 0 };
     let args = [runtime_nfds, r_ptr, w_ptr, e_ptr, arg5, arg6];
-    let arg_cages = [arg1cage, this_cage, this_cage, this_cage, arg5cage, arg6cage];
+    let translated_cage = this_cage | ARG_TRANSLATE_FLAG;
+    let arg_cages = [
+        arg1cage,
+        translated_cage, translated_cage, translated_cage,
+        arg5cage, arg6cage,
+    ];
     let kernel_ret = forward_syscall(SYS_SELECT, cage_id, &args, &arg_cages);
     if kernel_ret < 0 {
         return kernel_ret;
@@ -1054,6 +1116,72 @@ pub extern "C" fn fcntl_handler(
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, _arg2cage, _arg3cage, arg4cage, arg5cage, arg6cage];
 
+    // F_DUPFD / F_DUPFD_CLOEXEC need the same grate-side bookkeeping as the
+    // dup-family syscalls: allocate a grate vfd ≥ arg3 backed by a fresh
+    // runtime-side dup.  Handle these first so the path is uniform for both
+    // IPC and FDKIND_KERNEL fds.
+    if op == F_DUPFD || op == F_DUPFD_CLOEXEC {
+        let cloexec = op == F_DUPFD_CLOEXEC;
+        let min_fd = arg3;
+
+        let info = lookup_ipc_fd(cage_id, fd);
+        if let Some((pipe_id, fdkind, flags)) = info {
+            let new_fd = match fdtables::get_unused_virtual_fd_from_startfd(
+                cage_id, fdkind, pipe_id, cloexec, flags as u64, min_fd,
+            ) {
+                Ok(fd) => fd as i32,
+                Err(_) => return -24,
+            };
+            // Bump refs for the duplicated entry so the IPC pipe/socket
+            // outlives both the original and the dup.
+            match fdkind {
+                IPC_PIPE => {
+                    if let Some(pipe) = with_ipc(|s| s.get_pipe(pipe_id)) {
+                        if is_read_end(flags) { pipe.incr_read_ref(); }
+                        else { pipe.incr_write_ref(); }
+                    }
+                }
+                socket::IPC_SOCKET => {
+                    with_ipc(|s| {
+                        if let Some(sock) = s.sockets.get(pipe_id) {
+                            if let Some(ref sp) = sock.sendpipe { sp.incr_write_ref(); }
+                            if let Some(ref rp) = sock.recvpipe { rp.incr_read_ref(); }
+                        }
+                    });
+                }
+                _ => {}
+            }
+            return new_fd;
+        }
+
+        // FDKIND_KERNEL or untracked: forward F_DUPFD(_CLOEXEC) to the
+        // runtime to get a fresh runtime vfd ≥ min_fd, then map to a fresh
+        // grate vfd ≥ min_fd.
+        let under = match translate_to_underfd(cage_id, fd) {
+            Some(u) => u,
+            None => return EBADF_NEG,
+        };
+        let mut t = args;
+        t[0] = under;
+        let new_runtime_vfd = forward_syscall(SYS_FCNTL, cage_id, &t, &arg_cages);
+        if new_runtime_vfd < 0 {
+            return new_runtime_vfd;
+        }
+        return match fdtables::get_unused_virtual_fd_from_startfd(
+            cage_id, FDKIND_KERNEL, new_runtime_vfd as u64, cloexec, 0, min_fd,
+        ) {
+            Ok(grate_vfd) => grate_vfd as i32,
+            Err(_) => {
+                forward_syscall(
+                    SYS_CLOSE, cage_id,
+                    &[new_runtime_vfd as u64, 0, 0, 0, 0, 0],
+                    &[cage_id, 0, 0, 0, 0, 0],
+                );
+                EMFILE_NEG
+            }
+        };
+    }
+
     let info = lookup_ipc_fd(cage_id, fd);
     if info.is_none() {
         return forward_with_fd1(SYS_FCNTL, cage_id, args, arg_cages);
@@ -1087,11 +1215,6 @@ pub extern "C" fn fcntl_handler(
             // Set FD_CLOEXEC.
             let _ = fdtables::set_cloexec(cage_id, fd, (arg3 & 1) != 0);
             0
-        }
-        F_DUPFD => {
-            // Like dup but use fd >= arg3.
-            dup_handler(cageid, arg1, arg1cage, arg2, _arg2cage,
-                        arg3, _arg3cage, arg4, arg4cage, arg5, arg5cage, arg6, arg6cage)
         }
         _ => -22, // EINVAL
     }
@@ -1197,31 +1320,47 @@ pub extern "C" fn fork_handler(
             }
         }
 
-        // Snapshot the parent's IPC entries — copy_fdtable_for_cage on
-        // the shared fdtables instance might be a no-op if the child
-        // cage was already created by another grate (RawPOSIX's
-        // fork_syscall does its own copy).  We re-install the IPC
-        // entries explicitly to make sure they're there.
-        let parent_fds = fdtables::return_fdtable_copy(cage_id);
-        let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id);
+        // Copy parent's fdtable to child.  This bumps the (fdkind, underfd)
+        // refcount in fdtables for each entry but does NOT fire our
+        // registered close handler.  When this succeeds (the normal path)
+        // the child cage has all the IPC entries the parent did.
+        //
+        // We deliberately do NOT re-install the IPC entries via
+        // get_specific_virtual_fd on the success path: that call decrements
+        // the OLD entry's refcount, which fires our intermediate close
+        // handler — which calls decr_read_ref / decr_write_ref.  The
+        // post-fork incr_*_ref bumps above expect those refs to land at
+        // (parent_count + child_count) after the fork; the spurious
+        // close-handler firings drag them back down by one per IPC entry,
+        // leaving the read or write end one short.  The first subsequent
+        // close in either parent or child then drives the ref to 0 →
+        // eof latches / write returns EPIPE.  This was the root cause of
+        // pipepong, test_pipe_large, test_pipe_pipeline, test_socketpair_fork,
+        // test_popen_exec etc. all failing the same way.
+        let copy_ok = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id).is_ok();
 
-        // Make sure cage exists; if RawPOSIX already populated it, the
-        // copy above was a no-op.  Either way we now overlay our IPC
-        // entries explicitly.
-        if !fdtables::check_cage_exists(child_cage_id) {
-            fdtables::init_empty_cage(child_cage_id);
-        }
-
-        for (fd, entry) in &parent_fds {
-            if entry.fdkind == IPC_PIPE || entry.fdkind == socket::IPC_SOCKET {
-                let _ = fdtables::get_specific_virtual_fd(
-                    child_cage_id,
-                    *fd,
-                    entry.fdkind,
-                    entry.underfd,
-                    entry.should_cloexec,
-                    entry.perfdinfo,
-                );
+        if !copy_ok {
+            // Fallback for the rare case copy_fdtable_for_cage fails (e.g.
+            // the child cage was somehow created by another path before
+            // we got here).  Init empty and overlay IPC entries.  This
+            // path WILL fire close handlers, but the entries it overwrites
+            // are the empty ones from init_empty_cage so the firings are
+            // no-ops on our refs.
+            if !fdtables::check_cage_exists(child_cage_id) {
+                fdtables::init_empty_cage(child_cage_id);
+            }
+            let parent_fds = fdtables::return_fdtable_copy(cage_id);
+            for (fd, entry) in &parent_fds {
+                if entry.fdkind == IPC_PIPE || entry.fdkind == socket::IPC_SOCKET {
+                    let _ = fdtables::get_specific_virtual_fd(
+                        child_cage_id,
+                        *fd,
+                        entry.fdkind,
+                        entry.underfd,
+                        entry.should_cloexec,
+                        entry.perfdinfo,
+                    );
+                }
             }
         }
 
@@ -1317,10 +1456,14 @@ pub extern "C" fn socket_handler(
 
     if domain == socket::AF_UNIX {
         // AF_UNIX: entirely ours. Create in registry, register in fdtables.
+        // SOCK_CLOEXEC and SOCK_NONBLOCK live in the type arg, mapped to
+        // O_CLOEXEC / O_NONBLOCK respectively (Linux convention).
+        let cloexec = (socktype & O_CLOEXEC) != 0;
+        let perfdinfo = (socktype as u64) & (O_NONBLOCK as u64);
         let socket_id = with_ipc(|s| s.sockets.create_socket(domain, socktype, 0));
 
         return match fdtables::get_unused_virtual_fd(
-            cage_id, socket::IPC_SOCKET, socket_id, false, 0,
+            cage_id, socket::IPC_SOCKET, socket_id, cloexec, perfdinfo,
         ) {
             Ok(fd) => fd as i32,
             Err(_) => {
@@ -1376,16 +1519,20 @@ pub extern "C" fn socketpair_handler(
         s.sockets.create_socketpair(domain, socktype, 0)
     });
 
+    // SOCK_CLOEXEC / SOCK_NONBLOCK in the type arg map to O_CLOEXEC / O_NONBLOCK.
+    let cloexec = (socktype & O_CLOEXEC) != 0;
+    let perfdinfo = (socktype as u64) & (O_NONBLOCK as u64);
+
     // Allocate two fds.
     let fd1 = match fdtables::get_unused_virtual_fd(
-        cage_id, socket::IPC_SOCKET, sid1, false, 0,
+        cage_id, socket::IPC_SOCKET, sid1, cloexec, perfdinfo,
     ) {
         Ok(fd) => fd as i32,
         Err(_) => return -24,
     };
 
     let fd2 = match fdtables::get_unused_virtual_fd(
-        cage_id, socket::IPC_SOCKET, sid2, false, 0,
+        cage_id, socket::IPC_SOCKET, sid2, cloexec, perfdinfo,
     ) {
         Ok(fd) => fd as i32,
         Err(_) => {
@@ -1510,9 +1657,19 @@ pub extern "C" fn bind_handler(
 
                 let addr_string = format!("127.0.0.1:{}", port);
 
+                // Preserve cloexec / perfdinfo from the existing FDKIND_KERNEL entry
+                // so SOCK_CLOEXEC / SOCK_NONBLOCK from the original socket() survive
+                // the take-over.
+                let (preserved_cloexec, preserved_perfdinfo) =
+                    match fdtables::translate_virtual_fd(cage_id, fd) {
+                        Ok(e) => (e.should_cloexec, e.perfdinfo),
+                        Err(_) => (false, 0),
+                    };
+
                 // Overwrite grate vfd's FDKIND_KERNEL entry with IPC_SOCKET.
                 let _ = fdtables::get_specific_virtual_fd(
-                    cage_id, fd, socket::IPC_SOCKET, socket_id, false, 0,
+                    cage_id, fd, socket::IPC_SOCKET, socket_id,
+                    preserved_cloexec, preserved_perfdinfo,
                 );
 
                 return with_ipc(|s| {
@@ -1627,12 +1784,19 @@ pub extern "C" fn connect_handler(
 
             if is_loopback {
                 // Take over: close runtime fd, overwrite grate entry as IPC_SOCKET.
+                // Preserve cloexec / perfdinfo from the existing entry.
+                let (preserved_cloexec, preserved_perfdinfo) =
+                    match fdtables::translate_virtual_fd(cage_id, fd) {
+                        Ok(e) => (e.should_cloexec, e.perfdinfo),
+                        Err(_) => (false, 0),
+                    };
                 if let Some(under) = translate_to_underfd(cage_id, fd) {
                     forward_syscall(SYS_CLOSE, cage_id,
                         &[under, 0, 0, 0, 0, 0], &[cage_id, 0, 0, 0, 0, 0]);
                 }
                 let _ = fdtables::get_specific_virtual_fd(
-                    cage_id, fd, socket::IPC_SOCKET, sid, false, 0,
+                    cage_id, fd, socket::IPC_SOCKET, sid,
+                    preserved_cloexec, preserved_perfdinfo,
                 );
                 with_ipc(|s| { s.pending_inet.remove(&(cage_id, fd)); });
                 sid
@@ -1741,7 +1905,22 @@ pub extern "C" fn accept_handler(
         return -88;
     }
 
-    let nonblocking = (flags & O_NONBLOCK) != 0;
+    // Plain accept() does not set CLOEXEC on the new fd; only accept4 with
+    // SOCK_CLOEXEC does (handled by accept4_handler).
+    accept_ipc_inner(cage_id, socket_id, flags, /*cloexec=*/false, /*extra_perfdinfo=*/0)
+}
+
+/// Body of an IPC-socket accept.  Extracted so accept4_handler can pass
+/// cloexec / SOCK_NONBLOCK from its flags arg without duplicating the
+/// pending-connection wait loop.
+fn accept_ipc_inner(
+    cage_id: u64,
+    socket_id: u64,
+    listen_flags: i32,
+    cloexec: bool,
+    extra_perfdinfo: u64,
+) -> i32 {
+    let nonblocking = (listen_flags & O_NONBLOCK) != 0;
 
     // Get the listening address.
     let listen_addr = with_ipc(|s| {
@@ -1785,7 +1964,7 @@ pub extern "C" fn accept_handler(
 
             // Allocate fd for the new socket.
             match fdtables::get_unused_virtual_fd(
-                cage_id, socket::IPC_SOCKET, new_socket_id, false, 0,
+                cage_id, socket::IPC_SOCKET, new_socket_id, cloexec, extra_perfdinfo,
             ) {
                 Ok(new_fd) => return new_fd as i32,
                 Err(_) => {
@@ -2151,8 +2330,12 @@ pub extern "C" fn epoll_wait_handler(
 
     let mut kernel_count = 0i32;
     if kernel_max > 0 {
-        // Forward to the runtime with a grate-local slice (this_cage tag)
-        // for the remaining slots.  RawPOSIX writes results in place.
+        // Forward to the runtime with a grate-local slice tagged
+        // `this_cage | ARG_TRANSLATE_FLAG` for the remaining slots.  The
+        // MSB tells glibc's `make_threei_call` wrapper to convert the
+        // wasm32 offset to a host pointer before it reaches RawPOSIX —
+        // without it, the host dereferences a tiny wasm offset and
+        // segfaults.  RawPOSIX writes results in place.
         let kernel_buf = vec![ipc::EpollEvent::default(); kernel_max as usize];
         let args = [
             runtime_epfd,
@@ -2162,7 +2345,11 @@ pub extern "C" fn epoll_wait_handler(
             arg5,
             arg6,
         ];
-        let arg_cages = [arg1cage, this_cage, arg3cage, arg4cage, arg5cage, arg6cage];
+        let arg_cages = [
+            arg1cage,
+            this_cage | ARG_TRANSLATE_FLAG,
+            arg3cage, arg4cage, arg5cage, arg6cage,
+        ];
         kernel_count = forward_syscall(SYS_EPOLL_WAIT, cage_id, &args, &arg_cages);
         if kernel_count < 0 && ipc_count == 0 {
             return kernel_count;
@@ -2241,8 +2428,11 @@ pub extern "C" fn ppoll_handler(
     }
 
     // Forward SYS_PPOLL with a pointer into the grate's own pollfds Vec
-    // tagged with this_cage.  Same trick as poll_handler: RawPOSIX reads
-    // and writes the buffer in place, saving two cross-cage copies.
+    // tagged with `this_cage | ARG_TRANSLATE_FLAG`.  The MSB tells
+    // glibc's `make_threei_call` wrapper to convert the wasm32 offset
+    // to a host pointer before it reaches RawPOSIX.  Same trick as
+    // poll_handler: RawPOSIX reads and writes the buffer in place,
+    // saving two cross-cage copies.
     let args = [
         pollfds.as_mut_ptr() as u64,
         arg2,
@@ -2251,7 +2441,10 @@ pub extern "C" fn ppoll_handler(
         arg5,
         arg6,
     ];
-    let arg_cages = [this_cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+    let arg_cages = [
+        this_cage | ARG_TRANSLATE_FLAG,
+        arg2cage, arg3cage, arg4cage, arg5cage, arg6cage,
+    ];
     let kernel_ret = forward_syscall(SYS_PPOLL, cage_id, &args, &arg_cages);
     if kernel_ret < 0 && total_ready == 0 { return kernel_ret; }
     if kernel_ret > 0 { total_ready += kernel_ret; }
@@ -2317,12 +2510,15 @@ pub extern "C" fn accept4_handler(
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
     let info = lookup_ipc_fd(cage_id, fd);
-    if info.is_some() {
-        // Defer to accept_handler for IPC sockets (flags currently ignored).
-        return accept_handler(
-            _cageid, arg1, arg1cage, arg2, arg2cage, arg3, arg3cage,
-            arg4, arg4cage, arg5, arg5cage, arg6, arg6cage,
-        );
+    if let Some((socket_id, fdkind, listen_flags)) = info {
+        if fdkind != socket::IPC_SOCKET {
+            return -88;
+        }
+        // SOCK_CLOEXEC and SOCK_NONBLOCK are in arg4 (Linux convention:
+        // SOCK_CLOEXEC == O_CLOEXEC, SOCK_NONBLOCK == O_NONBLOCK).
+        let cloexec = (arg4 as i32 & O_CLOEXEC) != 0;
+        let extra_perfdinfo = (arg4) & (O_NONBLOCK as u64);
+        return accept_ipc_inner(cage_id, socket_id, listen_flags, cloexec, extra_perfdinfo);
     }
 
     let under = match translate_to_underfd(cage_id, fd) {

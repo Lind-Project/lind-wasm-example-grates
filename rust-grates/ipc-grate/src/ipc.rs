@@ -61,6 +61,7 @@ pub const O_ACCMODE: i32 = 3;
 
 // fcntl ops
 pub const F_DUPFD: i32 = 0;
+pub const F_DUPFD_CLOEXEC: i32 = 1030;
 pub const F_GETFD: i32 = 1;
 pub const F_SETFD: i32 = 2;
 pub const F_GETFL: i32 = 3;
