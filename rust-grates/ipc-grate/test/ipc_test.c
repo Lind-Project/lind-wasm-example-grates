@@ -534,6 +534,195 @@ static void test_rapid_pipe_lifecycle(void) {
     }
 }
 
+/* ── Test 17: popen pattern — dup2 pipe to stdin then exec ────────── */
+/* Simulates what popen("cmd", "w") does: parent writes to pipe,
+ * child dup2's read end to stdin, execs a program that reads stdin.
+ * Tests 4KB, 64KB (pipe buffer size), and 256KB transfers. */
+
+static void test_popen_exec_helper(const char *desc, long nbytes) {
+    int pipefd[2];
+    pipe(pipefd);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* Child: popen pattern — redirect pipe read end to stdin, exec reader */
+        close(pipefd[1]);       /* close write end */
+        dup2(pipefd[0], 0);     /* pipe read end -> stdin */
+        close(pipefd[0]);       /* close original fd */
+
+        /* exec the reader with expected byte count */
+        char countbuf[32];
+        snprintf(countbuf, sizeof(countbuf), "%ld", nbytes);
+        execl("pipe_stdin_reader.cwasm", "pipe_stdin_reader.cwasm", countbuf, NULL);
+        /* if exec fails */
+        perror("execl failed");
+        _exit(2);
+    }
+
+    /* Parent: write pattern data to pipe */
+    close(pipefd[0]);
+
+    char wbuf[4096];
+    long total = 0;
+    while (total < nbytes) {
+        long chunk = nbytes - total;
+        if (chunk > 4096) chunk = 4096;
+        for (long i = 0; i < chunk; i++)
+            wbuf[i] = 'A' + ((total + i) % 26);
+        ssize_t nw = write(pipefd[1], wbuf, chunk);
+        if (nw <= 0) break;
+        total += nw;
+    }
+    close(pipefd[1]);
+
+    int status;
+    waitpid(pid, &status, 0);
+
+    CHECK(desc, WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
+static void test_popen_exec(void) {
+    printf("\n[test_popen_exec]\n");
+
+    test_popen_exec_helper("popen pattern: 4KB through exec'd stdin", 4096);
+    test_popen_exec_helper("popen pattern: 64KB through exec'd stdin", 65536);
+    test_popen_exec_helper("popen pattern: 256KB through exec'd stdin", 256 * 1024);
+}
+
+/* ── Test: basic file I/O through the IPC grate ───────────────────── */
+/* Sanity check that the IPC grate's open/close/read/write handlers
+ * correctly forward non-IPC file operations to the kernel.  No pipes,
+ * no fork — just open a file, write a pattern, close, reopen, read,
+ * verify. */
+
+static void test_file_io_basic(void) {
+    printf("\n[test_file_io_basic]\n");
+
+    const char *path = "/tmp/ipc_grate_basic_io.tmp";
+    const char *pattern = "ipc-grate-basic-file-io-check";
+    size_t plen = strlen(pattern);
+
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    CHECK("open(O_RDWR|O_CREAT) returns valid fd", fd >= 0);
+    if (fd < 0) return;
+
+    ssize_t nw = write(fd, pattern, plen);
+    CHECK("write() to file returns full length", nw == (ssize_t)plen);
+
+    CHECK("close(fd) succeeds", close(fd) == 0);
+
+    fd = open(path, O_RDONLY);
+    CHECK("reopen O_RDONLY returns valid fd", fd >= 0);
+    if (fd < 0) { unlink(path); return; }
+
+    char buf[64] = {0};
+    ssize_t nr = read(fd, buf, sizeof(buf) - 1);
+    CHECK("read() returns full length",
+          nr == (ssize_t)plen && memcmp(buf, pattern, plen) == 0);
+
+    CHECK("close(fd) after read succeeds", close(fd) == 0);
+
+    unlink(path);
+}
+
+/* ── Test 17b: fd collision after exec ───────────────────────────── */
+/* Parent creates a pipe and forks. Child deliberately leaks both pipe
+ * fds (does not close them) and execs a helper that opens kernel files.
+ * Without the exec_handler IPC cleanup, the grate's fdtable still holds
+ * IPC entries on the inherited pipe fds; when the helper's open() returns
+ * those same fd numbers from the kernel, read/write on them gets routed
+ * to the dead pipe instead of the file, and the helper exits non-zero.
+ */
+static void test_fd_collision_after_exec(void) {
+    printf("\n[test_fd_collision_after_exec]\n");
+
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        printf("  FAIL: pipe() errno=%d\n", errno);
+        tests_run++;
+        return;
+    }
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* Intentionally do NOT close pipefd[0]/pipefd[1].  The grate's
+         * fdtable will still hold IPC pipe entries on those fd numbers
+         * across the exec, shadowing kernel-allocated file fds in the
+         * exec'd program. */
+        execl("file_collision_reader.cwasm", "file_collision_reader.cwasm", NULL);
+        perror("execl failed");
+        _exit(2);
+    }
+
+    /* Parent: drop pipe ends so the child's read end (if it ever gets
+     * used) hits EOF promptly. */
+    close(pipefd[0]);
+    close(pipefd[1]);
+
+    int status;
+    waitpid(pid, &status, 0);
+    CHECK("file I/O after exec with leaked pipe fds",
+          WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
+/* ── Test 18: Large pipe transfer correctness ─────────────────────── */
+/* Verifies byte-level correctness for transfers larger than the pipe
+ * buffer (65KB). Tests 128KB and 512KB across a fork. */
+
+static void test_large_pipe_correctness_helper(const char *desc, long nbytes) {
+    int pipefd[2];
+    pipe(pipefd);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* Child: writer */
+        close(pipefd[0]);
+        char wbuf[4096];
+        long total = 0;
+        while (total < nbytes) {
+            long chunk = nbytes - total;
+            if (chunk > 4096) chunk = 4096;
+            for (long i = 0; i < chunk; i++)
+                wbuf[i] = 'A' + ((total + i) % 26);
+            ssize_t nw = write(pipefd[1], wbuf, chunk);
+            if (nw <= 0) _exit(1);
+            total += nw;
+        }
+        close(pipefd[1]);
+        _exit(0);
+    }
+
+    /* Parent: reader */
+    close(pipefd[1]);
+
+    char rbuf[4096];
+    long total = 0;
+    int ok = 1;
+    while (total < nbytes) {
+        ssize_t nr = read(pipefd[0], rbuf, sizeof(rbuf));
+        if (nr <= 0) { ok = 0; break; }
+        for (long i = 0; i < nr; i++) {
+            char want = 'A' + ((total + i) % 26);
+            if (rbuf[i] != want) { ok = 0; break; }
+        }
+        if (!ok) break;
+        total += nr;
+    }
+    if (total != nbytes) ok = 0;
+
+    close(pipefd[0]);
+    waitpid(pid, NULL, 0);
+
+    CHECK(desc, ok);
+}
+
+static void test_large_pipe_correctness(void) {
+    printf("\n[test_large_pipe_correctness]\n");
+
+    test_large_pipe_correctness_helper("128KB pipe transfer correct", 128 * 1024);
+    test_large_pipe_correctness_helper("512KB pipe transfer correct", 512 * 1024);
+}
+
 /* ── Main ──────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -555,6 +744,10 @@ int main(void) {
     test_dup2_overwrite();
     test_socketpair_fork();
     test_rapid_pipe_lifecycle();
+    test_popen_exec();
+    test_file_io_basic();
+    test_fd_collision_after_exec();
+    test_large_pipe_correctness();
 
     printf("\n=== results: %d/%d passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
