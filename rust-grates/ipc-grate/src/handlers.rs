@@ -500,15 +500,11 @@ pub extern "C" fn poll_handler(
         // non-blocking kernel check (timeout=0) so we return promptly.
         let kernel_timeout = if total_ready > 0 { 0i32 } else { arg3 as i32 };
 
-        // Write the modified pollfd[] back to the cage so the kernel
-        // can read it, then forward.
-        // let _ = copy_data_between_cages(
-        //     this_cage, arg1cage,
-        //     pollfds.as_ptr() as u64, this_cage,
-        //     arg1, arg1cage,
-        //     bytes, 0,
-        // );
-        // let args = [arg1, arg2, kernel_timeout as u64, arg4, arg5, arg6];
+        // Forward SYS_POLL with a pointer into the grate's own pollfds Vec
+        // tagged with this_cage.  RawPOSIX resolves the pointer against
+        // the grate cage's wasm-memory base and reads/writes the buffer
+        // in place.  This avoids two `copy_data_between_cages` round-trips
+        // (write-back-pre-call + read-back-post-call) per poll.
         let args = [
             pollfds.as_mut_ptr() as u64,
             arg2,
@@ -517,30 +513,13 @@ pub extern "C" fn poll_handler(
             arg5,
             arg6,
         ];
-
-        // let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
-        let arg_cages = [
-            this_cage,   // pollfds pointer belongs to ipc-grate cage
-            arg2cage,
-            arg3cage,
-            arg4cage,
-            arg5cage,
-            arg6cage,
-        ];
+        let arg_cages = [this_cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
         let kernel_ret = forward_syscall(SYS_POLL, cage_id, &args, &arg_cages);
         if kernel_ret < 0 {
             return kernel_ret;
         }
         total_ready += kernel_ret;
-
-        // Read back the cage's modified pollfd[] (kernel filled in
-        // revents for the kernel fds; IPC fds have fd=-1 so revents=0).
-        // let _ = copy_data_between_cages(
-        //     this_cage, arg1cage,
-        //     arg1, arg1cage,
-        //     pollfds.as_mut_ptr() as u64, this_cage,
-        //     bytes, 0,
-        // );
+        // pollfds is already updated in place — no read-back copy needed.
     }
 
     // Restore original fd values for ALL entries (kernel saw runtime vfds
@@ -698,74 +677,32 @@ pub extern "C" fn select_handler(
         }
     }
 
-    // Write the kernel-side sets to a scratch region in cage memory by
-    // overwriting the original set buffers.  After we collect kernel
-    // results we'll rebuild the grate-side sets and write those back.
-    if have_r {
-        let _ = copy_data_between_cages(
-            this_cage, arg1cage,
-            k_read.as_ptr() as u64, this_cage,
-            arg2, arg1cage,
-            FD_SET_BYTES as u64, 0,
-        );
-    }
-    if have_w {
-        let _ = copy_data_between_cages(
-            this_cage, arg1cage,
-            k_write.as_ptr() as u64, this_cage,
-            arg3, arg1cage,
-            FD_SET_BYTES as u64, 0,
-        );
-    }
-    if have_e {
-        let _ = copy_data_between_cages(
-            this_cage, arg1cage,
-            k_except.as_ptr() as u64, this_cage,
-            arg4, arg1cage,
-            FD_SET_BYTES as u64, 0,
-        );
-    }
-
-    // Forward to kernel with runtime_nfds = max_under + 1 (or original nfds
-    // if no kernel fds remain so kernel still honors the timeout).
+    // Forward SYS_SELECT with pointers into the grate's own k_* arrays
+    // tagged with this_cage.  RawPOSIX reads the input bitmaps in place
+    // and writes the result back into the same arrays.  This saves 6
+    // cross-cage copies: 3 input copies pre-call and 3 result copies
+    // post-call (we still do 3 final copies to write the translated
+    // grate-side result into the user's fd_set buffers).
+    //
+    // Pass 0/this_cage for any set that's NULL — the kernel ignores
+    // that set, but we keep the position so the cage tags match.
     let runtime_nfds = if max_under > 0 { (max_under + 1) as u64 } else { arg1 };
-    let args = [runtime_nfds, arg2, arg3, arg4, arg5, arg6];
-    let arg_cages = [arg1cage, _arg2cage, _arg3cage, _arg4cage, arg5cage, arg6cage];
+    let r_ptr = if have_r { k_read.as_mut_ptr() as u64 } else { 0 };
+    let w_ptr = if have_w { k_write.as_mut_ptr() as u64 } else { 0 };
+    let e_ptr = if have_e { k_except.as_mut_ptr() as u64 } else { 0 };
+    let args = [runtime_nfds, r_ptr, w_ptr, e_ptr, arg5, arg6];
+    let arg_cages = [arg1cage, this_cage, this_cage, this_cage, arg5cage, arg6cage];
     let kernel_ret = forward_syscall(SYS_SELECT, cage_id, &args, &arg_cages);
     if kernel_ret < 0 {
         return kernel_ret;
     }
 
-    // Read back kernel-modified sets, translate runtime vfds → grate vfds,
-    // OR in our IPC bits, and write the result back.
+    // k_read / k_write / k_except now hold the kernel's results
+    // (RawPOSIX wrote in place).  Translate runtime vfds → grate vfds,
+    // OR in our IPC bits, and write the final user-visible result back.
     let mut out_r: [u32; FD_SET_WORDS] = [0; FD_SET_WORDS];
     let mut out_w: [u32; FD_SET_WORDS] = [0; FD_SET_WORDS];
     let mut out_e: [u32; FD_SET_WORDS] = [0; FD_SET_WORDS];
-
-    if have_r {
-        let _ = copy_data_between_cages(
-            this_cage, arg1cage,
-            arg2, arg1cage,
-            k_read.as_mut_ptr() as u64, this_cage,
-            FD_SET_BYTES as u64, 0,
-        );
-    }
-    if have_w {
-        let _ = copy_data_between_cages(
-            this_cage, arg1cage,
-            arg3, arg1cage,
-            k_write.as_mut_ptr() as u64, this_cage,
-            FD_SET_BYTES as u64, 0,
-        );
-    }
-    if have_e {
-        let _ = copy_data_between_cages(
-            this_cage, arg1cage,
-            arg4, arg1cage,
-            k_except.as_mut_ptr() as u64, this_cage,
-            FD_SET_BYTES as u64, 0,
-        );
-    }
 
     for under in 0..=max_under {
         if let Some(grate_fd) = rev_map[under] {
@@ -2052,20 +1989,25 @@ pub extern "C" fn ppoll_handler(
         }
     }
 
-    let _ = copy_data_between_cages(
-        this_cage, arg1cage,
-        pollfds.as_ptr() as u64, this_cage, arg1, arg1cage, bytes, 0,
-    );
-    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
-    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+    // Forward SYS_PPOLL with a pointer into the grate's own pollfds Vec
+    // tagged with this_cage.  Same trick as poll_handler: RawPOSIX reads
+    // and writes the buffer in place, saving two cross-cage copies.
+    let args = [
+        pollfds.as_mut_ptr() as u64,
+        arg2,
+        arg3,
+        arg4,
+        arg5,
+        arg6,
+    ];
+    let arg_cages = [this_cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
     let kernel_ret = forward_syscall(SYS_PPOLL, cage_id, &args, &arg_cages);
     if kernel_ret < 0 && total_ready == 0 { return kernel_ret; }
     if kernel_ret > 0 { total_ready += kernel_ret; }
 
-    let _ = copy_data_between_cages(
-        this_cage, arg1cage, arg1, arg1cage,
-        pollfds.as_mut_ptr() as u64, this_cage, bytes, 0,
-    );
+    // Restore original (grate-side) fd values for ALL entries and overlay
+    // our IPC-computed revents on the IPC entries.  Then write the final
+    // pollfd[] back to the cage so the user sees its own grate vfds.
     for i in 0..nfds { pollfds[i].fd = original_fds[i]; }
     for i in &ipc_indices { pollfds[*i].revents = ipc_revents[*i]; }
     let _ = copy_data_between_cages(
