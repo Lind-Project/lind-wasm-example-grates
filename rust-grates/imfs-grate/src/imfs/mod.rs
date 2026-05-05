@@ -14,6 +14,7 @@ pub mod node;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use grate_rs::ffi::stat;
 use node::*;
 
 use grate_rs::constants::fs::*;
@@ -38,6 +39,9 @@ pub struct FDInfo {
     offset: i64,
 }
 
+const DIRENT64_FIXED_SIZE: usize = 8 + 8 + 2 + 1;
+const IMFS_BLOCK_SIZE: i32 = 512;
+
 /// The complete IMFS state.
 pub struct ImfsState {
     pub nodes: Vec<Node>,
@@ -51,6 +55,9 @@ pub struct ImfsState {
     /// fdtables stores everything else (node index as underfd, flags as perfdinfo).
     // pub offsets: HashMap<(u64, u64), i64>,
     pub fd_info: HashMap<(u64, u64), Arc<Mutex<FDInfo>>>,
+
+    /// List of current working directories for each cage.
+    pub cwd_info: HashMap<u64, String>,
 }
 
 /// Initialize the global IMFS. Called once at startup.
@@ -62,7 +69,10 @@ pub fn init() {
         chunk_free_list: Vec::new(),
         root_idx: 0,
         fd_info: HashMap::new(),
+        cwd_info: HashMap::new(),
     };
+
+    state.cwd_info.insert(0, "/".to_string());
 
     // Create root directory.
     let root_idx = state.create_node("/", NodeType::Dir, 0o755);
@@ -82,6 +92,69 @@ pub fn init() {
 }
 
 impl ImfsState {
+    // =====================================================================
+    //  Timestamp helpers
+    // =====================================================================
+
+    fn update_atime(&mut self, node_idx: usize) {
+        self.nodes[node_idx].atime = NodeTime::now();
+    }
+
+    fn update_mtime(&mut self, node_idx: usize) {
+        self.nodes[node_idx].mtime = NodeTime::now();
+    }
+
+    fn update_ctime(&mut self, node_idx: usize) {
+        self.nodes[node_idx].ctime = NodeTime::now();
+    }
+
+    // =====================================================================
+    //  Directory read helpers
+    // =====================================================================
+
+    fn dirent_type(&self, node_idx: usize) -> u8 {
+        let mut idx = node_idx;
+
+        while let NodeInfo::Lnk { target } = &self.nodes[idx].info {
+            idx = *target;
+        }
+
+        match self.nodes[idx].node_type {
+            NodeType::Dir => libc::DT_DIR,
+            NodeType::Reg => libc::DT_REG,
+            NodeType::Lnk => libc::DT_LNK,
+            _ => libc::DT_UNKNOWN,
+        }
+    }
+
+    fn dirent_reclen(name_len: usize) -> usize {
+        let reclen = DIRENT64_FIXED_SIZE + name_len + 1;
+        (reclen + 7) & !7
+    }
+
+    fn write_dirent_record(
+        buf: &mut [u8],
+        ino: u64,
+        next_offset: u64,
+        d_type: u8,
+        name: &str,
+    ) -> usize {
+        let reclen = Self::dirent_reclen(name.len());
+        let record = &mut buf[..reclen];
+
+        record.fill(0);
+        record[0..8].copy_from_slice(&ino.to_ne_bytes());
+        record[8..16].copy_from_slice(&next_offset.to_ne_bytes());
+        record[16..18].copy_from_slice(&(reclen as u16).to_ne_bytes());
+        record[18] = d_type;
+
+        let name_start = DIRENT64_FIXED_SIZE;
+        let name_end = name_start + name.len();
+        record[name_start..name_end].copy_from_slice(name.as_bytes());
+
+        reclen
+    }
+
     // =====================================================================
     //  Node management
     // =====================================================================
@@ -142,99 +215,259 @@ impl ImfsState {
         }
     }
 
+    fn reclaim_chunk(&mut self, idx: usize) {
+        self.chunks[idx] = Chunk::new();
+        self.chunk_free_list.push(idx);
+    }
+
+    fn reclaim_chunk_chain(&mut self, mut chunk_idx: Option<usize>) {
+        while let Some(ci) = chunk_idx {
+            let next = self.chunks[ci].next;
+            self.reclaim_chunk(ci);
+            chunk_idx = next;
+        }
+    }
+
     // =====================================================================
     //  Path resolution
     // =====================================================================
 
+    fn normalize_path_for_cage(&self, cage_id: u64, path: &str) -> String {
+        let base = if path.starts_with('/') {
+            "/".to_string()
+        } else {
+            self.cwd_info
+                .get(&cage_id)
+                .cloned()
+                .unwrap_or_else(|| "/".to_string())
+        };
+
+        let mut parts: Vec<&str> = Vec::new();
+
+        for part in base.split('/').chain(path.split('/')) {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    parts.pop();
+                }
+                x => parts.push(x),
+            }
+        }
+
+        if parts.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{}", parts.join("/"))
+        }
+    }
+
+    fn lookup_child(&self, parent_idx: usize, name: &str) -> Option<usize> {
+        self.nodes[parent_idx]
+            .children()
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| entry.node_idx)
+    }
+
     /// Walk the node tree to find the node at the given absolute path.
-    /// Returns None if any component doesn't exist or isn't a directory.
-    /// Follows symlinks (Lnk nodes) during traversal.
-    fn find_node(&self, path: &str) -> Option<usize> {
+    /// Returns ENOENT if a component is missing, ENOTDIR if an intermediate
+    /// component is not a directory. If follow_final is false, the last path
+    /// component is returned without following a link node.
+    fn resolve_path(&self, path: &str, follow_final: bool) -> Result<usize, i32> {
         if path == "/" {
-            return Some(self.root_idx);
+            return Ok(self.root_idx);
         }
 
         let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
         if components.is_empty() {
-            return Some(self.root_idx);
+            return Ok(self.root_idx);
         }
 
         let mut current = self.root_idx;
 
-        for component in &components {
-            let children = match &self.nodes[current].info {
-                NodeInfo::Dir { children } => children,
-                _ => return None,
-            };
-
-            let mut found = None;
-            for entry in children {
-                if entry.name == *component {
-                    let child = &self.nodes[entry.node_idx];
-                    // Follow symlinks.
-                    found = Some(match child.link_target() {
-                        Some(target) => target,
-                        None => entry.node_idx,
-                    });
-                    break;
-                }
+        for (idx, component) in components.iter().enumerate() {
+            if self.nodes[current].node_type != NodeType::Dir {
+                return Err(-20); // ENOTDIR
             }
 
-            current = found?;
+            let entry_idx = self.lookup_child(current, component).ok_or(-2)?; // ENOENT
+            let is_final = idx + 1 == components.len();
+
+            current = if is_final && !follow_final {
+                entry_idx
+            } else {
+                self.nodes[entry_idx].link_target().unwrap_or(entry_idx)
+            };
         }
 
-        Some(current)
+        Ok(current)
     }
 
     /// Split a path into its parent directory and final filename.
-    /// Returns (parent_node_idx, filename) or None if the parent doesn't exist.
-    fn find_parent_and_name(&self, path: &str) -> Option<(usize, String)> {
+    /// Returns ENOENT if a parent component is missing, ENOTDIR if an
+    /// intermediate component is not a directory.
+    fn resolve_parent_and_name(&self, path: &str) -> Result<(usize, String), i32> {
         let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
         if components.is_empty() {
-            return None;
+            return Err(-2); // ENOENT
         }
 
         let filename = components.last().unwrap().to_string();
 
         if components.len() == 1 {
-            return Some((self.root_idx, filename));
+            return Ok((self.root_idx, filename));
         }
 
-        let mut current = self.root_idx;
-        for component in &components[..components.len() - 1] {
-            let children = match &self.nodes[current].info {
-                NodeInfo::Dir { children } => children,
-                _ => return None,
-            };
-
-            let mut found = None;
-            for entry in children {
-                if entry.name == *component {
-                    found = Some(match self.nodes[entry.node_idx].link_target() {
-                        Some(target) => target,
-                        None => entry.node_idx,
-                    });
-                    break;
-                }
-            }
-            current = found?;
+        let parent_path = format!("/{}", components[..components.len() - 1].join("/"));
+        let parent_idx = self.resolve_path(&parent_path, true)?;
+        if self.nodes[parent_idx].node_type != NodeType::Dir {
+            return Err(-20); // ENOTDIR
         }
 
-        if self.nodes[current].node_type != NodeType::Dir {
-            return None;
+        Ok((parent_idx, filename))
+    }
+
+    fn absolute_path_for_node(&self, node_idx: usize) -> String {
+        if node_idx == self.root_idx {
+            return "/".to_string();
         }
 
-        Some((current, filename))
+        let mut parts = Vec::new();
+        let mut current = node_idx;
+
+        while current != self.root_idx {
+            parts.push(self.nodes[current].name.clone());
+            current = self.nodes[current].parent_idx;
+        }
+
+        parts.reverse();
+        format!("/{}", parts.join("/"))
+    }
+
+    fn normalize_path_at(&self, cage_id: u64, dirfd: i32, path: &str) -> Result<String, i32> {
+        if path.starts_with('/') {
+            return Ok(self.normalize_path_for_cage(cage_id, path));
+        }
+
+        if dirfd == libc::AT_FDCWD {
+            return Ok(self.normalize_path_for_cage(cage_id, path));
+        }
+
+        let entry = match fdtables::translate_virtual_fd(cage_id, dirfd as u64) {
+            Ok(entry) => entry,
+            Err(_) => return Err(-9), // EBADF
+        };
+
+        let mut node_idx = entry.underfd as usize;
+        while let NodeInfo::Lnk { target } = &self.nodes[node_idx].info {
+            node_idx = *target;
+        }
+
+        if self.nodes[node_idx].node_type != NodeType::Dir {
+            return Err(-20); // ENOTDIR
+        }
+
+        let base = self.absolute_path_for_node(node_idx);
+        Ok(self.normalize_path_for_cage(cage_id, &format!("{}/{}", base, path)))
     }
 
     // =====================================================================
-    //  Internal chunk read/write
+    //  FD and metadata helpers
     // =====================================================================
 
-    /// Read bytes from a regular file's chunk chain starting at the given byte offset.
-    /// Walks the linked list of chunks, skipping past the offset, then copies data
-    /// into buf. Returns the number of bytes actually read (may be less than buf.len()
-    /// if EOF is reached).
+    fn fill_stat(&self, node_idx: usize, statbuf: &mut stat) {
+        let node = &self.nodes[node_idx];
+
+        *statbuf = stat {
+            st_dev: 1,
+            st_ino: node_idx as u64,
+            st_mode: node.mode,
+            st_nlink: 1,
+            st_uid: 0, //node.owner,
+            st_gid: 0, //node.group,
+            st_rdev: 0,
+            st_size: node.total_size as u64,
+            st_blksize: IMFS_BLOCK_SIZE,
+            st_blocks: (node.total_size / IMFS_BLOCK_SIZE as usize) as u32,
+            st_atim: node.atime.as_stat_pair(),
+            st_mtim: node.mtime.as_stat_pair(),
+            st_ctim: node.ctime.as_stat_pair(),
+        };
+    }
+
+    fn open_resolved_path(&mut self, cage_id: u64, norm_path: &str, flags: i32, mode: u32) -> i32 {
+        let node_idx = if let Ok(idx) = self.resolve_path(norm_path, true) {
+            if (flags & O_EXCL) != 0 && (flags & O_CREAT) != 0 {
+                return -17; // EEXIST
+            }
+            if (flags & O_DIRECTORY) != 0 && self.nodes[idx].node_type != NodeType::Dir {
+                return -20; // ENOTDIR
+            }
+            if self.nodes[idx].node_type == NodeType::Dir {
+                match flags & O_ACCMODE {
+                    O_WRONLY | O_RDWR => return -21, // EISDIR
+                    _ => {}
+                }
+            }
+
+            // Check permissions.
+            let m = self.nodes[idx].mode;
+            match flags & O_ACCMODE {
+                O_RDONLY if m & S_IRUSR == 0 => return -13,
+                O_WRONLY if m & S_IWUSR == 0 => return -13,
+                O_RDWR if m & S_IRUSR == 0 || m & S_IWUSR == 0 => return -13,
+                _ => {}
+            }
+
+            if self.nodes[idx].node_type == NodeType::Reg
+                && (flags & O_TRUNC) != 0
+                && (flags & O_ACCMODE) != O_RDONLY
+            {
+                self.nodes[idx].total_size = 0;
+                self.update_mtime(idx);
+                self.update_ctime(idx);
+            }
+
+            idx
+        } else {
+            if (flags & O_CREAT) == 0 {
+                return -2; // ENOENT
+            }
+            let (parent_idx, filename) = match self.resolve_parent_and_name(norm_path) {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
+            if filename.len() >= MAX_NODE_NAME {
+                return -36; // ENAMETOOLONG
+            }
+            let new_idx = self.create_node(&filename, NodeType::Reg, mode);
+            self.add_child(parent_idx, new_idx);
+            self.update_mtime(parent_idx);
+            self.update_ctime(parent_idx);
+            self.update_mtime(new_idx);
+            self.update_ctime(new_idx);
+            new_idx
+        };
+
+        self.nodes[node_idx].in_use += 1;
+
+        match fdtables::get_unused_virtual_fd(cage_id, IMFS_FDKIND, node_idx as u64, false, 0) {
+            Ok(vfd) => {
+                let new_fdinfo = Arc::new(Mutex::new(FDInfo {
+                    flags: flags as u64,
+                    offset: 0,
+                }));
+
+                self.fd_info.insert((cage_id, vfd), new_fdinfo.clone());
+
+                vfd as i32
+            }
+            Err(_) => {
+                self.nodes[node_idx].in_use -= 1;
+                -24 // EMFILE
+            }
+        }
+    }
 
     fn get_offset(&self, cageid: u64, fd: u64) -> i64 {
         let underfd = self.fd_info.get(&(cageid, fd)).unwrap().lock().unwrap();
@@ -248,6 +481,14 @@ impl ImfsState {
         underfd.offset = offset;
     }
 
+    // =====================================================================
+    //  Internal chunk read/write
+    // =====================================================================
+
+    /// Read bytes from a regular file's chunk chain starting at the given byte offset.
+    /// Walks the linked list of chunks, skipping past the offset, then copies data
+    /// into buf. Returns the number of bytes actually read (may be less than buf.len()
+    /// if EOF is reached).
     fn read_from_node(&self, node_idx: usize, offset: usize, buf: &mut [u8]) -> usize {
         let node = &self.nodes[node_idx];
         if offset >= node.total_size {
@@ -367,10 +608,80 @@ impl ImfsState {
         written
     }
 
+    fn truncate_node(&mut self, node_idx: usize, new_size: usize) {
+        let old_size = self.nodes[node_idx].total_size;
+
+        if new_size == old_size {
+            return;
+        }
+
+        if new_size > old_size {
+            let zero = [0u8; 1];
+            let _ = self.write_to_node(node_idx, new_size - 1, &zero);
+            return;
+        }
+
+        if new_size == 0 {
+            let head = match &mut self.nodes[node_idx].info {
+                NodeInfo::Reg { head, tail } => {
+                    let old_head = *head;
+                    *head = None;
+                    *tail = None;
+                    old_head
+                }
+                _ => return,
+            };
+
+            self.reclaim_chunk_chain(head);
+            self.nodes[node_idx].total_size = 0;
+            return;
+        }
+
+        let mut remaining = new_size;
+        let mut current = match &self.nodes[node_idx].info {
+            NodeInfo::Reg { head, .. } => *head,
+            _ => return,
+        };
+
+        let mut last_keep = None;
+
+        while let Some(ci) = current {
+            if remaining > CHUNK_SIZE {
+                remaining -= CHUNK_SIZE;
+                last_keep = Some(ci);
+                current = self.chunks[ci].next;
+                continue;
+            }
+
+            self.chunks[ci].used = remaining;
+            let to_reclaim = self.chunks[ci].next;
+            self.chunks[ci].next = None;
+            self.reclaim_chunk_chain(to_reclaim);
+
+            if let NodeInfo::Reg { tail, .. } = &mut self.nodes[node_idx].info {
+                *tail = Some(ci);
+            }
+
+            self.nodes[node_idx].total_size = new_size;
+            return;
+        }
+
+        if let Some(ci) = last_keep {
+            self.chunks[ci].next = None;
+            if let NodeInfo::Reg { tail, .. } = &mut self.nodes[node_idx].info {
+                *tail = Some(ci);
+            }
+        }
+
+        self.nodes[node_idx].total_size = new_size;
+    }
+
+    // =====================================================================
+    //  FD resolution helpers
+    // =====================================================================
+
     // Helper function to get the node_idx and flag for a give cageid and fd.
-    //
     // In case the node_idx points to a Lnk, it follows the link until we hit a real Node.
-    // This immediately adds support for reading symlinked files.
     fn get_node_and_flags(&mut self, cage_id: u64, fd: u64) -> Result<(usize, i32), i32> {
         let entry = match fdtables::translate_virtual_fd(cage_id, fd) {
             Ok(e) => e,
@@ -394,7 +705,7 @@ impl ImfsState {
     }
 
     // =====================================================================
-    //  Public Filesystem operations
+    //  Public filesystem operations
     //
     //  These use fdtables directly:
     //    - underfd  = node index
@@ -408,69 +719,128 @@ impl ImfsState {
                 self.fd_info.insert((child_cage, *fd), underfd_arc.clone());
             }
         }
+
+        if let Some(cwd) = self.cwd_info.get(&parent_cage).cloned() {
+            self.cwd_info.insert(child_cage, cwd);
+        }
+    }
+
+    /// chdir
+    pub fn chdir(&mut self, cage_id: u64, path: &str) -> i32 {
+        let norm_path = self.normalize_path_for_cage(cage_id, path);
+        if let Some(cwd) = self.cwd_info.get_mut(&cage_id) {
+            *cwd = norm_path.to_string();
+            0
+        } else {
+            -1
+        }
+    }
+
+    pub fn getcwd(&self, cage_id: u64) -> Result<String, i32> {
+        self.cwd_info.get(&cage_id).cloned().ok_or(-1)
+    }
+
+    pub fn access(&mut self, cage_id: u64, path: &str, mode: i32) -> i32 {
+        let norm_path = self.normalize_path_for_cage(cage_id, path);
+        let node_idx = match self.resolve_path(&norm_path, true) {
+            Ok(idx) => idx,
+            Err(e) => return e,
+        };
+
+        if mode == F_OK {
+            return if node_idx < self.nodes.len() { 0 } else { -2 };
+        }
+
+        let m = self.nodes[node_idx].mode;
+        if (mode & R_OK) != 0 && (m & S_IRUSR) == 0 {
+            return -13; // EACCES
+        }
+        if (mode & W_OK) != 0 && (m & S_IWUSR) == 0 {
+            return -13; // EACCES
+        }
+        if (mode & X_OK) != 0 && (m & S_IXUSR) == 0 {
+            return -13; // EACCES
+        }
+
+        0
+    }
+
+    /// xstat
+    pub fn stat(&mut self, cage_id: u64, path: &str, statbuf: &mut stat) -> i32 {
+        let norm_path = self.normalize_path_for_cage(cage_id, path);
+
+        let node_idx = match self.resolve_path(&norm_path, true) {
+            Ok(idx) => idx,
+            Err(e) => return e,
+        };
+
+        self.fill_stat(node_idx, statbuf);
+
+        0
+    }
+
+    /// fxstat
+    pub fn fstat(&mut self, cage_id: u64, fd: u64, statbuf: &mut stat) -> i32 {
+        let (node_idx, _) = match self.get_node_and_flags(cage_id, fd) {
+            Ok((n, f)) => (n, f),
+            Err(e) => return e,
+        };
+
+        self.fill_stat(node_idx, statbuf);
+
+        0
+    }
+
+    /// rmdir: remove an empty directory.
+    pub fn rmdir(&mut self, cage_id: u64, path: &str) -> i32 {
+        let norm_path = self.normalize_path_for_cage(cage_id, path);
+        let node_idx = match self.resolve_path(&norm_path, true) {
+            Ok(idx) => idx,
+            Err(e) => return e,
+        };
+
+        if node_idx == self.root_idx {
+            return -16; // EBUSY
+        }
+
+        let children = match &self.nodes[node_idx].info {
+            NodeInfo::Dir { children } => children,
+            _ => return -20, // ENOTDIR
+        };
+
+        if children
+            .iter()
+            .any(|entry| entry.name != "." && entry.name != "..")
+        {
+            return -39; // ENOTEMPTY
+        }
+
+        let parent_idx = self.nodes[node_idx].parent_idx;
+        self.remove_child(node_idx);
+        self.update_mtime(parent_idx);
+        self.update_ctime(parent_idx);
+        self.update_ctime(node_idx);
+        self.nodes[node_idx].doomed = true;
+
+        if self.nodes[node_idx].in_use == 0 {
+            self.reclaim_node(node_idx);
+        }
+
+        0
     }
 
     /// open: create or open a file. Returns the fd allocated by fdtables.
     pub fn open(&mut self, cage_id: u64, path: &str, flags: i32, mode: u32) -> i32 {
-        let node_idx = if let Some(idx) = self.find_node(path) {
-            if (flags & O_EXCL) != 0 && (flags & O_CREAT) != 0 {
-                return -17; // EEXIST
-            }
-            if self.nodes[idx].node_type == NodeType::Dir && (flags & O_DIRECTORY) == 0 {
-                return -21; // EISDIR
-            }
+        let norm_path = self.normalize_path_for_cage(cage_id, path);
+        self.open_resolved_path(cage_id, &norm_path, flags, mode)
+    }
 
-            // Check permissions.
-            let m = self.nodes[idx].mode;
-            match flags & O_ACCMODE {
-                O_RDONLY if m & S_IRUSR == 0 => return -13,
-                O_WRONLY if m & S_IWUSR == 0 => return -13,
-                O_RDWR if m & S_IRUSR == 0 || m & S_IWUSR == 0 => return -13,
-                _ => {}
-            }
-            idx
-        } else {
-            if (flags & O_CREAT) == 0 {
-                return -2; // ENOENT
-            }
-            let (parent_idx, filename) = match self.find_parent_and_name(path) {
-                Some(p) => p,
-                None => return -20, // ENOTDIR
-            };
-            if filename.len() >= MAX_NODE_NAME {
-                return -36; // ENAMETOOLONG
-            }
-            let new_idx = self.create_node(&filename, NodeType::Reg, mode);
-            self.add_child(parent_idx, new_idx);
-            new_idx
+    pub fn openat(&mut self, cage_id: u64, dirfd: i32, path: &str, flags: i32, mode: u32) -> i32 {
+        let norm_path = match self.normalize_path_at(cage_id, dirfd, path) {
+            Ok(path) => path,
+            Err(e) => return e,
         };
-
-        self.nodes[node_idx].in_use += 1;
-
-        // Allocate fd via fdtables. underfd = node index, perfdinfo = flags.
-        match fdtables::get_unused_virtual_fd(
-            cage_id,
-            IMFS_FDKIND,
-            node_idx as u64, // underfd: which node
-            false,
-            0,
-        ) {
-            Ok(vfd) => {
-                // Track the offset for this fd.
-                let new_fdinfo = Arc::new(Mutex::new(FDInfo {
-                    flags: flags as u64,
-                    offset: 0,
-                }));
-
-                self.fd_info.insert((cage_id, vfd), new_fdinfo.clone());
-
-                vfd as i32
-            }
-            Err(_) => {
-                self.nodes[node_idx].in_use -= 1;
-                -24 // EMFILE
-            }
-        }
+        self.open_resolved_path(cage_id, &norm_path, flags, mode)
     }
 
     /// close: close an fd via fdtables and clean up the offset.
@@ -520,6 +890,9 @@ impl ImfsState {
         let offset = self.get_offset(cage_id, fd);
 
         let n = self.read_from_node(node_idx, offset as usize, buf);
+        if n > 0 {
+            self.update_atime(node_idx);
+        }
 
         // Advance the offset.
         self.set_offset(cage_id, fd, offset + n as i64);
@@ -546,7 +919,12 @@ impl ImfsState {
             return -9;
         }
 
-        self.read_from_node(node_idx, offset as usize, buf) as i32
+        let n = self.read_from_node(node_idx, offset as usize, buf);
+        if n > 0 {
+            self.update_atime(node_idx);
+        }
+
+        n as i32
     }
 
     /// write: write to a file at the current offset.
@@ -574,6 +952,10 @@ impl ImfsState {
         };
 
         let n = self.write_to_node(node_idx, offset as usize, buf);
+        if n > 0 {
+            self.update_mtime(node_idx);
+            self.update_ctime(node_idx);
+        }
 
         self.set_offset(cage_id, fd, offset + n as i64);
 
@@ -599,13 +981,19 @@ impl ImfsState {
             return -9;
         }
 
-        self.write_to_node(node_idx, offset as usize, buf) as i32
+        let n = self.write_to_node(node_idx, offset as usize, buf);
+        if n > 0 {
+            self.update_mtime(node_idx);
+            self.update_ctime(node_idx);
+        }
+
+        n as i32
     }
 
     /// lseek: reposition the fd offset.
     pub fn lseek(&mut self, cage_id: u64, fd: u64, offset: i64, whence: i32) -> i32 {
         let (node_idx, _) = match self.get_node_and_flags(cage_id, fd) {
-            Ok((n, _)) => (n, ..),
+            Ok((n, f)) => (n, f),
             Err(e) => return e,
         };
 
@@ -644,14 +1032,94 @@ impl ImfsState {
         }
     }
 
-    /// unlink: remove a file or directory.
-    pub fn unlink(&mut self, path: &str) -> i32 {
-        let node_idx = match self.find_node(path) {
-            Some(idx) => idx,
-            None => return -2,
+    /// getdents: serialize directory entries into Linux dirent records.
+    pub fn getdents(&mut self, cage_id: u64, fd: u64, buf: &mut [u8]) -> i32 {
+        let (node_idx, flags) = match self.get_node_and_flags(cage_id, fd) {
+            Ok((n, f)) => (n, f),
+            Err(e) => return e,
+        };
+
+        match &self.nodes[node_idx].info {
+            NodeInfo::Dir { .. } => {}
+            _ => return -20, // ENOTDIR
+        }
+
+        if (flags & O_ACCMODE) == O_WRONLY {
+            return -9; // EBADF
+        }
+
+        let start = self.get_offset(cage_id, fd);
+        if start < 0 {
+            return -22; // EINVAL
+        }
+
+        let children = match &self.nodes[node_idx].info {
+            NodeInfo::Dir { children } => children.clone(),
+            _ => unreachable!(),
+        };
+
+        let mut entry_idx = start as usize;
+        let mut written = 0usize;
+
+        while entry_idx < children.len() {
+            let entry = &children[entry_idx];
+            let reclen = Self::dirent_reclen(entry.name.len());
+
+            if reclen > buf.len() {
+                return -22; // EINVAL
+            }
+            if written + reclen > buf.len() {
+                break;
+            }
+
+            let next_offset = (entry_idx + 1) as u64;
+            let d_type = self.dirent_type(entry.node_idx);
+            let ino = (entry.node_idx as u64) + 1;
+
+            written += Self::write_dirent_record(
+                &mut buf[written..written + reclen],
+                ino,
+                next_offset,
+                d_type,
+                &entry.name,
+            );
+            entry_idx += 1;
+        }
+
+        self.set_offset(cage_id, fd, entry_idx as i64);
+
+        written as i32
+    }
+
+    /// unlink: remove a non-directory path entry.
+    pub fn unlink(&mut self, cage_id: u64, path: &str) -> i32 {
+        let norm_path = self.normalize_path_for_cage(cage_id, path);
+        if norm_path == "/" {
+            return -1; // EPERM
+        }
+
+        let (parent_idx, filename) = match self.resolve_parent_and_name(&norm_path) {
+            Ok(parts) => parts,
+            Err(e) => return e,
+        };
+
+        if filename == "." || filename == ".." {
+            return -1; // EPERM
+        }
+
+        let node_idx = match self.resolve_path(&norm_path, false) {
+            Ok(idx) => idx,
+            Err(e) => return e,
+        };
+
+        if self.nodes[node_idx].node_type == NodeType::Dir {
+            return -21; // EISDIR
         };
 
         self.remove_child(node_idx);
+        self.update_mtime(parent_idx);
+        self.update_ctime(parent_idx);
+        self.update_ctime(node_idx);
         self.nodes[node_idx].doomed = true;
 
         if self.nodes[node_idx].in_use == 0 {
@@ -662,54 +1130,221 @@ impl ImfsState {
     }
 
     /// link: (int cage_id, const char *oldpath, const char *newpath) {
-    pub fn link(&mut self, oldpath: &str, newpath: &str) -> i32 {
+    pub fn link(&mut self, cage_id: u64, oldpath: &str, newpath: &str) -> i32 {
         // Ensure old path exists.
-        let old_idx = match self.find_node(oldpath) {
-            Some(idx) => idx,
-            None => return -9,
+        let norm_oldpath = self.normalize_path_for_cage(cage_id, oldpath);
+        let old_idx = match self.resolve_path(&norm_oldpath, true) {
+            Ok(idx) => idx,
+            Err(e) => return e,
         };
 
+        if self.nodes[old_idx].node_type == NodeType::Dir {
+            return -1; // EPERM
+        }
+
         // Ensure newpath does not exist.
-        match self.find_node(newpath) {
-            Some(_) => return -9,
-            None => {}
+        let norm_newpath = self.normalize_path_for_cage(cage_id, newpath);
+        match self.resolve_path(&norm_newpath, false) {
+            Ok(_) => return -17, // EEXIST
+            Err(-2) => {}
+            Err(e) => return e,
         };
 
         // open(O_CREAT) behaviour.
-        let (parent_idx, filename) = match self.find_parent_and_name(newpath) {
-            Some(p) => p,
-            None => return -20, // ENOTDIR
+        let (parent_idx, filename) = match self.resolve_parent_and_name(&norm_newpath) {
+            Ok(parts) => parts,
+            Err(e) => return e,
         };
+
+        if filename == "." || filename == ".." {
+            return -1; // EPERM
+        }
 
         if filename.len() >= MAX_NODE_NAME {
             return -36; // ENAMETOOLONG
         }
 
-        let mode = &self.nodes[old_idx].mode;
+        let mode = self.nodes[old_idx].mode;
 
         // Create new Lnk, update target.
-        let new_idx = self.create_node(&filename, NodeType::Lnk, *mode);
+        let new_idx = self.create_node(&filename, NodeType::Lnk, mode);
         self.add_child(parent_idx, new_idx);
         if let NodeInfo::Lnk { target } = &mut self.nodes[new_idx].info {
             *target = old_idx;
         }
+        self.update_mtime(parent_idx);
+        self.update_ctime(parent_idx);
+        self.update_ctime(old_idx);
+        self.update_mtime(new_idx);
+        self.update_ctime(new_idx);
+
+        0
+    }
+
+    pub fn rename(&mut self, cage_id: u64, oldpath: &str, newpath: &str) -> i32 {
+        let norm_oldpath = self.normalize_path_for_cage(cage_id, oldpath);
+        if norm_oldpath == "/" {
+            return -1; // EPERM
+        }
+
+        let (old_parent_idx, old_name) = match self.resolve_parent_and_name(&norm_oldpath) {
+            Ok(parts) => parts,
+            Err(e) => return e,
+        };
+        let old_idx = match self.resolve_path(&norm_oldpath, false) {
+            Ok(idx) => idx,
+            Err(e) => return e,
+        };
+
+        if old_name == "." || old_name == ".." {
+            return -1; // EPERM
+        }
+
+        let norm_newpath = self.normalize_path_for_cage(cage_id, newpath);
+        if norm_newpath == "/" {
+            return -1; // EPERM
+        }
+
+        let (new_parent_idx, new_name) = match self.resolve_parent_and_name(&norm_newpath) {
+            Ok(parts) => parts,
+            Err(e) => return e,
+        };
+
+        if new_name == "." || new_name == ".." {
+            return -1; // EPERM
+        }
+
+        if new_name.len() >= MAX_NODE_NAME {
+            return -36; // ENAMETOOLONG
+        }
+
+        if self.nodes[old_idx].node_type == NodeType::Dir
+            && norm_newpath.starts_with(&(norm_oldpath.clone() + "/"))
+        {
+            return -22; // EINVAL
+        }
+
+        match self.resolve_path(&norm_newpath, false) {
+            Ok(existing_idx) => {
+                if existing_idx == old_idx {
+                    return 0;
+                }
+
+                if self.nodes[existing_idx].node_type == NodeType::Dir {
+                    return -1; // EPERM
+                }
+
+                self.remove_child(existing_idx);
+                self.update_mtime(new_parent_idx);
+                self.update_ctime(new_parent_idx);
+                self.update_ctime(existing_idx);
+                self.nodes[existing_idx].doomed = true;
+
+                if self.nodes[existing_idx].in_use == 0 {
+                    self.reclaim_node(existing_idx);
+                }
+            }
+            Err(-2) => {}
+            Err(e) => return e,
+        }
+
+        self.remove_child(old_idx);
+        self.nodes[old_idx].name = new_name;
+        self.add_child(new_parent_idx, old_idx);
+        self.update_mtime(old_parent_idx);
+        self.update_ctime(old_parent_idx);
+        if new_parent_idx != old_parent_idx {
+            self.update_mtime(new_parent_idx);
+            self.update_ctime(new_parent_idx);
+        }
+        self.update_ctime(old_idx);
+
+        0
+    }
+
+    /// chmod: update only permission bits and preserve the file type bits.
+    pub fn chmod(&mut self, cage_id: u64, path: &str, mode: u32) -> i32 {
+        let norm_path = self.normalize_path_for_cage(cage_id, path);
+        let node_idx = match self.resolve_path(&norm_path, true) {
+            Ok(idx) => idx,
+            Err(e) => return e,
+        };
+
+        self.nodes[node_idx].mode = (self.nodes[node_idx].mode & !0o777) | (mode & 0o777);
+        self.update_ctime(node_idx);
+
+        0
+    }
+
+    pub fn truncate(&mut self, cage_id: u64, path: &str, length: i64) -> i32 {
+        if length < 0 {
+            return -22; // EINVAL
+        }
+
+        let norm_path = self.normalize_path_for_cage(cage_id, path);
+        let node_idx = match self.resolve_path(&norm_path, true) {
+            Ok(idx) => idx,
+            Err(e) => return e,
+        };
+
+        match self.nodes[node_idx].node_type {
+            NodeType::Reg => {}
+            NodeType::Dir => return -21, // EISDIR
+            _ => return -22,             // EINVAL
+        }
+
+        self.truncate_node(node_idx, length as usize);
+        self.update_mtime(node_idx);
+        self.update_ctime(node_idx);
+
+        0
+    }
+
+    pub fn ftruncate(&mut self, cage_id: u64, fd: u64, length: i64) -> i32 {
+        if length < 0 {
+            return -22; // EINVAL
+        }
+
+        let (node_idx, flags) = match self.get_node_and_flags(cage_id, fd) {
+            Ok((n, f)) => (n, f),
+            Err(e) => return e,
+        };
+
+        if (flags & O_ACCMODE) == O_RDONLY {
+            return -9; // EBADF
+        }
+
+        match self.nodes[node_idx].node_type {
+            NodeType::Reg => {}
+            NodeType::Dir => return -21, // EISDIR
+            _ => return -22,             // EINVAL
+        }
+
+        self.truncate_node(node_idx, length as usize);
+        self.update_mtime(node_idx);
+        self.update_ctime(node_idx);
 
         0
     }
 
     /// mkdir: create a directory.
-    pub fn mkdir(&mut self, path: &str, mode: u32) -> i32 {
-        if self.find_node(path).is_some() {
+    pub fn mkdir(&mut self, cage_id: u64, path: &str, mode: u32) -> i32 {
+        let norm_path = self.normalize_path_for_cage(cage_id, path);
+        if self.resolve_path(&norm_path, true).is_ok() {
             return -17; // EEXIST
         }
 
-        let (parent_idx, dirname) = match self.find_parent_and_name(path) {
-            Some(p) => p,
-            None => return -22,
+        if norm_path == "/" {
+            return -17; // EEXIST
+        }
+
+        let (parent_idx, dirname) = match self.resolve_parent_and_name(&norm_path) {
+            Ok(p) => p,
+            Err(e) => return e,
         };
 
         if dirname == "." || dirname == ".." {
-            return -22;
+            return -17; // EEXIST
         }
 
         let dir_idx = self.create_node(&dirname, NodeType::Dir, mode);
@@ -723,6 +1358,10 @@ impl ImfsState {
         let dotdot_idx = self.create_node("..", NodeType::Lnk, 0);
         self.nodes[dotdot_idx].info = NodeInfo::Lnk { target: parent_idx };
         self.add_child(dir_idx, dotdot_idx);
+        self.update_mtime(parent_idx);
+        self.update_ctime(parent_idx);
+        self.update_mtime(dir_idx);
+        self.update_ctime(dir_idx);
 
         0
     }

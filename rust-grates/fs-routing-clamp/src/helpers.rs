@@ -6,11 +6,62 @@
 //!   - Per-cage clamped status tracking
 //!   - Helpers for reading paths from cage memory and making syscalls
 
+use grate_rs::constants::*;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use grate_rs::{copy_data_between_cages, make_threei_call};
+use grate_rs::{GrateError, copy_data_between_cages, make_threei_call};
+
+// These are all the calls that the fs-namespace grate cares about. All of the
+// following calls from the target must be routed through the grate regardless
+// of whether the clamp interposed on them.
+pub const FS_CALLS: [u64; 41] = [
+    SYS_OPEN,
+    SYS_OPENAT,
+    SYS_XSTAT,
+    SYS_GETCWD,
+    SYS_ACCESS,
+    SYS_UNLINK,
+    SYS_LINK,
+    SYS_MKDIR,
+    SYS_RMDIR,
+    SYS_RENAME,
+    SYS_TRUNCATE,
+    SYS_CHMOD,
+    SYS_CHDIR,
+    SYS_MKNOD,
+    SYS_READLINK,
+    SYS_UNLINKAT,
+    SYS_READLINKAT,
+    SYS_STATFS,
+    SYS_GETDENTS,
+    // FD-based
+    SYS_READ,
+    SYS_WRITE,
+    SYS_CLOSE,
+    SYS_PREAD,
+    SYS_PWRITE,
+    SYS_LSEEK,
+    SYS_FXSTAT,
+    SYS_FCNTL,
+    SYS_FTRUNCATE,
+    SYS_FCHMOD,
+    SYS_FCHDIR,
+    SYS_READV,
+    SYS_WRITEV,
+    SYS_FSYNC,
+    SYS_FDATASYNC,
+    SYS_FSTATFS,
+    SYS_SYNC_FILE_RANGE,
+    // FD-based with fd-tracking side effects
+    SYS_DUP,
+    SYS_DUP2,
+    SYS_DUP3,
+    // Lifecycle — interpose so we track child cages
+    SYS_CLONE,
+    SYS_GETCWD,
+];
 
 // =====================================================================
 //  Global state
@@ -33,6 +84,9 @@ pub struct NSClampState {
     /// Set of cage IDs that are inside the clamp.
     clamped_cages: Option<HashMap<u64, ()>>,
 
+    /// Best-effort lexical current working directory per cage.
+    cwd_by_cage: Option<HashMap<u64, String>>,
+
     /// Alt syscall number allocator — starts well above Lind's 1001-1003 range.
     /// Each intercepted register_handler call gets a unique alt number.
     alt_allocator: u64,
@@ -50,6 +104,7 @@ impl NSClampState {
             clamp_entry_cage: 0,
             routing_prefix: Some(prefix),
             clamped_cages: None,
+            cwd_by_cage: None,
             alt_allocator: 3000,
             interposition_map: Vec::new(),
         }
@@ -146,6 +201,10 @@ pub fn register_clamped_cage(cage_id: u64) {
     s.clamped_cages
         .get_or_insert_with(HashMap::new)
         .insert(cage_id, ());
+    s.cwd_by_cage
+        .get_or_insert_with(HashMap::new)
+        .entry(cage_id)
+        .or_insert_with(|| "/".to_string());
 }
 
 pub fn deregister_clamped_cage(cage_id: u64) {
@@ -228,6 +287,31 @@ pub fn clone_cage_routes(parent: u64, child: u64) {
     }
 }
 
+pub fn get_cage_cwd(cage_id: u64) -> String {
+    CLAMP_STATE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|s| s.cwd_by_cage.as_ref())
+        .and_then(|m| m.get(&cage_id))
+        .cloned()
+        .unwrap_or_else(|| "/".to_string())
+}
+
+pub fn set_cage_cwd(cage_id: u64, cwd: String) {
+    let mut state = CLAMP_STATE.lock().unwrap();
+    let s = state.as_mut().expect("CLAMP_STATE not initialized");
+
+    s.cwd_by_cage
+        .get_or_insert_with(HashMap::new)
+        .insert(cage_id, normalize_path(&cwd));
+}
+
+pub fn clone_cage_cwd(parent: u64, child: u64) {
+    let cwd = get_cage_cwd(parent);
+    set_cage_cwd(child, cwd);
+}
+
 pub fn remove_cage_state(cage_id: u64) {
     let mut state = CLAMP_STATE.lock().unwrap();
     let s = state.as_mut().expect("CLAMP_STATE not initialized");
@@ -238,6 +322,10 @@ pub fn remove_cage_state(cage_id: u64) {
 
     if let Some(cages) = s.clamped_cages.as_mut() {
         cages.remove(&cage_id);
+    }
+
+    if let Some(cwds) = s.cwd_by_cage.as_mut() {
+        cwds.remove(&cage_id);
     }
 }
 
@@ -270,6 +358,39 @@ pub fn read_path_from_cage(path_ptr: u64, path_cage: u64) -> Option<String> {
     String::from_utf8(buf[..len].to_vec()).ok()
 }
 
+pub fn normalize_path(path: &str) -> String {
+    let mut components: Vec<&str> = Vec::new();
+
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            _ => components.push(component),
+        }
+    }
+
+    if components.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", components.join("/"))
+    }
+}
+
+pub fn resolve_path_for_cage(current_cage: u64, path: &str) -> String {
+    if path.starts_with('/') {
+        normalize_path(path)
+    } else {
+        let cwd = get_cage_cwd(current_cage);
+        normalize_path(&format!("{}/{}", cwd.trim_end_matches('/'), path))
+    }
+}
+
+pub fn resolve_path_from_cage(current_cage: u64, path_ptr: u64, path_cage: u64) -> Option<String> {
+    read_path_from_cage(path_ptr, path_cage).map(|path| resolve_path_for_cage(current_cage, &path))
+}
+
 /// Check whether a path matches the routing prefix condition.
 pub fn path_matches_prefix(path: &str) -> bool {
     path.starts_with(&get_routing_prefix())
@@ -300,7 +421,8 @@ pub fn do_syscall(callingcage: u64, nr: u64, args: &[u64; 6], arg_cages: &[u64; 
         0,
     ) {
         Ok(ret) => ret,
-        Err(_) => -1,
+        Err(GrateError::MakeSyscallError(ret)) => ret,
+        _ => -1,
     }
 }
 
@@ -326,6 +448,7 @@ pub fn do_clamp_syscall(callingcage: u64, nr: u64, args: &[u64; 6], arg_cages: &
         0,
     ) {
         Ok(ret) => ret,
-        Err(_) => -1,
+        Err(GrateError::MakeSyscallError(ret)) => ret,
+        _ => -1,
     }
 }

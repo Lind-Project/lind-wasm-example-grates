@@ -36,6 +36,22 @@ pub struct DirEntry {
     pub node_idx: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct NodeTime {
+    pub secs: u64,
+    pub nanos: u64,
+}
+
+impl NodeTime {
+    pub fn now() -> Self {
+        Self { secs: 0, nanos: 0 }
+    }
+
+    pub fn as_stat_pair(self) -> [u64; 2] {
+        [self.secs, self.nanos]
+    }
+}
+
 /// Type-specific data for a node.
 #[derive(Clone, Debug)]
 pub enum NodeInfo {
@@ -79,6 +95,10 @@ pub struct Node {
     pub group: u32,
 
     pub info: NodeInfo,
+
+    pub ctime: NodeTime,
+    pub atime: NodeTime,
+    pub mtime: NodeTime,
 }
 
 impl Node {
@@ -107,6 +127,8 @@ impl Node {
             NodeType::Free => NodeInfo::Free,
         };
 
+        let now = NodeTime::now();
+
         Node {
             node_type,
             index,
@@ -119,12 +141,23 @@ impl Node {
             owner: GET_UID,
             group: GET_GID,
             info,
+            atime: now,
+            ctime: now,
+            mtime: now,
         }
     }
 
     /// Get mutable children of a directory node.
     pub fn children_mut(&mut self) -> &mut Vec<DirEntry> {
         match &mut self.info {
+            NodeInfo::Dir { children } => children,
+            _ => panic!("not a directory"),
+        }
+    }
+
+    /// Get children of a directory node.
+    pub fn children(&self) -> &Vec<DirEntry> {
+        match &self.info {
             NodeInfo::Dir { children } => children,
             _ => panic!("not a directory"),
         }
