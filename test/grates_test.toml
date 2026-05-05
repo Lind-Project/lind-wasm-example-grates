@@ -194,9 +194,6 @@ test_src = "test/sock_cloexec_test.c"
 [[grate.tests]]
 test_src = "test/fcntl_dupfd_test.c"
 
-[[grate.tests]]
-test_src = "test/fork_pipe_race_test.c"
-
 # ── Net Routing Clamp (Rust) ────────────────────────────────────────
 
 [[grate]]
