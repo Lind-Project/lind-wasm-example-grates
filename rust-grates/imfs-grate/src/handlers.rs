@@ -37,6 +37,24 @@ fn copy_path_from_cage(path_ptr: u64, path_cage: u64) -> Option<String> {
     String::from_utf8(buf[..len].to_vec()).ok()
 }
 
+pub extern "C" fn enosys_handler(
+    _cageid: u64,
+    _arg1: u64,
+    _arg1cage: u64,
+    _arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    -38 // ENOSYS
+}
+
 // =====================================================================
 //  open (syscall 2)
 //
@@ -106,6 +124,76 @@ pub extern "C" fn openat_handler(
     let mode = arg4 as u32;
 
     imfs::with_imfs(|state| state.openat(cage_id, dirfd, &pathname, flags, mode))
+}
+
+pub extern "C" fn getcwd_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    if arg1 == 0 {
+        return -14; // EFAULT
+    }
+
+    let cwd = match imfs::with_imfs(|state| state.getcwd(arg2cage)) {
+        Ok(cwd) => cwd,
+        Err(e) => return e,
+    };
+
+    let mut buf = cwd.into_bytes();
+    buf.push(0);
+
+    if buf.len() > arg2 as usize {
+        return -34; // ERANGE
+    }
+
+    let this_cage = getcageid();
+    match copy_data_between_cages(
+        this_cage,
+        arg1cage,
+        buf.as_ptr() as u64,
+        this_cage,
+        arg1,
+        arg1cage,
+        buf.len() as u64,
+        0,
+    ) {
+        Ok(_) => buf.len() as i32,
+        Err(_) => -14,
+    }
+}
+
+pub extern "C" fn access_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let pathname = match copy_path_from_cage(arg1, arg1cage) {
+        Some(p) => p,
+        None => return -14,
+    };
+
+    imfs::with_imfs(|state| state.access(arg2cage, &pathname, arg2 as i32))
 }
 
 // =====================================================================
