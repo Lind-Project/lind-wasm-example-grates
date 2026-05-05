@@ -163,6 +163,14 @@ impl Node {
         }
     }
 
+    /// Get children of a directory node.
+    pub fn children(&self) -> &Vec<DirEntry> {
+        match &self.info {
+            NodeInfo::Dir { children } => children,
+            _ => panic!("not a directory"),
+        }
+    }
+
     /// Get the link target index of a link node.
     pub fn link_target(&self) -> Option<usize> {
         match &self.info {
