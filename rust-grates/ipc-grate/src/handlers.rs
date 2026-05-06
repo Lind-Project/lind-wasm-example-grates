@@ -428,6 +428,34 @@ pub extern "C" fn write_handler(
 /// Reads the pipe state directly via has_data / write_refs / read_refs.
 fn ipc_pipe_poll_state(underfd: u64, fdkind: u32, flags: i32, requested: i16) -> i16 {
     let mut revents: i16 = 0;
+
+    // Listening IPC sockets have no recv/send pipes — those are minted
+    // at accept() time.  Readability on a listen fd means "there is a
+    // pending connection queued for accept()".  Without this special
+    // case we'd fall through to the recvpipe-is-None branch and return
+    // POLLNVAL, so any select/poll(POLLIN) on a listen fd would never
+    // report readability.  postmaster-style servers (postgres, anything
+    // that selects before accepting) would then never call accept() and
+    // clients would hang.
+    if fdkind == socket::IPC_SOCKET {
+        let listen_pending = with_ipc(|s| {
+            let sk = s.sockets.get(underfd)?;
+            if sk.state != socket::ConnState::Listening { return None; }
+            let addr = sk.local_addr.clone()?;
+            let has_pending = s.sockets.pending_connections
+                .get(&addr)
+                .map(|q| !q.is_empty())
+                .unwrap_or(false);
+            Some(has_pending)
+        });
+        if let Some(has_pending) = listen_pending {
+            if (requested & POLLIN) != 0 && has_pending {
+                revents |= POLLIN;
+            }
+            return revents;
+        }
+    }
+
     let pipe_arc = match fdkind {
         IPC_PIPE => with_ipc(|s| s.get_pipe(underfd)),
         socket::IPC_SOCKET => with_ipc(|s| {
