@@ -16,7 +16,13 @@
 //!
 //! # Blocking
 //!
-//! Spin-loop with `thread::yield_now()`.
+//! Sleep in short (~1µs requested → ~50µs kernel-timer-rounded) chunks
+//! via `libc::nanosleep`, which forwards to the host's `clock_nanosleep`.
+//! `lind_send_signal` interrupts blocking host syscalls on the user
+//! cage's main thread by sending SIGUSR2 via `tkill`; since the grate
+//! runs on that thread, our `nanosleep` is the syscall that gets
+//! interrupted.  A negative return means EINTR — the read/write loop
+//! bails so the cage's signal handler can run.
 //!
 //! # Capacity
 //!
@@ -27,6 +33,18 @@ use std::cell::UnsafeCell;
 
 use ringbuf::RingBuffer;
 use ringbuf::{Consumer, Producer};
+
+/// Sleep ~50µs (1µs requested, kernel rounds up to its timer
+/// granularity) in a way that's interruptible by signals queued for
+/// the calling user cage.  Returns `true` if the sleep was
+/// interrupted; caller should propagate -EINTR so the cage's signal
+/// handler runs before the syscall is retried.
+fn nap_signal_aware() -> bool {
+    unsafe {
+        let ts = libc::timespec { tv_sec: 0, tv_nsec: 1_000 };
+        libc::nanosleep(&ts, std::ptr::null_mut()) < 0
+    }
+}
 
 /// Default pipe capacity in bytes (64 KB, matching Linux and safeposix-rust).
 pub const PIPE_CAPACITY: usize = 65536;
@@ -68,12 +86,13 @@ impl PipeBuffer {
         }
     }
 
-    /// Read from the pipe. Blocks (spins with yield) until data is available
-    /// or EOF is reached.
+    /// Read from the pipe.  Blocks (~50µs nanosleep chunks) until data
+    /// is available, EOF is reached, or a signal is delivered.
     ///
     /// Returns:
     ///   > 0: number of bytes read
     ///   0: EOF (all write ends closed and buffer drained)
+    ///   -4: EINTR (signal queued for the calling cage)
     ///   -11: EAGAIN (nonblocking mode, no data available)
     pub fn read(&self, dst: &mut [u8], count: usize, nonblocking: bool) -> i32 {
         let read_count = count.min(dst.len());
@@ -95,18 +114,26 @@ impl PipeBuffer {
                 return -11; // EAGAIN
             }
 
-            // Yield to let the writer run.
-            std::thread::yield_now();
+            // Sleep a short signal-interruptible chunk before retry.
+            // Without signal-awareness here, postgres' SetLatch /
+            // SIGTERM during a blocking pipe read goes unobserved.
+            if nap_signal_aware() {
+                return -4; // EINTR
+            }
         }
     }
 
-    /// Write to the pipe. Blocks (spins with yield) until space is available
-    /// or all read ends close.
+    /// Write to the pipe.  Blocks (~50µs nanosleep chunks) until space
+    /// is available, all read ends close, or a signal is delivered.
     ///
     /// Returns:
-    ///   > 0: number of bytes written
+    ///   > 0: number of bytes written (full count, or partial on signal /
+    ///        nonblocking)
+    ///   -4: EINTR (signal arrived before any bytes were written; if
+    ///       some bytes were already written we return the short count
+    ///       per POSIX write(2) semantics)
+    ///   -11: EAGAIN (nonblocking mode, pipe full and nothing written)
     ///   -32: EPIPE (all read ends closed — broken pipe)
-    ///   -11: EAGAIN (nonblocking mode, pipe full)
     pub fn write(&self, src: &[u8], count: usize, nonblocking: bool) -> i32 {
         if self.read_refs.load(Ordering::Acquire) == 0 {
             return -32; // EPIPE
@@ -139,7 +166,13 @@ impl PipeBuffer {
                 return -11; // EAGAIN
             }
 
-            std::thread::yield_now();
+            // Signal-aware sleep — see read() above for rationale.
+            if nap_signal_aware() {
+                if total_written > 0 {
+                    return total_written as i32;
+                }
+                return -4; // EINTR
+            }
         }
 
         total_written as i32
