@@ -8,10 +8,12 @@
 // Use and publicly export constants and grate-rs related ffi shims.
 pub mod constants;
 pub mod ffi;
+pub mod fd_support;
 
 use core::ffi::{c_char, c_int, c_void};
 use std::ffi::{CString, c_uint};
 use std::ptr;
+use std::collections::HashSet;
 
 use crate::constants::lind::ELINDAPIABORTED;
 use crate::constants::mman::*;
@@ -19,6 +21,9 @@ use crate::ffi::{
     clean_exit, cp_data_impl, cp_handler_impl, execv, fork, getpid_impl, make_syscall_impl, mmap,
     munmap, register_handler_impl, sem_destroy, sem_init, sem_post, sem_t, sem_wait, waitpid,
 };
+use crate::fd_support::FD_HANDLER_TABLE;
+use crate::constants::SYS_WRITE;
+use crate::fd_support::fd_write_handler;
 
 /// Error types that can occur during grate execution.
 #[derive(Debug)]
@@ -149,6 +154,32 @@ pub unsafe fn mmap_shared<T>() -> &'static mut T {
 
 // Wrap raw FFI calls in Rust-friendly signatures to keep unsafe usage localized
 // and expose idiomatic `Result`-based APIs to crate users.
+
+/// Register default fd handlers for all fd-related syscalls except those in the provided exception list.
+pub fn register_default_fd_handlers_except(
+    cageid: u64,
+    grateid: u64,
+    except_syscalls: Option<HashSet<u64>>,
+) -> Result<(), GrateError> {
+    for &(syscall_nr, handler) in FD_HANDLER_TABLE {
+        if except_syscalls.as_ref().map_or(false, |s| s.contains(&syscall_nr)) {
+            continue;
+        }
+
+        let fn_ptr_addr = handler as *const () as usize as u64;
+        
+        let ret = unsafe {
+            register_handler_impl(cageid, syscall_nr, grateid, fn_ptr_addr)
+        };
+
+        match ret {
+            0 => {}
+            _ => return Err(GrateError::HandlerRegistrationError(ret)),
+        }
+    }
+
+    Ok(())
+}
 
 /// Register Handler for a syscall for a source cage to the the target grate.
 pub fn register_handler(
@@ -312,6 +343,8 @@ pub unsafe extern "C" fn pass_fptr_to_wt(
         return -1;
     }
 
+    println!("[inside] called with fn_ptr={:#x}, cageid={}", fn_ptr_uint, cageid);
+
     unsafe {
         let fn_ptr: extern "C" fn(
             u64,
@@ -339,9 +372,21 @@ pub unsafe extern "C" fn pass_fptr_to_wt(
 pub type GrateTeardownCallback = Box<dyn Fn(Result<i32, GrateError>)>;
 pub type PreExecCallback = Box<dyn Fn(i32)>;
 
+pub enum FdTranslatePolicy {
+    Disabled,
+    EnabledExcept(Option<HashSet<u64>>), // If None, all fd related syscalls are translated.
+}
+
+impl Default for FdTranslatePolicy {
+    fn default() -> Self {
+        FdTranslatePolicy::Disabled
+    }
+}
+
 /// A builder for creating grates with customizable lifecycle hooks
 pub struct GrateBuilder {
     handlers: Vec<(u64, SyscallHandler)>,
+    fd_translate_policy: FdTranslatePolicy,
     teardown: Option<GrateTeardownCallback>,
     preexec: Option<PreExecCallback>,
 }
@@ -351,6 +396,7 @@ impl GrateBuilder {
     pub fn new() -> Self {
         Self {
             handlers: Vec::new(),
+            fd_translate_policy: FdTranslatePolicy::default(),
             teardown: None,
             preexec: None,
         }
@@ -359,6 +405,14 @@ impl GrateBuilder {
     /// Register a syscall handler
     pub fn register(mut self, syscall_nr: u64, handler: SyscallHandler) -> Self {
         self.handlers.push((syscall_nr, handler));
+        self
+    }
+
+    pub fn enable_fd_translate_policy(mut self, exception_list: Option<Vec<u64>>) -> Self {
+        self.fd_translate_policy = match exception_list {
+            Some(list) => FdTranslatePolicy::EnabledExcept(Some(list.into_iter().collect())),
+            None => FdTranslatePolicy::EnabledExcept(None),
+        };
         self
     }
 
@@ -458,6 +512,21 @@ impl GrateBuilder {
             }
             cageid => {
                 // Parent cage - grate handler.
+
+                // Set up fd translation policy based on builder configuration.
+                match &self.fd_translate_policy {
+                    FdTranslatePolicy::Disabled => {}
+                    FdTranslatePolicy::EnabledExcept(exceptions) => {
+                        match register_default_fd_handlers_except(
+                            cageid as u64,
+                            grateid as u64,
+                            exceptions.clone(),
+                        ) {
+                            Ok(_) => {}
+                            Err(ret) => GrateBuilder::run_teardown(teardown, Err(ret)),
+                        }
+                    }
+                };
 
                 // Register handlers with 3i.
                 for (syscall_nr, handler) in &self.handlers {
