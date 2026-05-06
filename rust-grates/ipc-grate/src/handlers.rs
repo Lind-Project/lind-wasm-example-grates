@@ -541,11 +541,47 @@ fn reclassify_ipc_pollfds(
     ready
 }
 
+/// EINTR in negative-errno form.
+const EINTR_NEG: i32 = -4;
+
+/// Sleep ~1ms in a way that's interruptible by signals queued for the
+/// calling user cage.  Returns `true` if the sleep was interrupted by
+/// a signal (caller should bail with EINTR so the cage's signal
+/// handler can run on the way out).
+///
+/// Mechanism: `libc::nanosleep` forwards to RawPOSIX's
+/// `nanosleep_time64_syscall` which calls the host's `clock_nanosleep`.
+/// `cage::signal::lind_send_signal` interrupts blocking host syscalls
+/// on the user cage's main thread by sending SIGUSR2 via `tkill`; the
+/// no-op handler causes `clock_nanosleep` to return -EINTR.  Since
+/// the grate is invoked on the user cage's main thread (the thread
+/// that issued the original syscall), *our* nanosleep is the target —
+/// no extra primitive needed.
+///
+/// Without this, the grate's IPC wait loops are signal-deaf for the
+/// entire timeout: while we spin, the cage is parked in our handler
+/// and its own user-code path that would observe the epoch flip can't
+/// run.  postgres' WaitLatch + SetLatch self-pipe pattern wedges as a
+/// direct result (postmaster hangs on ProcSignalBarrier waiting for a
+/// SIGUSR1 handler that never gets to run).
+fn ipc_wait_nap_signal_aware() -> bool {
+    unsafe {
+        let ts = libc::timespec { tv_sec: 0, tv_nsec: 1_000_000 };
+        // For a valid timespec the only error nanosleep can return is
+        // EINTR, so a negative return is conclusive.
+        libc::nanosleep(&ts, std::ptr::null_mut()) < 0
+    }
+}
+
 /// Local poll-loop for IPC-only poll/ppoll calls (i.e. no kernel fds).
 /// Sleeps in 1ms chunks, re-classifying IPC entries each iteration,
-/// until either a fd becomes ready or `timeout_ms` elapses.  Negative
-/// `timeout_ms` blocks forever (matches poll(2) semantics).  Returns
-/// the count of ready IPC entries (0 on timeout).
+/// until either a fd becomes ready, the calling cage has a signal
+/// pending, or `timeout_ms` elapses.  Negative `timeout_ms` blocks
+/// forever (matches poll(2) semantics).  Returns:
+///   > 0  number of ready IPC entries
+///   0    timeout
+///   -EINTR  cage has a signal pending — handler should return so the
+///           cage's signal handler can run on the way out
 fn ipc_only_poll_wait(
     cage_id: u64,
     pollfds: &[PollFd],
@@ -565,9 +601,8 @@ fn ipc_only_poll_wait(
                 return 0;
             }
         }
-        unsafe {
-            let ts = libc::timespec { tv_sec: 0, tv_nsec: 1_000_000 };
-            libc::nanosleep(&ts, std::ptr::null_mut());
+        if ipc_wait_nap_signal_aware() {
+            return EINTR_NEG;
         }
     }
 }
@@ -911,10 +946,8 @@ pub extern "C" fn select_handler(
                 if let Some(timeout) = timeout_ns {
                     if start.elapsed().as_nanos() >= timeout { break; }
                 }
-                // Sleep briefly between checks so we don't pin a CPU.
-                unsafe {
-                    let ts = libc::timespec { tv_sec: 0, tv_nsec: 1_000_000 };
-                    libc::nanosleep(&ts, std::ptr::null_mut());
+                if ipc_wait_nap_signal_aware() {
+                    return EINTR_NEG;
                 }
             }
         }
@@ -2215,7 +2248,9 @@ fn accept_ipc_inner(
             return -11; // EAGAIN
         }
 
-        std::thread::yield_now();
+        if ipc_wait_nap_signal_aware() {
+            return EINTR_NEG;
+        }
     }
 }
 
