@@ -22,6 +22,8 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/uio.h>
+#include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/epoll.h>
@@ -1328,6 +1330,241 @@ static void test_inet_sockopt(void) {
     close(s);
 }
 
+/* ── Test: getsockname / getpeername on UDS socketpair ────────────── */
+/* socketpair endpoints are unnamed AF_UNIX sockets — getsockname
+   should return sun_family=AF_UNIX with addrlen=2.  getpeername
+   should succeed on connected sockets and likewise return AF_UNIX. */
+
+static void test_uds_getsockname_socketpair(void) {
+    printf("\n[test_uds_getsockname_socketpair]\n");
+
+    int sv[2];
+    int rc = socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    CHECK("socketpair", rc == 0);
+    if (rc != 0) return;
+
+    struct sockaddr_un sa;
+    socklen_t slen;
+
+    memset(&sa, 0, sizeof(sa));
+    slen = sizeof(sa);
+    int gn = getsockname(sv[0], (struct sockaddr *)&sa, &slen);
+    CHECK("getsockname returns 0", gn == 0);
+    CHECK("sun_family == AF_UNIX", gn != 0 || sa.sun_family == AF_UNIX);
+    CHECK("addrlen == 2 for unnamed UDS", gn != 0 || slen == 2);
+
+    memset(&sa, 0, sizeof(sa));
+    slen = sizeof(sa);
+    int gp = getpeername(sv[0], (struct sockaddr *)&sa, &slen);
+    CHECK("getpeername returns 0 on connected", gp == 0);
+    CHECK("peer sun_family == AF_UNIX", gp != 0 || sa.sun_family == AF_UNIX);
+
+    close(sv[0]); close(sv[1]);
+}
+
+/* ── Test: getsockname returns the bound path on named UDS ────────── */
+
+static void test_uds_getsockname_named(void) {
+    printf("\n[test_uds_getsockname_named]\n");
+
+    char path[64];
+    snprintf(path, sizeof(path), "/tmp/ipc_gsn_%d", getpid());
+    unlink(path);
+
+    int s = socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK("socket", s >= 0);
+    if (s < 0) return;
+
+    struct sockaddr_un addr = {0};
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    CHECK("bind", bind(s, (struct sockaddr *)&addr, sizeof(addr)) == 0);
+
+    struct sockaddr_un sa = {0};
+    socklen_t slen = sizeof(sa);
+    int gn = getsockname(s, (struct sockaddr *)&sa, &slen);
+    CHECK("getsockname after bind", gn == 0);
+    CHECK("returned sun_family == AF_UNIX", gn != 0 || sa.sun_family == AF_UNIX);
+    CHECK("returned path matches bound path",
+          gn != 0 || strcmp(sa.sun_path, path) == 0);
+
+    close(s);
+    unlink(path);
+}
+
+/* ── Test: writev / readv on UDS socketpair (gather/scatter) ──────── */
+
+static void test_socketpair_writev_readv(void) {
+    printf("\n[test_socketpair_writev_readv]\n");
+
+    int sv[2];
+    int rc = socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    CHECK("socketpair", rc == 0);
+    if (rc != 0) return;
+
+    char *p1 = "alpha-";
+    char *p2 = "beta-";
+    char *p3 = "gamma";
+    struct iovec wv[3] = {
+        { .iov_base = p1, .iov_len = strlen(p1) },
+        { .iov_base = p2, .iov_len = strlen(p2) },
+        { .iov_base = p3, .iov_len = strlen(p3) },
+    };
+    size_t total = strlen(p1) + strlen(p2) + strlen(p3);
+
+    ssize_t nw = writev(sv[0], wv, 3);
+    CHECK("writev returns total", nw == (ssize_t)total);
+
+    char b1[8] = {0}, b2[8] = {0}, b3[8] = {0};
+    struct iovec rv[3] = {
+        { .iov_base = b1, .iov_len = sizeof(b1) - 1 },
+        { .iov_base = b2, .iov_len = sizeof(b2) - 1 },
+        { .iov_base = b3, .iov_len = sizeof(b3) - 1 },
+    };
+    ssize_t nr = readv(sv[1], rv, 3);
+    CHECK("readv returns total", nr == (ssize_t)total);
+
+    char joined[64] = {0};
+    snprintf(joined, sizeof(joined), "%s%s%s", b1, b2, b3);
+    CHECK("readv content matches concatenated writev",
+          strncmp(joined, "alpha-beta-gamma", total) == 0);
+
+    close(sv[0]); close(sv[1]);
+}
+
+/* ── Test: writev / readv on an IPC pipe ──────────────────────────── */
+
+static void test_pipe_writev_readv(void) {
+    printf("\n[test_pipe_writev_readv]\n");
+
+    int p[2];
+    int rc = pipe(p);
+    CHECK("pipe()", rc == 0);
+    if (rc != 0) return;
+
+    char *s1 = "hello-";
+    char *s2 = "iov-pipe";
+    struct iovec wv[2] = {
+        { .iov_base = s1, .iov_len = strlen(s1) },
+        { .iov_base = s2, .iov_len = strlen(s2) },
+    };
+    size_t total = strlen(s1) + strlen(s2);
+
+    ssize_t nw = writev(p[1], wv, 2);
+    CHECK("writev to pipe returns total", nw == (ssize_t)total);
+
+    char buf[64] = {0};
+    struct iovec rv = { .iov_base = buf, .iov_len = sizeof(buf) - 1 };
+    ssize_t nr = readv(p[0], &rv, 1);
+    CHECK("readv from pipe returns total", nr == (ssize_t)total);
+    CHECK("readv pipe content matches", strncmp(buf, "hello-iov-pipe", total) == 0);
+
+    close(p[0]); close(p[1]);
+}
+
+/* ── Test: ioctl FIONREAD / FIONBIO on a UDS socketpair ───────────── */
+
+static void test_uds_ioctl(void) {
+    printf("\n[test_uds_ioctl]\n");
+
+    int sv[2];
+    int rc = socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    CHECK("socketpair", rc == 0);
+    if (rc != 0) return;
+
+    /* FIONREAD on empty socket should report 0. */
+    int avail = -1;
+    int ir = ioctl(sv[1], FIONREAD, &avail);
+    CHECK("ioctl(FIONREAD) on empty socket", ir == 0);
+    CHECK("FIONREAD == 0 when empty", ir != 0 || avail == 0);
+
+    /* Write some bytes; FIONREAD on the other end should report >= len. */
+    const char *msg = "ABCDE";
+    size_t mlen = strlen(msg);
+    CHECK("send for FIONREAD test", send(sv[0], msg, mlen, 0) == (ssize_t)mlen);
+
+    avail = -1;
+    ir = ioctl(sv[1], FIONREAD, &avail);
+    CHECK("ioctl(FIONREAD) after send", ir == 0);
+    CHECK("FIONREAD reports buffered bytes",
+          ir != 0 || avail >= (int)mlen);
+
+    /* FIONBIO: set non-blocking, then read sv[1] to drain (still has data),
+       then a non-blocking read on sv[0] (which has nothing) should return
+       EAGAIN. */
+    char buf[16] = {0};
+    ssize_t nr = recv(sv[1], buf, sizeof(buf), 0);
+    CHECK("drain recv before FIONBIO test", nr == (ssize_t)mlen);
+
+    int yes = 1;
+    int sr = ioctl(sv[0], FIONBIO, &yes);
+    CHECK("ioctl(FIONBIO=1)", sr == 0);
+
+    char tmp[1] = {0};
+    ssize_t er = recv(sv[0], tmp, 1, 0);
+    CHECK("nonblocking recv on empty socket returns -1", er == -1);
+    CHECK("nonblocking recv errno == EAGAIN", er != -1 || errno == EAGAIN);
+
+    close(sv[0]); close(sv[1]);
+}
+
+/* ── Test: fstat on IPC pipe and IPC socket reports correct mode ──── */
+
+static void test_ipc_fstat(void) {
+    printf("\n[test_ipc_fstat]\n");
+
+    int p[2];
+    if (pipe(p) != 0) { printf("  FAIL: pipe()\n"); tests_run++; return; }
+
+    struct stat st;
+    memset(&st, 0, sizeof(st));
+    int fr = fstat(p[0], &st);
+    CHECK("fstat on pipe read-end", fr == 0);
+    CHECK("S_ISFIFO(pipe)", fr != 0 || S_ISFIFO(st.st_mode));
+
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        printf("  FAIL: socketpair()\n"); tests_run++;
+        close(p[0]); close(p[1]);
+        return;
+    }
+    memset(&st, 0, sizeof(st));
+    fr = fstat(sv[0], &st);
+    CHECK("fstat on UDS socket", fr == 0);
+    CHECK("S_ISSOCK(uds)", fr != 0 || S_ISSOCK(st.st_mode));
+
+    close(p[0]); close(p[1]); close(sv[0]); close(sv[1]);
+}
+
+/* ── Test: lseek / pread on IPC fds returns ESPIPE ────────────────── */
+
+static void test_ipc_espipe(void) {
+    printf("\n[test_ipc_espipe]\n");
+
+    int p[2];
+    if (pipe(p) != 0) { printf("  FAIL: pipe()\n"); tests_run++; return; }
+
+    off_t lr = lseek(p[0], 0, SEEK_SET);
+    CHECK("lseek on pipe returns -1", lr == (off_t)-1);
+    CHECK("lseek errno == ESPIPE", lr != (off_t)-1 || errno == ESPIPE);
+
+    char buf[4] = {0};
+    ssize_t pr = pread(p[0], buf, 1, 0);
+    CHECK("pread on pipe returns -1", pr == -1);
+    CHECK("pread errno == ESPIPE", pr != -1 || errno == ESPIPE);
+
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        close(p[0]); close(p[1]); return;
+    }
+    lr = lseek(sv[0], 0, SEEK_SET);
+    CHECK("lseek on socket returns -1", lr == (off_t)-1);
+    CHECK("lseek socket errno == ESPIPE",
+          lr != (off_t)-1 || errno == ESPIPE);
+
+    close(p[0]); close(p[1]); close(sv[0]); close(sv[1]);
+}
+
 /* ── Main ──────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -1382,6 +1619,16 @@ int main(void) {
        (kernel-fd path). */
     test_uds_sockopt();
     test_inet_sockopt();
+
+    /* getsockname / getpeername / writev / readv / ioctl / fstat /
+       ESPIPE — every other call a domain socket can land on. */
+    test_uds_getsockname_socketpair();
+    test_uds_getsockname_named();
+    test_socketpair_writev_readv();
+    test_pipe_writev_readv();
+    test_uds_ioctl();
+    test_ipc_fstat();
+    test_ipc_espipe();
 
     printf("\n=== results: %d/%d passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

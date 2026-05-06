@@ -180,6 +180,13 @@ impl PipeBuffer {
         // SAFETY: read-only length check, safe from any thread.
         unsafe { !(*self.producer.get()).is_full() }
     }
+
+    /// Number of bytes currently available to read from this pipe.
+    /// Used by ioctl(FIONREAD) on IPC pipes/sockets.
+    pub fn bytes_available(&self) -> usize {
+        // SAFETY: read-only length check, safe from any thread.
+        unsafe { (*self.consumer.get()).len() }
+    }
 }
 
 // =====================================================================
