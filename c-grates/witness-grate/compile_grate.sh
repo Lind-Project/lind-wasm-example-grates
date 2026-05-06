@@ -1,22 +1,14 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+set -euo
 
 cd "$(dirname "$0")"
 
 if [[ -z "${LIND_WASM_APPS_SYSROOT:-}" ]]; then
-  LIND_WASM_APPS_DIR="$(
-    find "$HOME" -type d -name lind-wasm-apps 2>/dev/null | head -n 1
+  LIND_WASM_APPS_SYSROOT="$(
+    find "$HOME" -type d -path "*/lind-wasm-apps/build/sysroot_merged" -print -quit 2>/dev/null
   )"
 
-  if [[ -z "$LIND_WASM_APPS_DIR" ]]; then
-    echo "ERROR: LIND_WASM_APPS_SYSROOT is not set and could not find lind-wasm-apps folder" >&2
-    echo "Please set LIND_WASM_APPS_SYSROOT manually, e.g.:" >&2
-    echo "  export LIND_WASM_APPS_SYSROOT=/path/to/lind-wasm-apps/build/sysroot_merged" >&2
-    exit 1
-  fi
-
-  export LIND_WASM_APPS_SYSROOT="$LIND_WASM_APPS_DIR/build/sysroot_merged"
 fi
 
 [[ -d "$LIND_WASM_APPS_SYSROOT" ]] || {
