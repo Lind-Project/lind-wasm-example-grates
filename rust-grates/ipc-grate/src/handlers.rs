@@ -21,6 +21,9 @@ const FDKIND_KERNEL: u32 = 0;
 /// EBADF, EMFILE in negative-errno form.
 const EBADF_NEG: i32 = -9;
 const EMFILE_NEG: i32 = -24;
+const ENOTSOCK_NEG: i32 = -88;
+const ENOTCONN_NEG: i32 = -107;
+const ENOPROTOOPT_NEG: i32 = -92;
 
 /// AT_FDCWD is the special "current working directory" sentinel for the
 /// *at family of syscalls; it must NOT be translated.
@@ -108,6 +111,41 @@ struct PollFd {
     events: i16,
     revents: i16,
 }
+
+/// Host-layout `struct msghdr` (Linux x86_64), 56 bytes.  glibc's
+/// `sendmsg`/`recvmsg` wrappers translate guest pointers to host
+/// addresses and pack them via the split-pointer trick into a
+/// wasm32-padded msghdr that, when read as 56 raw bytes, exactly
+/// matches this layout.  We copy those bytes from the user cage and
+/// reinterpret as `HostMsghdr` to read the iov pointer + count.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+struct HostMsghdr {
+    msg_name:        u64,
+    msg_namelen:     u32,
+    _pad_namelen:    u32,
+    msg_iov:         u64,
+    msg_iovlen:      u64,
+    msg_control:     u64,
+    msg_controllen:  u64,
+    msg_flags:       i32,
+    _pad_flags:      u32,
+}
+
+/// Host-layout `struct iovec` (Linux x86_64), 16 bytes.  Same
+/// reasoning as `HostMsghdr` — glibc packs split host pointers so the
+/// raw 16-byte representation matches this layout.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+struct HostIovec {
+    iov_base: u64,
+    iov_len:  u64,
+}
+
+/// Defensive cap on iov entries we'll process per sendmsg/recvmsg.
+/// Linux's UIO_MAXIOV is 1024; matching it keeps malicious or
+/// uninitialized iovlen values from causing huge allocations.
+const MAX_IOV: usize = 1024;
 
 /// fdtables-level close handler for IPC_PIPE entries.  Called whenever
 /// fdtables decrements an IPC_PIPE entry's refcount — including on
@@ -2482,15 +2520,466 @@ translate_fd1_handler!(preadv_handler,           SYS_PREADV);
 translate_fd1_handler!(pwritev_handler,          SYS_PWRITEV);
 translate_fd1_handler!(sync_file_range_handler,  SYS_SYNC_FILE_RANGE);
 
-// Socket ops with fd in arg1
-translate_fd1_handler!(setsockopt_handler,       SYS_SETSOCKOPT);
-translate_fd1_handler!(getsockopt_handler,       SYS_GETSOCKOPT);
+// Socket ops with fd in arg1: getsockname/getpeername remain pure
+// translation (the kernel-fd path is correct; for IPC sockets we'd
+// need to synthesize the local/remote address — out of scope here).
 translate_fd1_handler!(getsockname_handler,      SYS_GETSOCKNAME);
 translate_fd1_handler!(getpeername_handler,      SYS_GETPEERNAME);
-translate_fd1_handler!(sendto_handler,           SYS_SENDTO);
-translate_fd1_handler!(recvfrom_handler,         SYS_RECVFROM);
-translate_fd1_handler!(sendmsg_handler,          SYS_SENDMSG);
-translate_fd1_handler!(recvmsg_handler,          SYS_RECVMSG);
+
+// SOL_* / SO_* constants used in setsockopt/getsockopt below.
+// Values match Linux x86_64 ABI.
+const SOL_SOCKET:   i32 = 1;
+const SO_REUSEADDR: i32 = 2;
+const SO_TYPE:      i32 = 3;
+const SO_ERROR:     i32 = 4;
+const SO_DONTROUTE: i32 = 5;
+const SO_BROADCAST: i32 = 6;
+const SO_SNDBUF:    i32 = 7;
+const SO_RCVBUF:    i32 = 8;
+const SO_KEEPALIVE: i32 = 9;
+const SO_LINGER:    i32 = 13;
+const SO_REUSEPORT: i32 = 15;
+const SO_PASSCRED:  i32 = 16;
+const SO_RCVLOWAT:  i32 = 18;
+const SO_SNDLOWAT:  i32 = 19;
+const SO_ACCEPTCONN: i32 = 30;
+const SO_PROTOCOL:  i32 = 38;
+const SO_DOMAIN:    i32 = 39;
+
+/// sendto (syscall 44): IPC-aware.  For IPC sockets, write to sendpipe
+/// (ignoring `dest_addr` — IPC sockets are always connected).  For IPC
+/// pipes, return ENOTSOCK.  Otherwise translate fd and forward.
+///
+/// `send()` in glibc is a wrapper around sendto with NULL/0 sockaddr.
+pub extern "C" fn sendto_handler(
+    _cageid: u64,
+    arg1: u64, arg1cage: u64,    // fd
+    arg2: u64, arg2cage: u64,    // buf (already a host addr — translated by glibc)
+    arg3: u64, arg3cage: u64,    // count
+    arg4: u64, arg4cage: u64,    // flags
+    arg5: u64, arg5cage: u64,    // dest_addr (ignored for IPC)
+    arg6: u64, arg6cage: u64,    // addrlen
+) -> i32 {
+    let cage_id = arg1cage;
+    let fd = arg1;
+    let count = arg3 as usize;
+    let this_cage = getcageid();
+    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    let info = lookup_ipc_fd(cage_id, fd);
+    if info.is_none() {
+        return forward_with_fd1(SYS_SENDTO, cage_id, args, arg_cages);
+    }
+    let (underfd, fdkind, flags) = info.unwrap();
+    if fdkind != socket::IPC_SOCKET {
+        return ENOTSOCK_NEG;
+    }
+
+    let pipe = with_ipc(|s| {
+        s.sockets.get(underfd).and_then(|sock| sock.sendpipe.clone())
+    });
+    let pipe = match pipe {
+        Some(p) => p,
+        None => return ENOTCONN_NEG,
+    };
+
+    let nonblocking = (flags & O_NONBLOCK) != 0;
+
+    if count == 0 {
+        return 0;
+    }
+    let mut buf = vec![0u8; count];
+    let _ = copy_data_between_cages(
+        this_cage, arg2cage,
+        arg2, arg2cage,
+        buf.as_mut_ptr() as u64, this_cage,
+        count as u64, 0,
+    );
+    pipe.write(&buf, count, nonblocking)
+}
+
+/// recvfrom (syscall 45): IPC-aware mirror of sendto_handler.  For IPC
+/// sockets, read from recvpipe; for IPC pipes, return ENOTSOCK; else
+/// forward.
+///
+/// If a non-NULL `src_addr` was provided, we don't synthesize a peer
+/// address — we set `*addrlen` to 0 so the caller sees "no address",
+/// which matches AF_UNIX socketpair semantics on Linux (peer is unnamed).
+pub extern "C" fn recvfrom_handler(
+    _cageid: u64,
+    arg1: u64, arg1cage: u64,    // fd
+    arg2: u64, arg2cage: u64,    // buf
+    arg3: u64, arg3cage: u64,    // count
+    arg4: u64, arg4cage: u64,    // flags
+    arg5: u64, arg5cage: u64,    // src_addr (out)
+    arg6: u64, arg6cage: u64,    // addrlen (in/out)
+) -> i32 {
+    let cage_id = arg1cage;
+    let fd = arg1;
+    let count = arg3 as usize;
+    let this_cage = getcageid();
+    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    let info = lookup_ipc_fd(cage_id, fd);
+    if info.is_none() {
+        return forward_with_fd1(SYS_RECVFROM, cage_id, args, arg_cages);
+    }
+    let (underfd, fdkind, flags) = info.unwrap();
+    if fdkind != socket::IPC_SOCKET {
+        return ENOTSOCK_NEG;
+    }
+
+    let pipe = with_ipc(|s| {
+        s.sockets.get(underfd).and_then(|sock| sock.recvpipe.clone())
+    });
+    let pipe = match pipe {
+        Some(p) => p,
+        None => return ENOTCONN_NEG,
+    };
+
+    let nonblocking = (flags & O_NONBLOCK) != 0;
+
+    let mut buf = vec![0u8; count];
+    let ret = pipe.read(&mut buf, count, nonblocking);
+    if ret > 0 && arg2 != 0 {
+        let _ = copy_data_between_cages(
+            this_cage, arg2cage,
+            buf.as_ptr() as u64, this_cage,
+            arg2, arg2cage,
+            ret as u64, 0,
+        );
+    }
+    // If caller supplied src_addr/addrlen, write addrlen=0 so they see
+    // "no peer address available" rather than uninitialized bytes.
+    if ret >= 0 && arg6 != 0 {
+        let zero: u32 = 0;
+        let _ = copy_data_between_cages(
+            this_cage, arg6cage,
+            &zero as *const u32 as u64, this_cage,
+            arg6, arg6cage,
+            4, 0,
+        );
+    }
+    ret
+}
+
+/// sendmsg (syscall 46): IPC-aware.  Reads the msghdr + iovec array
+/// from the user cage, gathers all iov segments into one buffer, and
+/// writes to the IPC socket's sendpipe.  msg_name (destination) and
+/// msg_control (ancillary data) are ignored for IPC sockets.
+pub extern "C" fn sendmsg_handler(
+    _cageid: u64,
+    arg1: u64, arg1cage: u64,    // fd
+    arg2: u64, arg2cage: u64,    // msghdr*
+    arg3: u64, arg3cage: u64,    // flags
+    arg4: u64, arg4cage: u64,
+    arg5: u64, arg5cage: u64,
+    arg6: u64, arg6cage: u64,
+) -> i32 {
+    let cage_id = arg1cage;
+    let fd = arg1;
+    let this_cage = getcageid();
+    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    let info = lookup_ipc_fd(cage_id, fd);
+    if info.is_none() {
+        return forward_with_fd1(SYS_SENDMSG, cage_id, args, arg_cages);
+    }
+    let (underfd, fdkind, flags) = info.unwrap();
+    if fdkind != socket::IPC_SOCKET {
+        return ENOTSOCK_NEG;
+    }
+
+    let pipe = with_ipc(|s| {
+        s.sockets.get(underfd).and_then(|sock| sock.sendpipe.clone())
+    });
+    let pipe = match pipe {
+        Some(p) => p,
+        None => return ENOTCONN_NEG,
+    };
+
+    // Pull the msghdr (56 bytes) out of the user cage.
+    let mut hdr = HostMsghdr::default();
+    let _ = copy_data_between_cages(
+        this_cage, arg2cage,
+        arg2, arg2cage,
+        &mut hdr as *mut _ as u64, this_cage,
+        core::mem::size_of::<HostMsghdr>() as u64, 0,
+    );
+
+    let iov_count = hdr.msg_iovlen as usize;
+    if iov_count == 0 {
+        return 0;
+    }
+    if iov_count > MAX_IOV {
+        return -22; // EINVAL
+    }
+
+    // Walk the iov array (still in user-cage memory).  For each entry,
+    // read 16 bytes (iov_base + iov_len), then copy `iov_len` bytes
+    // from `iov_base` into one growing local buffer.
+    let mut gathered: Vec<u8> = Vec::new();
+    for i in 0..iov_count {
+        let mut iov = HostIovec::default();
+        let entry_addr = hdr.msg_iov.wrapping_add((i as u64) * 16);
+        let _ = copy_data_between_cages(
+            this_cage, arg2cage,
+            entry_addr, arg2cage,
+            &mut iov as *mut _ as u64, this_cage,
+            core::mem::size_of::<HostIovec>() as u64, 0,
+        );
+        let len = iov.iov_len as usize;
+        if len == 0 { continue; }
+        let mut chunk = vec![0u8; len];
+        let _ = copy_data_between_cages(
+            this_cage, arg2cage,
+            iov.iov_base, arg2cage,
+            chunk.as_mut_ptr() as u64, this_cage,
+            len as u64, 0,
+        );
+        gathered.extend_from_slice(&chunk);
+    }
+
+    let nonblocking = (flags & O_NONBLOCK) != 0;
+    let total = gathered.len();
+    if total == 0 {
+        return 0;
+    }
+    pipe.write(&gathered, total, nonblocking)
+}
+
+/// recvmsg (syscall 47): IPC-aware.  Reads from the IPC socket's
+/// recvpipe into one buffer, then scatters bytes into the user's iov
+/// segments.  Returns total bytes received.
+pub extern "C" fn recvmsg_handler(
+    _cageid: u64,
+    arg1: u64, arg1cage: u64,    // fd
+    arg2: u64, arg2cage: u64,    // msghdr*
+    arg3: u64, arg3cage: u64,    // flags
+    arg4: u64, arg4cage: u64,
+    arg5: u64, arg5cage: u64,
+    arg6: u64, arg6cage: u64,
+) -> i32 {
+    let cage_id = arg1cage;
+    let fd = arg1;
+    let this_cage = getcageid();
+    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    let info = lookup_ipc_fd(cage_id, fd);
+    if info.is_none() {
+        return forward_with_fd1(SYS_RECVMSG, cage_id, args, arg_cages);
+    }
+    let (underfd, fdkind, flags) = info.unwrap();
+    if fdkind != socket::IPC_SOCKET {
+        return ENOTSOCK_NEG;
+    }
+
+    let pipe = with_ipc(|s| {
+        s.sockets.get(underfd).and_then(|sock| sock.recvpipe.clone())
+    });
+    let pipe = match pipe {
+        Some(p) => p,
+        None => return ENOTCONN_NEG,
+    };
+
+    // Pull the msghdr in from the user cage and walk the iov array
+    // up front to compute total recv capacity.
+    let mut hdr = HostMsghdr::default();
+    let _ = copy_data_between_cages(
+        this_cage, arg2cage,
+        arg2, arg2cage,
+        &mut hdr as *mut _ as u64, this_cage,
+        core::mem::size_of::<HostMsghdr>() as u64, 0,
+    );
+
+    let iov_count = hdr.msg_iovlen as usize;
+    if iov_count == 0 {
+        return 0;
+    }
+    if iov_count > MAX_IOV {
+        return -22; // EINVAL
+    }
+
+    let mut iovs: Vec<HostIovec> = Vec::with_capacity(iov_count);
+    let mut total_capacity: usize = 0;
+    for i in 0..iov_count {
+        let mut iov = HostIovec::default();
+        let entry_addr = hdr.msg_iov.wrapping_add((i as u64) * 16);
+        let _ = copy_data_between_cages(
+            this_cage, arg2cage,
+            entry_addr, arg2cage,
+            &mut iov as *mut _ as u64, this_cage,
+            core::mem::size_of::<HostIovec>() as u64, 0,
+        );
+        total_capacity = total_capacity.saturating_add(iov.iov_len as usize);
+        iovs.push(iov);
+    }
+    if total_capacity == 0 {
+        return 0;
+    }
+
+    let nonblocking = (flags & O_NONBLOCK) != 0;
+    let mut buf = vec![0u8; total_capacity];
+    let ret = pipe.read(&mut buf, total_capacity, nonblocking);
+    if ret <= 0 {
+        return ret;
+    }
+    // Scatter `ret` bytes into the user iov segments.
+    let mut remaining = ret as usize;
+    let mut offset = 0usize;
+    for iov in &iovs {
+        if remaining == 0 { break; }
+        let chunk = core::cmp::min(iov.iov_len as usize, remaining);
+        if chunk == 0 { continue; }
+        let _ = copy_data_between_cages(
+            this_cage, arg2cage,
+            buf.as_ptr().wrapping_add(offset) as u64, this_cage,
+            iov.iov_base, arg2cage,
+            chunk as u64, 0,
+        );
+        offset += chunk;
+        remaining -= chunk;
+    }
+    ret
+}
+
+/// setsockopt (syscall 54): IPC-aware.  For IPC sockets, accept (no-op)
+/// a recognised set of SO_* options at SOL_SOCKET so apps can call
+/// setsockopt without failing.  Reject unknown options with
+/// ENOPROTOOPT.  For IPC pipes, return ENOTSOCK.  Otherwise forward.
+pub extern "C" fn setsockopt_handler(
+    _cageid: u64,
+    arg1: u64, arg1cage: u64,    // fd
+    arg2: u64, arg2cage: u64,    // level
+    arg3: u64, arg3cage: u64,    // optname
+    arg4: u64, arg4cage: u64,    // optval
+    arg5: u64, arg5cage: u64,    // optlen
+    arg6: u64, arg6cage: u64,
+) -> i32 {
+    let cage_id = arg1cage;
+    let fd = arg1;
+    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    let info = lookup_ipc_fd(cage_id, fd);
+    if info.is_none() {
+        return forward_with_fd1(SYS_SETSOCKOPT, cage_id, args, arg_cages);
+    }
+    let (_underfd, fdkind, _flags) = info.unwrap();
+    if fdkind != socket::IPC_SOCKET {
+        return ENOTSOCK_NEG;
+    }
+
+    let level   = arg2 as i32;
+    let optname = arg3 as i32;
+    if level != SOL_SOCKET {
+        return ENOPROTOOPT_NEG;
+    }
+    match optname {
+        SO_REUSEADDR | SO_REUSEPORT | SO_KEEPALIVE | SO_PASSCRED
+        | SO_BROADCAST | SO_DONTROUTE | SO_LINGER
+        | SO_SNDBUF | SO_RCVBUF | SO_SNDLOWAT | SO_RCVLOWAT => 0,
+        _ => ENOPROTOOPT_NEG,
+    }
+}
+
+/// getsockopt (syscall 55): IPC-aware.  For IPC sockets, return canned
+/// values for the SO_* options apps actually inspect.  We know the
+/// domain/socktype from socket-create time, so SO_TYPE / SO_DOMAIN /
+/// SO_PROTOCOL / SO_ACCEPTCONN are answered from our socket registry.
+/// Buffer-related options report a fixed size; flag options report 0.
+/// Unknown options return ENOPROTOOPT.
+pub extern "C" fn getsockopt_handler(
+    _cageid: u64,
+    arg1: u64, arg1cage: u64,    // fd
+    arg2: u64, arg2cage: u64,    // level
+    arg3: u64, arg3cage: u64,    // optname
+    arg4: u64, arg4cage: u64,    // optval (out)
+    arg5: u64, arg5cage: u64,    // optlen (in/out)
+    arg6: u64, arg6cage: u64,
+) -> i32 {
+    let cage_id = arg1cage;
+    let fd = arg1;
+    let this_cage = getcageid();
+    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    let info = lookup_ipc_fd(cage_id, fd);
+    if info.is_none() {
+        return forward_with_fd1(SYS_GETSOCKOPT, cage_id, args, arg_cages);
+    }
+    let (underfd, fdkind, _flags) = info.unwrap();
+    if fdkind != socket::IPC_SOCKET {
+        return ENOTSOCK_NEG;
+    }
+
+    let level   = arg2 as i32;
+    let optname = arg3 as i32;
+    if level != SOL_SOCKET {
+        return ENOPROTOOPT_NEG;
+    }
+
+    // SOCK_TYPE_MASK on Linux: low 4 bits of `type` are the actual
+    // socket type; SOCK_CLOEXEC / SOCK_NONBLOCK live in higher bits.
+    const SOCK_TYPE_MASK: i32 = 0xf;
+
+    // Compute the i32 value to report based on optname + socket info.
+    let val: i32 = match optname {
+        SO_TYPE => with_ipc(|s| {
+            s.sockets.get(underfd)
+                .map(|x| x.socktype & SOCK_TYPE_MASK)
+                .unwrap_or(0)
+        }),
+        SO_DOMAIN => with_ipc(|s| s.sockets.get(underfd).map(|x| x.domain).unwrap_or(0)),
+        SO_PROTOCOL => 0,
+        SO_ACCEPTCONN => with_ipc(|s| {
+            s.sockets.get(underfd)
+                .map(|x| if x.state == socket::ConnState::Listening { 1 } else { 0 })
+                .unwrap_or(0)
+        }),
+        SO_ERROR => 0,
+        SO_REUSEADDR | SO_REUSEPORT | SO_KEEPALIVE | SO_PASSCRED
+        | SO_BROADCAST | SO_DONTROUTE => 0,
+        // Buffer sizes — match the IPC pipe's capacity (see socket.rs).
+        SO_SNDBUF | SO_RCVBUF => 65536,
+        SO_SNDLOWAT | SO_RCVLOWAT => 1,
+        _ => return ENOPROTOOPT_NEG,
+    };
+
+    // Honour the caller's optlen: write min(4, *optlen) bytes, then
+    // write 4 back to *optlen.
+    if arg5 == 0 || arg4 == 0 {
+        return -22; // EINVAL
+    }
+    let mut user_optlen: u32 = 0;
+    let _ = copy_data_between_cages(
+        this_cage, arg5cage,
+        arg5, arg5cage,
+        &mut user_optlen as *mut u32 as u64, this_cage,
+        4, 0,
+    );
+    let write_bytes = core::cmp::min(user_optlen, 4) as u64;
+    if write_bytes > 0 {
+        let _ = copy_data_between_cages(
+            this_cage, arg4cage,
+            &val as *const i32 as u64, this_cage,
+            arg4, arg4cage,
+            write_bytes, 0,
+        );
+    }
+    let four: u32 = 4;
+    let _ = copy_data_between_cages(
+        this_cage, arg5cage,
+        &four as *const u32 as u64, this_cage,
+        arg5, arg5cage,
+        4, 0,
+    );
+    0
+}
 
 /// accept4 (syscall 288): like accept but with flags.  IPC sockets get
 /// handled in accept_handler logic; for non-IPC sockets we translate +
