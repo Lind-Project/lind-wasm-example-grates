@@ -1227,6 +1227,107 @@ static void test_uds_serverclient(void) {
     unlink(path);
 }
 
+/* ── Test: setsockopt/getsockopt on a UDS socketpair (IPC socket) ─── */
+/* AF_UNIX sockets go through the IPC grate's IPC_SOCKET path.  The
+   grate's setsockopt/getsockopt handlers translate the grate vfd to
+   the IPC socket_id and forward to RawPOSIX — which doesn't have a
+   real kernel fd for these.  Test what works, what doesn't, and at
+   minimum that calls don't crash. */
+
+static void test_uds_sockopt(void) {
+    printf("\n[test_uds_sockopt]\n");
+
+    int sv[2];
+    int rc = socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    CHECK("socketpair(AF_UNIX, SOCK_STREAM)", rc == 0);
+    if (rc != 0) return;
+
+    /* SO_TYPE: round-trip read; should report SOCK_STREAM. */
+    int type = -1;
+    socklen_t tlen = sizeof(type);
+    int gr = getsockopt(sv[0], SOL_SOCKET, SO_TYPE, &type, &tlen);
+    CHECK("getsockopt(SO_TYPE) on UDS socket succeeds", gr == 0);
+    CHECK("SO_TYPE == SOCK_STREAM", gr != 0 || type == SOCK_STREAM);
+
+    /* SO_SNDBUF / SO_RCVBUF: at least one of these should be readable.
+       Linux always reports a non-negative value for socketpair. */
+    int sndbuf = -1;
+    socklen_t slen = sizeof(sndbuf);
+    gr = getsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &sndbuf, &slen);
+    CHECK("getsockopt(SO_SNDBUF) on UDS socket succeeds", gr == 0);
+    CHECK("SO_SNDBUF is non-negative", gr != 0 || sndbuf >= 0);
+
+    /* setsockopt is mostly a no-op for AF_UNIX, but should still return 0
+       for a recognized option. */
+    int yes = 1;
+    int sr = setsockopt(sv[0], SOL_SOCKET, SO_PASSCRED, &yes, sizeof(yes));
+    CHECK("setsockopt(SO_PASSCRED) on UDS socket succeeds", sr == 0);
+
+    close(sv[0]);
+    close(sv[1]);
+}
+
+/* ── Test: setsockopt/getsockopt on a regular AF_INET socket ──────── */
+/* AF_INET sockets without loopback target are FDKIND_KERNEL in the
+   grate's fdtable; setsockopt/getsockopt translates to the runtime
+   vfd and forwards.  This should fully round-trip. */
+
+static void test_inet_sockopt(void) {
+    printf("\n[test_inet_sockopt]\n");
+
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    CHECK("socket(AF_INET, SOCK_STREAM)", s >= 0);
+    if (s < 0) return;
+
+    /* SO_TYPE: should report SOCK_STREAM. */
+    int type = -1;
+    socklen_t tlen = sizeof(type);
+    int gr = getsockopt(s, SOL_SOCKET, SO_TYPE, &type, &tlen);
+    CHECK("getsockopt(SO_TYPE) succeeds", gr == 0);
+    CHECK("SO_TYPE == SOCK_STREAM", gr != 0 || type == SOCK_STREAM);
+
+    /* SO_REUSEADDR: default 0, set 1, getsockopt should report non-zero. */
+    int v = -1;
+    socklen_t vlen = sizeof(v);
+    gr = getsockopt(s, SOL_SOCKET, SO_REUSEADDR, &v, &vlen);
+    CHECK("getsockopt(SO_REUSEADDR) initial succeeds", gr == 0);
+    CHECK("SO_REUSEADDR initial is 0", gr != 0 || v == 0);
+
+    int yes = 1;
+    int sr = setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    CHECK("setsockopt(SO_REUSEADDR=1) succeeds", sr == 0);
+
+    v = -1;
+    vlen = sizeof(v);
+    gr = getsockopt(s, SOL_SOCKET, SO_REUSEADDR, &v, &vlen);
+    CHECK("getsockopt(SO_REUSEADDR) after set succeeds", gr == 0);
+    CHECK("SO_REUSEADDR after set is non-zero", gr != 0 || v != 0);
+
+    /* SO_KEEPALIVE: default 0, set 1, verify round-trip. */
+    v = -1;
+    vlen = sizeof(v);
+    gr = getsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &v, &vlen);
+    CHECK("getsockopt(SO_KEEPALIVE) initial succeeds", gr == 0);
+    CHECK("SO_KEEPALIVE initial is 0", gr != 0 || v == 0);
+
+    sr = setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes));
+    CHECK("setsockopt(SO_KEEPALIVE=1) succeeds", sr == 0);
+
+    v = -1;
+    vlen = sizeof(v);
+    gr = getsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &v, &vlen);
+    CHECK("getsockopt(SO_KEEPALIVE) after set succeeds", gr == 0);
+    CHECK("SO_KEEPALIVE after set is non-zero", gr != 0 || v != 0);
+
+    /* Negative case: invalid option should return -1 / ENOPROTOOPT. */
+    int junk = 0;
+    socklen_t jlen = sizeof(junk);
+    gr = getsockopt(s, SOL_SOCKET, 0xFFFF, &junk, &jlen);
+    CHECK("getsockopt(invalid) returns -1", gr == -1);
+
+    close(s);
+}
+
 /* ── Main ──────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -1276,6 +1377,11 @@ int main(void) {
     test_socketpair_sendmsg_recvmsg();
     test_tcp_loopback_accept4();
     test_uds_serverclient();
+
+    /* setsockopt / getsockopt — UDS (IPC socket path) and AF_INET
+       (kernel-fd path). */
+    test_uds_sockopt();
+    test_inet_sockopt();
 
     printf("\n=== results: %d/%d passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
