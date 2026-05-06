@@ -2040,18 +2040,31 @@ pub extern "C" fn accept_handler(
 
     // Plain accept() does not set CLOEXEC on the new fd; only accept4 with
     // SOCK_CLOEXEC does (handled by accept4_handler).
-    accept_ipc_inner(cage_id, socket_id, flags, /*cloexec=*/false, /*extra_perfdinfo=*/0)
+    accept_ipc_inner(
+        cage_id, socket_id, flags, /*cloexec=*/false, /*extra_perfdinfo=*/0,
+        arg2, arg2cage, arg3, _arg3cage,
+    )
 }
 
 /// Body of an IPC-socket accept.  Extracted so accept4_handler can pass
 /// cloexec / SOCK_NONBLOCK from its flags arg without duplicating the
 /// pending-connection wait loop.
+///
+/// `addr_arg` / `addr_cage` and `addrlen_arg` / `addrlen_cage` are the
+/// caller's `accept(fd, &addr, &addrlen)` out-params.  They may both be
+/// NULL, in which case we skip the peer-address writeback.  When set,
+/// we synthesise a sockaddr from the new socket's domain + remote_addr
+/// (set when the connection was queued by connect()) and copy it back,
+/// so callers like postgres that read raddr after accept() see a real
+/// sa_family instead of a zero-initialised buffer.
 fn accept_ipc_inner(
     cage_id: u64,
     socket_id: u64,
     listen_flags: i32,
     cloexec: bool,
     extra_perfdinfo: u64,
+    addr_arg: u64, addr_cage: u64,
+    addrlen_arg: u64, addrlen_cage: u64,
 ) -> i32 {
     let nonblocking = (listen_flags & O_NONBLOCK) != 0;
 
@@ -2096,15 +2109,35 @@ fn accept_ipc_inner(
             });
 
             // Allocate fd for the new socket.
-            match fdtables::get_unused_virtual_fd(
+            let new_fd = match fdtables::get_unused_virtual_fd(
                 cage_id, socket::IPC_SOCKET, new_socket_id, cloexec, extra_perfdinfo,
             ) {
-                Ok(new_fd) => return new_fd as i32,
+                Ok(new_fd) => new_fd as i32,
                 Err(_) => {
                     with_ipc(|s| s.sockets.remove(new_socket_id));
                     return -24; // EMFILE
                 }
+            };
+
+            // Write the peer address back to the user's addr / addrlen
+            // out-params, mirroring kernel accept().  NULL pointers are
+            // legal (caller doesn't want the address) — skip in that case.
+            if addr_arg != 0 && addrlen_arg != 0 {
+                let (domain, remote_addr) = with_ipc(|s| {
+                    s.sockets.get(new_socket_id)
+                        .map(|sk| (sk.domain, sk.remote_addr.clone()))
+                        .unwrap_or((0, None))
+                });
+                let (sock_buf, sock_len) = build_ipc_sockaddr(domain, &remote_addr);
+                let _ = ipc_writeback_sockaddr(
+                    &sock_buf, sock_len,
+                    addr_arg, addr_cage,
+                    addrlen_arg, addrlen_cage,
+                    getcageid(),
+                );
             }
+
+            return new_fd;
         }
 
         if nonblocking {
@@ -3591,7 +3624,10 @@ pub extern "C" fn accept4_handler(
         // SOCK_CLOEXEC == O_CLOEXEC, SOCK_NONBLOCK == O_NONBLOCK).
         let cloexec = (arg4 as i32 & O_CLOEXEC) != 0;
         let extra_perfdinfo = (arg4) & (O_NONBLOCK as u64);
-        return accept_ipc_inner(cage_id, socket_id, listen_flags, cloexec, extra_perfdinfo);
+        return accept_ipc_inner(
+            cage_id, socket_id, listen_flags, cloexec, extra_perfdinfo,
+            arg2, arg2cage, arg3, arg3cage,
+        );
     }
 
     let under = match translate_to_underfd(cage_id, fd) {
