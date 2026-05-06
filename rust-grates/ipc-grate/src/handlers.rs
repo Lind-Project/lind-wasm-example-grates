@@ -428,6 +428,34 @@ pub extern "C" fn write_handler(
 /// Reads the pipe state directly via has_data / write_refs / read_refs.
 fn ipc_pipe_poll_state(underfd: u64, fdkind: u32, flags: i32, requested: i16) -> i16 {
     let mut revents: i16 = 0;
+
+    // Listening IPC sockets have no recv/send pipes — those are minted
+    // at accept() time.  Readability on a listen fd means "there is a
+    // pending connection queued for accept()".  Without this special
+    // case we'd fall through to the recvpipe-is-None branch and return
+    // POLLNVAL, so any select/poll(POLLIN) on a listen fd would never
+    // report readability.  postmaster-style servers (postgres, anything
+    // that selects before accepting) would then never call accept() and
+    // clients would hang.
+    if fdkind == socket::IPC_SOCKET {
+        let listen_pending = with_ipc(|s| {
+            let sk = s.sockets.get(underfd)?;
+            if sk.state != socket::ConnState::Listening { return None; }
+            let addr = sk.local_addr.clone()?;
+            let has_pending = s.sockets.pending_connections
+                .get(&addr)
+                .map(|q| !q.is_empty())
+                .unwrap_or(false);
+            Some(has_pending)
+        });
+        if let Some(has_pending) = listen_pending {
+            if (requested & POLLIN) != 0 && has_pending {
+                revents |= POLLIN;
+            }
+            return revents;
+        }
+    }
+
     let pipe_arc = match fdkind {
         IPC_PIPE => with_ipc(|s| s.get_pipe(underfd)),
         socket::IPC_SOCKET => with_ipc(|s| {
@@ -745,14 +773,81 @@ pub extern "C" fn select_handler(
         }
     }
 
-    // No kernel fds at all: skip the kernel forward and return whatever
-    // IPC fds are ready.  RawPOSIX's select_syscall would reject empty
-    // fd_sets with EINVAL via `prepare_bitmasks_for_select`.  Note: this
-    // doesn't honor the caller's timeout when ipc_ready == 0 — an
-    // all-IPC blocking select would currently return 0 instead of
-    // sleeping.  Callers needing real blocking on IPC-only sets should
-    // be revisited (could libc::poll(NULL, 0, ms) here).
+    // No kernel fds at all: skip the kernel forward and wait locally.
+    // RawPOSIX's select_syscall would reject empty fd_sets with EINVAL
+    // via `prepare_bitmasks_for_select`, so we can't just hand the
+    // timeout off to the kernel.  Instead, if no IPC fds are ready
+    // yet, poll-loop on the IPC state until either one becomes ready
+    // or the caller's timeout elapses.  Without this loop a server
+    // that select()s on a UDS listen fd before the client connect()s
+    // would return 0 immediately, never see the connection, and hang.
     if !have_kernel_fds {
+        if ipc_ready == 0 {
+            // Read the user's timeval (8-byte tv_sec + 4-byte tv_usec
+            // + 4 bytes padding on wasm32; we read the full 16 bytes
+            // and mask tv_usec).  NULL pointer means block forever.
+            let timeout_ns: Option<u128> = if arg5 == 0 {
+                None
+            } else {
+                let mut tv = [0u8; 16];
+                let _ = copy_data_between_cages(
+                    this_cage, arg5cage,
+                    arg5, arg5cage,
+                    tv.as_mut_ptr() as u64, this_cage,
+                    16, 0,
+                );
+                let secs  = u64::from_le_bytes([tv[0], tv[1], tv[2], tv[3], tv[4], tv[5], tv[6], tv[7]]);
+                let usecs = u32::from_le_bytes([tv[8], tv[9], tv[10], tv[11]]) as u64;
+                Some((secs as u128).saturating_mul(1_000_000_000)
+                    .saturating_add((usecs as u128).saturating_mul(1_000)))
+            };
+
+            let start = std::time::Instant::now();
+            loop {
+                // Re-classify IPC fds against current pipe / connection
+                // state.  read_set / write_set / except_set are
+                // already populated from the user; only the IPC bits
+                // change as connections / data arrive.
+                ipc_read = [0; FD_SET_WORDS];
+                ipc_write = [0; FD_SET_WORDS];
+                ipc_except = [0; FD_SET_WORDS];
+                ipc_ready = 0;
+                for fd in 0..nfds {
+                    let want_r = have_r && fd_isset(fd, &read_set);
+                    let want_w = have_w && fd_isset(fd, &write_set);
+                    let want_e = have_e && fd_isset(fd, &except_set);
+                    if !want_r && !want_w && !want_e { continue; }
+                    if let Some((underfd, fdkind, flags)) = lookup_ipc_fd(cage_id, fd as u64) {
+                        let mut requested_events: i16 = 0;
+                        if want_r { requested_events |= POLLIN; }
+                        if want_w { requested_events |= POLLOUT; }
+                        let revents = ipc_pipe_poll_state(underfd, fdkind, flags, requested_events);
+                        if want_r && (revents & (POLLIN | POLLHUP)) != 0 {
+                            fd_set_bit(fd, &mut ipc_read);
+                            ipc_ready += 1;
+                        }
+                        if want_w && (revents & (POLLOUT | POLLERR)) != 0 {
+                            fd_set_bit(fd, &mut ipc_write);
+                            ipc_ready += 1;
+                        }
+                        if want_e && (revents & POLLERR) != 0 {
+                            fd_set_bit(fd, &mut ipc_except);
+                            ipc_ready += 1;
+                        }
+                    }
+                }
+                if ipc_ready > 0 { break; }
+                if let Some(timeout) = timeout_ns {
+                    if start.elapsed().as_nanos() >= timeout { break; }
+                }
+                // Sleep briefly between checks so we don't pin a CPU.
+                unsafe {
+                    let ts = libc::timespec { tv_sec: 0, tv_nsec: 1_000_000 };
+                    libc::nanosleep(&ts, std::ptr::null_mut());
+                }
+            }
+        }
+
         if have_r {
             let _ = copy_data_between_cages(
                 this_cage, arg1cage,
