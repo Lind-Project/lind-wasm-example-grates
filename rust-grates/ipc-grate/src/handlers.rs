@@ -566,7 +566,11 @@ const EINTR_NEG: i32 = -4;
 /// SIGUSR1 handler that never gets to run).
 fn ipc_wait_nap_signal_aware() -> bool {
     unsafe {
-        let ts = libc::timespec { tv_sec: 0, tv_nsec: 1_000_000 };
+        // Request 1µs.  The Linux kernel rounds up to its timer
+        // granularity (~50µs) regardless, so going smaller is a
+        // no-op.  Going larger (e.g. 1ms) hurts throughput on
+        // pipe-style waits without improving signal latency.
+        let ts = libc::timespec { tv_sec: 0, tv_nsec: 1_000 };
         // For a valid timespec the only error nanosleep can return is
         // EINTR, so a negative return is conclusive.
         libc::nanosleep(&ts, std::ptr::null_mut()) < 0
