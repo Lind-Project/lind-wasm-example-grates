@@ -3398,11 +3398,13 @@ pub extern "C" fn fstat_handler(
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
 ) -> i32 {
-    // Linux x86_64 layout of `struct stat` is 144 bytes; only the
-    // mode field needs to be meaningful for our purposes.  st_mode is
-    // a u32 at offset 24 in that layout.
+    // lind-wasm WASM32 / host `StatData` layout: st_dev (u64) at 0,
+    // st_ino (4 bytes on wasm32 / 8 on host but written by RawPOSIX
+    // with 4-byte effective stride) + 4 bytes padding put st_mode
+    // (u32) at offset 16.  Total struct is 144 bytes including
+    // timespecs.  Only st_mode is meaningful for our purposes.
     const STAT_SIZE: usize = 144;
-    const ST_MODE_OFFSET: usize = 24;
+    const ST_MODE_OFFSET: usize = 16;
     const S_IFIFO:  u32 = 0o010000;
     const S_IFSOCK: u32 = 0o140000;
 
