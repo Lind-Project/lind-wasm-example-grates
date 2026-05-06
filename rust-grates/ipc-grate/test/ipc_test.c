@@ -21,6 +21,9 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/uio.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/epoll.h>
 
 static int tests_run = 0;
@@ -1020,6 +1023,210 @@ static void test_epoll_ctl_del(void) {
     close(epfd); close(p[0]); close(p[1]);
 }
 
+/* ── Test: send/recv on UDS socketpair ────────────────────────────── */
+/* Mirrors lind-wasm tests serverclient.c and uds-socketselect.c, which
+   fail in baseline lind-wasm with "send failed".  socketpair() returns
+   AF_UNIX SOCK_STREAM endpoints; send()/recv() should round-trip a
+   buffer between them. */
+
+static void test_socketpair_send_recv(void) {
+    printf("\n[test_socketpair_send_recv]\n");
+
+    int sv[2];
+    int rc = socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    CHECK("socketpair(AF_UNIX, SOCK_STREAM)", rc == 0);
+    if (rc != 0) return;
+
+    const char *msg = "Hello from sv0";
+    size_t mlen = strlen(msg) + 1;
+
+    ssize_t ns = send(sv[0], msg, mlen, 0);
+    CHECK("send(sv[0]) returns full length", ns == (ssize_t)mlen);
+
+    char buf[64] = {0};
+    ssize_t nr = recv(sv[1], buf, sizeof(buf), 0);
+    CHECK("recv(sv[1]) returns full length", nr == (ssize_t)mlen);
+    CHECK("recv content matches", memcmp(buf, msg, mlen) == 0);
+
+    /* Send back the other direction. */
+    const char *echo = "Echo from sv1";
+    size_t elen = strlen(echo) + 1;
+    ns = send(sv[1], echo, elen, 0);
+    CHECK("send(sv[1]) echo full length", ns == (ssize_t)elen);
+
+    char ebuf[64] = {0};
+    nr = recv(sv[0], ebuf, sizeof(ebuf), 0);
+    CHECK("recv(sv[0]) echo full length", nr == (ssize_t)elen);
+    CHECK("echo content matches", memcmp(ebuf, echo, elen) == 0);
+
+    close(sv[0]);
+    close(sv[1]);
+}
+
+/* ── Test: sendmsg/recvmsg with iovec on UDS socketpair ───────────── */
+/* Mirrors sendmsg_recvmsg_test.c which fails in baseline lind-wasm
+   with "sendmsg: Socket operation on non-socket".  Uses SOCK_DGRAM
+   and a 2-iovec sendmsg followed by a 1-iovec recvmsg; the receiver
+   should see the gathered bytes in order. */
+
+static void test_socketpair_sendmsg_recvmsg(void) {
+    printf("\n[test_socketpair_sendmsg_recvmsg]\n");
+
+    int sv[2];
+    int rc = socketpair(AF_UNIX, SOCK_DGRAM, 0, sv);
+    CHECK("socketpair(AF_UNIX, SOCK_DGRAM)", rc == 0);
+    if (rc != 0) return;
+
+    char *s1 = "hello-";
+    char *s2 = "world";
+    struct iovec siov[2] = {
+        { .iov_base = s1, .iov_len = strlen(s1) },
+        { .iov_base = s2, .iov_len = strlen(s2) },
+    };
+    struct msghdr smsg = {0};
+    smsg.msg_iov    = siov;
+    smsg.msg_iovlen = 2;
+
+    ssize_t ns = sendmsg(sv[0], &smsg, 0);
+    size_t total = strlen(s1) + strlen(s2);
+    CHECK("sendmsg returns total iov length", ns == (ssize_t)total);
+
+    char rbuf[64] = {0};
+    struct iovec riov = { .iov_base = rbuf, .iov_len = sizeof(rbuf) - 1 };
+    struct msghdr rmsg = {0};
+    rmsg.msg_iov    = &riov;
+    rmsg.msg_iovlen = 1;
+
+    ssize_t nr = recvmsg(sv[1], &rmsg, 0);
+    CHECK("recvmsg returns total iov length", nr == (ssize_t)total);
+    if (nr > 0) rbuf[nr] = '\0';
+    CHECK("recvmsg gathered content matches", strcmp(rbuf, "hello-world") == 0);
+
+    close(sv[0]);
+    close(sv[1]);
+}
+
+/* ── Test: TCP loopback with accept4 + send/recv ──────────────────── */
+/* Mirrors accept4.c which fails in baseline lind-wasm at the send()
+   step with "Socket operation on non-socket" — even though socket(),
+   bind(), listen(), connect() and accept4() all succeed first.  This
+   test exercises the same exact sequence: AF_INET SOCK_STREAM on
+   loopback, accept4 with SOCK_CLOEXEC, send(client) → recv(server). */
+
+static void test_tcp_loopback_accept4(void) {
+    printf("\n[test_tcp_loopback_accept4]\n");
+
+    int s_listen = socket(AF_INET, SOCK_STREAM, 0);
+    CHECK("socket(AF_INET, SOCK_STREAM)", s_listen >= 0);
+    if (s_listen < 0) return;
+
+    int yes = 1;
+    setsockopt(s_listen, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+    struct sockaddr_in srv = {0};
+    srv.sin_family = AF_INET;
+    srv.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    srv.sin_port = htons(49161);
+
+    CHECK("bind", bind(s_listen, (struct sockaddr *)&srv, sizeof(srv)) == 0);
+    CHECK("listen", listen(s_listen, 1) == 0);
+
+    int s_client = socket(AF_INET, SOCK_STREAM, 0);
+    CHECK("client socket", s_client >= 0);
+    CHECK("connect", connect(s_client, (struct sockaddr *)&srv, sizeof(srv)) == 0);
+
+    struct sockaddr_in peer;
+    socklen_t plen = sizeof(peer);
+    int s_conn = accept4(s_listen, (struct sockaddr *)&peer, &plen, SOCK_CLOEXEC);
+    CHECK("accept4 with SOCK_CLOEXEC", s_conn >= 0);
+
+    /* Verify SOCK_CLOEXEC was applied. */
+    int fl = fcntl(s_conn, F_GETFD);
+    CHECK("FD_CLOEXEC set on accepted fd", fl >= 0 && (fl & FD_CLOEXEC));
+
+    /* This is the call that fails ENOTSOCK in baseline lind-wasm. */
+    const char msg[] = "hello";
+    ssize_t ns = send(s_client, msg, sizeof(msg) - 1, 0);
+    CHECK("send on connected client", ns == sizeof(msg) - 1);
+
+    char buf[16] = {0};
+    ssize_t nr = recv(s_conn, buf, sizeof(buf), 0);
+    CHECK("recv on accepted server", nr > 0);
+    CHECK("recv content matches", nr >= 5 && memcmp(buf, msg, 5) == 0);
+
+    close(s_conn);
+    close(s_client);
+    close(s_listen);
+}
+
+/* ── Test: UDS bind/listen/accept + fork client + send/recv ───────── */
+/* Mirrors uds-serverclient.c which fails in baseline lind-wasm.  Parent
+   binds and listens on a /tmp uds path, child connects + sends, parent
+   accepts + recv + sends echo, child recv + verify. */
+
+static void test_uds_serverclient(void) {
+    printf("\n[test_uds_serverclient]\n");
+
+    char path[64];
+    snprintf(path, sizeof(path), "/tmp/ipc_uds_%d", getpid());
+    unlink(path);
+
+    int srv_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK("server socket", srv_fd >= 0);
+    if (srv_fd < 0) return;
+
+    struct sockaddr_un addr = {0};
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    CHECK("server bind", bind(srv_fd, (struct sockaddr *)&addr, sizeof(addr)) == 0);
+    CHECK("server listen", listen(srv_fd, 1) == 0);
+
+    pid_t pid = fork();
+    CHECK("fork", pid >= 0);
+    if (pid < 0) { close(srv_fd); unlink(path); return; }
+
+    if (pid == 0) {
+        /* Child: connect, send, recv echo, verify. */
+        close(srv_fd);
+        int cfd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (cfd < 0) _exit(10);
+        struct sockaddr_un caddr = {0};
+        caddr.sun_family = AF_UNIX;
+        strncpy(caddr.sun_path, path, sizeof(caddr.sun_path) - 1);
+        if (connect(cfd, (struct sockaddr *)&caddr, sizeof(caddr)) < 0) _exit(11);
+        const char *msg = "UDS_PING";
+        size_t mlen = strlen(msg) + 1;
+        if (send(cfd, msg, mlen, 0) != (ssize_t)mlen) _exit(12);
+        char buf[32] = {0};
+        ssize_t nr = recv(cfd, buf, sizeof(buf), 0);
+        if (nr != (ssize_t)mlen) _exit(13);
+        if (memcmp(buf, msg, mlen) != 0) _exit(14);
+        close(cfd);
+        _exit(0);
+    }
+
+    /* Parent: accept, recv, echo back, wait for child. */
+    int cfd = accept(srv_fd, NULL, NULL);
+    CHECK("accept", cfd >= 0);
+    if (cfd >= 0) {
+        char buf[32] = {0};
+        ssize_t nr = recv(cfd, buf, sizeof(buf), 0);
+        CHECK("recv from child", nr > 0);
+        ssize_t ns = send(cfd, buf, (size_t)nr, 0);
+        CHECK("send echo to child", ns == nr);
+        close(cfd);
+    }
+
+    int wstatus = 0;
+    pid_t w = waitpid(pid, &wstatus, 0);
+    CHECK("waitpid child", w == pid);
+    CHECK("child exited 0",
+          WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 0);
+
+    close(srv_fd);
+    unlink(path);
+}
+
 /* ── Main ──────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -1061,6 +1268,14 @@ int main(void) {
     /* epoll — IPC pipe and CTL_DEL */
     test_epoll_pipe();
     test_epoll_ctl_del();
+
+    /* send/recv/sendmsg/recvmsg — mirrors lind-wasm tests that fail
+       in the baseline runtime (serverclient, uds-socketselect,
+       sendmsg_recvmsg_test, accept4, uds-serverclient). */
+    test_socketpair_send_recv();
+    test_socketpair_sendmsg_recvmsg();
+    test_tcp_loopback_accept4();
+    test_uds_serverclient();
 
     printf("\n=== results: %d/%d passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
