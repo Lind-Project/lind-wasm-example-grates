@@ -6,7 +6,7 @@ use grate_rs::{
 use fdtables;
 
 use crate::handlers::get_ns_handler;
-use crate::helpers::{self};
+use crate::helpers::{self, FS_CALLS};
 use crate::log;
 
 // =====================================================================
@@ -47,43 +47,6 @@ pub extern "C" fn register_handler_handler(
 }
 
 pub fn register_target_handlers(target_cage: u64) -> i32 {
-    // These are all the calls that the fs-namespace grate cares about, all the following calls from the target
-    // must be routed through the grate regardless of whether the clamp interposed on them.
-    const FS_CALLS: [u64; 29] = [
-        SYS_OPEN,
-        SYS_XSTAT,
-        SYS_ACCESS,
-        SYS_UNLINK,
-        SYS_MKDIR,
-        SYS_RMDIR,
-        SYS_RENAME,
-        SYS_TRUNCATE,
-        SYS_CHMOD,
-        SYS_CHDIR,
-        SYS_READLINK,
-        SYS_UNLINKAT,
-        SYS_READLINKAT,
-        // FD-based
-        SYS_READ,
-        SYS_WRITE,
-        SYS_CLOSE,
-        SYS_PREAD,
-        SYS_PWRITE,
-        SYS_LSEEK,
-        SYS_FXSTAT,
-        SYS_FCNTL,
-        SYS_FTRUNCATE,
-        SYS_FCHMOD,
-        SYS_READV,
-        SYS_WRITEV,
-        // FD-based with fd-tracking side effects
-        SYS_DUP,
-        SYS_DUP2,
-        SYS_DUP3,
-        // Lifecycle — interpose so we track child cages
-        SYS_CLONE,
-    ];
-
     let ns_cage = getcageid();
 
     // Reinstall namespace-grate handlers for the syscall set we clamp.
@@ -280,6 +243,8 @@ pub extern "C" fn fork_handler(
         if helpers::is_cage_clamped(arg1cage) {
             helpers::clone_cage_routes(arg1cage, child_cage_id);
         }
+
+        helpers::clone_cage_cwd(arg1cage, child_cage_id);
     }
 
     child_cage_id as i32
@@ -312,7 +277,7 @@ pub extern "C" fn exit_handler(
     // Forward exit to the runtime.
     helpers::do_syscall(
         arg1cage,
-        SYS_EXIT,
+        SYS_EXIT_GROUP,
         &[arg1, arg2, arg3, arg4, arg5, arg6],
         &[arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
     )
@@ -327,7 +292,7 @@ pub fn register_lifecycle_handlers(cage_id: u64) {
     let handlers: &[(u64, SyscallHandler)] = &[
         (SYS_EXEC, exec_handler),
         (SYS_CLONE, fork_handler),
-        (SYS_EXIT, exit_handler),
+        (SYS_EXIT_GROUP, exit_handler),
         (SYS_REGISTER_HANDLER, register_handler_handler),
     ];
 
@@ -337,7 +302,9 @@ pub fn register_lifecycle_handlers(cage_id: u64) {
             Err(e) => {
                 log!(
                     "failed to register lifecycle handler {} on cage {}: {:?}",
-                    syscall_nr, cage_id, e
+                    syscall_nr,
+                    cage_id,
+                    e
                 );
             }
         }

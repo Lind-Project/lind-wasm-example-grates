@@ -7,6 +7,7 @@
 
 use grate_rs::constants::*;
 use grate_rs::{copy_data_between_cages, getcageid, is_thread_clone, make_threei_call};
+use grate_rs::ffi::stat;
 
 use crate::imfs;
 
@@ -34,6 +35,24 @@ fn copy_path_from_cage(path_ptr: u64, path_cage: u64) -> Option<String> {
 
     let len = buf.iter().position(|&b| b == 0).unwrap_or(MAX_PATH_LEN);
     String::from_utf8(buf[..len].to_vec()).ok()
+}
+
+pub extern "C" fn enosys_handler(
+    _cageid: u64,
+    _arg1: u64,
+    _arg1cage: u64,
+    _arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    -38 // ENOSYS
 }
 
 // =====================================================================
@@ -76,6 +95,105 @@ pub extern "C" fn open_handler(
     let mode = arg3 as u32;
 
     imfs::with_imfs(|state| state.open(cage_id, &pathname, flags, mode))
+}
+
+pub extern "C" fn openat_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let cage_id = arg3cage;
+    let dirfd = arg1 as i32;
+
+    let pathname = match copy_path_from_cage(arg2, arg2cage) {
+        Some(p) => p,
+        None => return -14, // EFAULT
+    };
+
+    let flags = arg3 as i32;
+    let mode = arg4 as u32;
+
+    imfs::with_imfs(|state| state.openat(cage_id, dirfd, &pathname, flags, mode))
+}
+
+pub extern "C" fn getcwd_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    if arg1 == 0 {
+        return -14; // EFAULT
+    }
+
+    let cwd = match imfs::with_imfs(|state| state.getcwd(arg2cage)) {
+        Ok(cwd) => cwd,
+        Err(e) => return e,
+    };
+
+    let mut buf = cwd.into_bytes();
+    buf.push(0);
+
+    if buf.len() > arg2 as usize {
+        return -34; // ERANGE
+    }
+
+    let this_cage = getcageid();
+    match copy_data_between_cages(
+        this_cage,
+        arg1cage,
+        buf.as_ptr() as u64,
+        this_cage,
+        arg1,
+        arg1cage,
+        buf.len() as u64,
+        0,
+    ) {
+        Ok(_) => buf.len() as i32,
+        Err(_) => -14,
+    }
+}
+
+pub extern "C" fn access_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let pathname = match copy_path_from_cage(arg1, arg1cage) {
+        Some(p) => p,
+        None => return -14,
+    };
+
+    imfs::with_imfs(|state| state.access(arg2cage, &pathname, arg2 as i32))
 }
 
 // =====================================================================
@@ -263,6 +381,215 @@ pub extern "C" fn fcntl_handler(
 }
 
 // =====================================================================
+//  getdents (syscall 78)
+//
+//  arg1 = fd, arg1cage = cage_id
+//  arg2 = dirent buffer ptr, arg2cage = cage that owns the buffer
+//  arg3 = count
+// =====================================================================
+
+pub extern "C" fn getdents_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let cage_id = arg1cage;
+    let fd = arg1;
+    let count = arg3 as usize;
+    let this_cage = getcageid();
+    let mut buf = vec![0u8; count];
+
+    let ret = imfs::with_imfs(|state| state.getdents(cage_id, fd, &mut buf));
+
+    if ret > 0 && arg2 != 0 {
+        let _ = copy_data_between_cages(
+            this_cage,
+            arg2cage,
+            buf.as_ptr() as u64,
+            this_cage,
+            arg2,
+            arg2cage,
+            ret as u64,
+            0,
+        );
+    }
+
+    ret
+}
+
+// =====================================================================
+//  fstat / fxstat (syscall 5)
+//
+//  arg1 = fd, arg1cage = cage_id
+//  arg2 = stat buffer ptr, arg2cage = cage that owns the buffer
+// =====================================================================
+
+pub extern "C" fn chmod_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let pathname = match copy_path_from_cage(arg1, arg1cage) {
+        Some(p) => p,
+        None => return -14, // EFAULT
+    };
+
+    let mode = arg2 as u32;
+
+    imfs::with_imfs(|state| state.chmod(arg2cage, &pathname, mode))
+}
+
+pub extern "C" fn truncate_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let pathname = match copy_path_from_cage(arg1, arg1cage) {
+        Some(p) => p,
+        None => return -14, // EFAULT
+    };
+
+    imfs::with_imfs(|state| state.truncate(arg2cage, &pathname, arg2 as i64))
+}
+
+pub extern "C" fn ftruncate_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    imfs::with_imfs(|state| state.ftruncate(arg1cage, arg1, arg2 as i64))
+}
+
+pub extern "C" fn stat_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    if arg2 == 0 {
+        return -14;
+    }
+
+    let mut statbuf = stat::default();
+    
+    let pathname = match copy_path_from_cage(arg1, arg1cage) {
+        Some(p) => p,
+        None => return -14,
+    }; 
+    
+    let ret = imfs::with_imfs(|state| state.stat(arg2cage, &pathname, &mut statbuf));
+
+    if ret < 0 {
+        return ret;
+    }
+
+    let this_cage = getcageid();
+    let _ = copy_data_between_cages(
+        this_cage,
+        arg2cage,
+        &statbuf as *const stat as u64,
+        this_cage,
+        arg2,
+        arg2cage,
+        std::mem::size_of::<stat>() as u64,
+        0,
+    );
+
+    ret
+}
+
+pub extern "C" fn fstat_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    if arg2 == 0 {
+        return -14; // EFAULT
+    }
+
+    let mut statbuf = stat::default();
+    let ret = imfs::with_imfs(|state| state.fstat(arg1cage, arg1, &mut statbuf));
+
+    if ret < 0 {
+        return ret;
+    }
+
+    let this_cage = getcageid();
+    let _ = copy_data_between_cages(
+        this_cage,
+        arg2cage,
+        &statbuf as *const stat as u64,
+        this_cage,
+        arg2,
+        arg2cage,
+        std::mem::size_of::<stat>() as u64,
+        0,
+    );
+
+    ret
+}
+
+
+// =====================================================================
 //  unlink (syscall 87)
 //
 //  arg1 = pathname ptr, arg1cage = cage_id
@@ -288,7 +615,7 @@ pub extern "C" fn unlink_handler(
         None => return -14,
     };
 
-    imfs::with_imfs(|state| state.unlink(&pathname))
+    imfs::with_imfs(|state| state.unlink(arg1cage, &pathname))
 }
 
 pub extern "C" fn link_handler(
@@ -298,7 +625,7 @@ pub extern "C" fn link_handler(
     arg2: u64,
     arg2cage: u64,
     _arg3: u64,
-    _arg3cage: u64,
+    arg3cage: u64,
     _arg4: u64,
     _arg4cage: u64,
     _arg5: u64,
@@ -316,7 +643,35 @@ pub extern "C" fn link_handler(
         None => return -14,
     };
 
-    imfs::with_imfs(|state| state.link(&oldpath, &newpath))
+    imfs::with_imfs(|state| state.link(arg3cage, &oldpath, &newpath))
+}
+
+pub extern "C" fn rename_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    _arg3: u64,
+    arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let oldpath = match copy_path_from_cage(arg1, arg1cage) {
+        Some(p) => p,
+        None => return -14,
+    };
+
+    let newpath = match copy_path_from_cage(arg2, arg2cage) {
+        Some(p) => p,
+        None => return -14,
+    };
+
+    imfs::with_imfs(|state| state.rename(arg3cage, &oldpath, &newpath))
 }
 
 // =====================================================================
@@ -421,16 +776,63 @@ pub extern "C" fn pwrite_handler(
     imfs::with_imfs(|state| state.pwrite(cage_id, fd, &buf, offset))
 }
 
+
+pub extern "C" fn chdir_handler(
+    _cageid: u64,
+    path: u64,
+    path_cage: u64,
+    _arg2: u64,
+    arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let pathname = match copy_path_from_cage(path, path_cage) {
+        Some(p) => p, 
+        None => return -14,
+    };
+    
+    imfs::with_imfs(|s| s.chdir(arg2cage, &pathname))
+}
+
 // =====================================================================
 //  mkdir (syscall 83)
 // =====================================================================
+
+pub extern "C" fn rmdir_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    _arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let pathname = match copy_path_from_cage(arg1, arg1cage) {
+        Some(p) => p,
+        None => return -14,
+    };
+
+    imfs::with_imfs(|state| state.rmdir(_arg2cage, &pathname))
+}
 
 pub extern "C" fn mkdir_handler(
     _cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
-    _arg2cage: u64,
+    arg2cage: u64,
     _arg3: u64,
     _arg3cage: u64,
     _arg4: u64,
@@ -448,7 +850,25 @@ pub extern "C" fn mkdir_handler(
 
     let mode = arg2 as u32;
 
-    imfs::with_imfs(|state| state.mkdir(&pathname, mode))
+    imfs::with_imfs(|state| state.mkdir(arg2cage, &pathname, mode))
+}
+
+pub extern "C" fn mknod_handler(
+    _cageid: u64,
+    _arg1: u64,
+    _arg1cage: u64,
+    _arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    -38 // ENOSYS
 }
 
 // =====================================================================

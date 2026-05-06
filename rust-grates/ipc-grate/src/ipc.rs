@@ -29,6 +29,21 @@ use crate::socket::{SocketRegistry, IPC_SOCKET};
 /// The direction is determined by perfdinfo flags (O_RDONLY vs O_WRONLY).
 pub const IPC_PIPE: u32 = 1;
 
+/// fdtables fdkind for grate-managed epoll instances.  underfd is the
+/// runtime's epoll vfd (we still rely on the kernel epoll for kernel fds).
+/// Tracked as a distinct fdkind so the close handler can clean up our
+/// per-epfd IPC target map when the user closes the epoll fd.
+pub const IPC_EPOLL: u32 = 4;
+
+/// EpollEvent layout matches Linux x86_64's `struct epoll_event` —
+/// __packed__ so events is at offset 0 (4 bytes), data at offset 4 (8 bytes).
+#[repr(C, packed)]
+#[derive(Copy, Clone, Default)]
+pub struct EpollEvent {
+    pub events: u32,
+    pub data: u64,
+}
+
 /// O_NONBLOCK flag value.
 pub const O_NONBLOCK: i32 = 0o4000;
 
@@ -46,6 +61,7 @@ pub const O_ACCMODE: i32 = 3;
 
 // fcntl ops
 pub const F_DUPFD: i32 = 0;
+pub const F_DUPFD_CLOEXEC: i32 = 1030;
 pub const F_GETFD: i32 = 1;
 pub const F_SETFD: i32 = 2;
 pub const F_GETFL: i32 = 3;
@@ -83,6 +99,11 @@ pub struct IpcState {
     /// If loopback: we close the kernel fd and take over with pipes.
     /// If not: we drop the entry and let kernel own it.
     pub pending_inet: HashMap<(u64, u64), u64>,
+    /// IPC fds added to each (cage, grate_epfd) via EPOLL_CTL_ADD/MOD.
+    /// Kernel fds are tracked by the runtime's epoll directly; only IPC
+    /// pipe / socket fds live here.  epoll_wait merges these against the
+    /// runtime's results.
+    pub epoll_targets: HashMap<(u64, u64), HashMap<u64, EpollEvent>>,
 }
 
 impl IpcState {
@@ -93,6 +114,7 @@ impl IpcState {
             grate_cage_id,
             sockets: SocketRegistry::new(),
             pending_inet: HashMap::new(),
+            epoll_targets: HashMap::new(),
         }
     }
 
