@@ -123,8 +123,13 @@ pub fn chroot_path(path: &str, cageid: u64) -> String {
 
 /// Read a NUL-terminated C string from a cage's memory and return it as UTF-8.
 ///
-/// Reads at most 4096 bytes; if no NUL terminator is found within that window,
-/// the whole buffer is returned.
+/// Uses `copytype=1` (Strncpy) so threei scans for the NUL byte in
+/// the source cage rather than blindly memcpy'ing 4096 bytes — a
+/// fixed-size read fails vmmap validation when the path buffer lives
+/// near the end of a mapped region (the [3i|copy] range invalid log
+/// shows exactly this: 4096-byte copies starting just inside a page
+/// that doesn't extend a full 4 KB).  Strncpy mode validates one byte
+/// at a time and copies up to and including the NUL.
 pub fn read_path_from_cage(ptr: u64, src_cage: u64) -> Option<String> {
     let thiscage = getcageid();
     let mut buf = vec![0u8; 4096];
@@ -137,7 +142,7 @@ pub fn read_path_from_cage(ptr: u64, src_cage: u64) -> Option<String> {
         buf.as_mut_ptr() as u64,
         thiscage,
         buf.len() as u64,
-        0,
+        /* copytype = */ 1, // Strncpy: stop at NUL, byte-by-byte validate
     ) {
         Ok(_) => {
             let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
