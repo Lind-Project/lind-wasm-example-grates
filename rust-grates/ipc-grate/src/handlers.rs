@@ -506,6 +506,72 @@ fn ipc_pipe_poll_state(underfd: u64, fdkind: u32, flags: i32, requested: i16) ->
     revents
 }
 
+/// Re-classify the IPC entries of a `pollfds` slice against current
+/// pipe / connection state.  Used by poll_handler / ppoll_handler when
+/// they're waiting on IPC-only fds: instead of forwarding all-negative
+/// fds to the kernel (which would sleep for the full timeout without
+/// noticing IPC-side wakeups), we sample the IPC state in a loop and
+/// catch transitions like "client connected to a listening UDS".
+///
+/// Pollfds are walked at the indices listed in `ipc_indices`; original
+/// fd values are read from `original_fds` (since `pollfds[i].fd` was
+/// already flipped negative for the kernel).  Returns the number of
+/// IPC entries with non-zero revents this iteration.
+fn reclassify_ipc_pollfds(
+    cage_id: u64,
+    pollfds: &[PollFd],
+    original_fds: &[i32],
+    ipc_indices: &[usize],
+    ipc_revents: &mut [i16],
+) -> i32 {
+    let mut ready = 0i32;
+    for &i in ipc_indices {
+        let fd = original_fds[i] as u64;
+        let events = pollfds[i].events;
+        if let Some((underfd, fdkind, flags)) = lookup_ipc_fd(cage_id, fd) {
+            let revents = ipc_pipe_poll_state(underfd, fdkind, flags, events);
+            ipc_revents[i] = revents;
+            if revents != 0 {
+                ready += 1;
+            }
+        } else {
+            ipc_revents[i] = 0;
+        }
+    }
+    ready
+}
+
+/// Local poll-loop for IPC-only poll/ppoll calls (i.e. no kernel fds).
+/// Sleeps in 1ms chunks, re-classifying IPC entries each iteration,
+/// until either a fd becomes ready or `timeout_ms` elapses.  Negative
+/// `timeout_ms` blocks forever (matches poll(2) semantics).  Returns
+/// the count of ready IPC entries (0 on timeout).
+fn ipc_only_poll_wait(
+    cage_id: u64,
+    pollfds: &[PollFd],
+    original_fds: &[i32],
+    ipc_indices: &[usize],
+    ipc_revents: &mut [i16],
+    timeout_ms: i32,
+) -> i32 {
+    let start = std::time::Instant::now();
+    loop {
+        let ready = reclassify_ipc_pollfds(
+            cage_id, pollfds, original_fds, ipc_indices, ipc_revents,
+        );
+        if ready > 0 { return ready; }
+        if timeout_ms >= 0 {
+            if start.elapsed().as_millis() >= timeout_ms as u128 {
+                return 0;
+            }
+        }
+        unsafe {
+            let ts = libc::timespec { tv_sec: 0, tv_nsec: 1_000_000 };
+            libc::nanosleep(&ts, std::ptr::null_mut());
+        }
+    }
+}
+
 /// poll (syscall 7): handle IPC fds locally; mark them negative so the
 /// kernel ignores them when we forward, then merge our IPC revents
 /// back in.  Per poll(2) "if fd is less than 0, then events shall be
@@ -574,23 +640,19 @@ pub extern "C" fn poll_handler(
         }
     }
 
-    // If the only non-trivial fds were IPC (no kernel fds to wait on)
-    // AND any of them are ready, return immediately.  Otherwise we'd
-    // need the kernel to wait on the timeout — we still forward in
-    // that case so the caller's timeout is honored.
     let has_kernel_fd = pollfds.iter().any(|p| p.fd >= 0);
 
-    if has_kernel_fd || total_ready == 0 {
-        // Adjust timeout: if we already have IPC entries ready, do a
-        // non-blocking kernel check (timeout=0) so we return promptly.
-        let kernel_timeout = if total_ready > 0 { 0i32 } else { arg3 as i32 };
-
-        // Forward SYS_POLL with a pointer into the grate's own pollfds Vec
-        // tagged with `this_cage | ARG_TRANSLATE_FLAG`.  The MSB tells
-        // glibc's `make_threei_call` wrapper to convert the wasm32 offset
-        // to a host pointer before it reaches RawPOSIX.  Without the flag
+    if has_kernel_fd {
+        // Mixed (or kernel-only) case: forward SYS_POLL with a pointer
+        // into the grate's own pollfds Vec tagged with
+        // `this_cage | ARG_TRANSLATE_FLAG`.  The MSB tells glibc's
+        // `make_threei_call` wrapper to convert the wasm32 offset to a
+        // host pointer before it reaches RawPOSIX.  Without the flag
         // the host dereferences a tiny wasm offset and segfaults.  This
         // avoids two `copy_data_between_cages` round-trips per poll.
+        // If we already have IPC entries ready, do a non-blocking
+        // kernel check (timeout=0) so we return promptly.
+        let kernel_timeout = if total_ready > 0 { 0i32 } else { arg3 as i32 };
         let args = [
             pollfds.as_mut_ptr() as u64,
             arg2,
@@ -608,7 +670,16 @@ pub extern "C" fn poll_handler(
             return kernel_ret;
         }
         total_ready += kernel_ret;
-        // pollfds is already updated in place — no read-back copy needed.
+    } else if total_ready == 0 {
+        // IPC-only and nothing ready: do a local poll-loop instead of
+        // forwarding to the kernel.  RawPOSIX's poll with all-negative
+        // fds would sleep for the full timeout without ever noticing
+        // IPC-side wakeups (e.g. a client connecting to a listening
+        // UDS), so a server polling its listen fd would never wake.
+        total_ready = ipc_only_poll_wait(
+            cage_id, &pollfds, &original_fds, &ipc_indices,
+            &mut ipc_revents, arg3 as i32,
+        );
     }
 
     // Restore original fd values for ALL entries (kernel saw runtime vfds
@@ -2573,6 +2644,7 @@ pub extern "C" fn ppoll_handler(
     let mut ipc_revents: Vec<i16> = vec![0; nfds];
     let mut ipc_indices: Vec<usize> = Vec::new();
     let mut total_ready: i32 = 0;
+    let mut has_kernel_fd = false;
 
     for (i, pfd) in pollfds.iter_mut().enumerate() {
         if pfd.fd < 0 {
@@ -2587,33 +2659,46 @@ pub extern "C" fn ppoll_handler(
             pfd.fd = -1;
         } else {
             match translate_to_underfd(cage_id, pfd.fd as u64) {
-                Some(u) => pfd.fd = u as i32,
+                Some(u) => { pfd.fd = u as i32; has_kernel_fd = true; }
                 None => pfd.fd = -1,
             }
         }
     }
 
-    // Forward SYS_PPOLL with a pointer into the grate's own pollfds Vec
-    // tagged with `this_cage | ARG_TRANSLATE_FLAG`.  The MSB tells
-    // glibc's `make_threei_call` wrapper to convert the wasm32 offset
-    // to a host pointer before it reaches RawPOSIX.  Same trick as
-    // poll_handler: RawPOSIX reads and writes the buffer in place,
-    // saving two cross-cage copies.
-    let args = [
-        pollfds.as_mut_ptr() as u64,
-        arg2,
-        arg3,
-        arg4,
-        arg5,
-        arg6,
-    ];
-    let arg_cages = [
-        this_cage | ARG_TRANSLATE_FLAG,
-        arg2cage, arg3cage, arg4cage, arg5cage, arg6cage,
-    ];
-    let kernel_ret = forward_syscall(SYS_PPOLL, cage_id, &args, &arg_cages);
-    if kernel_ret < 0 && total_ready == 0 { return kernel_ret; }
-    if kernel_ret > 0 { total_ready += kernel_ret; }
+    if has_kernel_fd {
+        // Mixed (or kernel-only): forward SYS_PPOLL with a pointer into
+        // the grate's own pollfds Vec tagged with
+        // `this_cage | ARG_TRANSLATE_FLAG`.  The MSB tells glibc's
+        // `make_threei_call` wrapper to convert the wasm32 offset to a
+        // host pointer before it reaches RawPOSIX.  RawPOSIX reads and
+        // writes the buffer in place, saving two cross-cage copies.
+        let args = [
+            pollfds.as_mut_ptr() as u64,
+            arg2,
+            arg3,
+            arg4,
+            arg5,
+            arg6,
+        ];
+        let arg_cages = [
+            this_cage | ARG_TRANSLATE_FLAG,
+            arg2cage, arg3cage, arg4cage, arg5cage, arg6cage,
+        ];
+        let kernel_ret = forward_syscall(SYS_PPOLL, cage_id, &args, &arg_cages);
+        if kernel_ret < 0 && total_ready == 0 { return kernel_ret; }
+        if kernel_ret > 0 { total_ready += kernel_ret; }
+    } else if total_ready == 0 {
+        // IPC-only and nothing ready: local poll-loop on IPC state.
+        // Forwarding to RawPOSIX with all-negative fds would sleep for
+        // the full timeout without noticing IPC-side wakeups (e.g.
+        // a connect() to a listening UDS in another cage).  glibc has
+        // already converted the timespec to int ms in arg3 (-1 for
+        // NULL timeout = block forever).
+        total_ready = ipc_only_poll_wait(
+            cage_id, &pollfds, &original_fds, &ipc_indices,
+            &mut ipc_revents, arg3 as i32,
+        );
+    }
 
     // Restore original (grate-side) fd values for ALL entries and overlay
     // our IPC-computed revents on the IPC entries.  Then write the final
