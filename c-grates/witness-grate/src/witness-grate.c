@@ -611,8 +611,17 @@ int main(int argc, char *argv[]) {
 
     while (wait(&status) > 0) {
         if (status != 0) {
-            fprintf(stderr, "[WitnessGrate] FAIL: child exited with status %d\n", status);
-            assert(0);
+            int exit_code = (status >> 8) & 0xff;
+
+            if (exit_code == 0) {
+                exit_code = 1;
+            }
+
+            debug_printf(
+                    "[WitnessGrate] FAIL: child exited with code %d, raw status %d\n",
+                    exit_code, status);
+
+            exit(exit_code);
         }
     }
 
