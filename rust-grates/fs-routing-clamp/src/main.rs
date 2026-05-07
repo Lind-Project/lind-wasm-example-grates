@@ -190,11 +190,15 @@ fn main() {
     // Signal the child to proceed.
     unsafe { sem_post(sem) };
 
-    // Wait for child.
-    let mut status: i32 = 0;
-    let ret = unsafe { waitpid(-1, &mut status as *mut i32, 0) };
-
-    log!("child {} exited with status {}", ret, status);
+    // Wait for all children.
+    loop {
+        let mut status: i32 = 0;
+        let ret = unsafe { waitpid(-1, &mut status as *mut i32, 0) };
+        if ret <= 0 {
+            break;
+        }
+        log!("child {} exited with status {}", ret, status);
+    }
 
     // Cleanup.
     unsafe {
@@ -203,5 +207,5 @@ fn main() {
     }
 
     log!("exiting");
-    std::process::exit(status);
+    std::process::exit(0);
 }
