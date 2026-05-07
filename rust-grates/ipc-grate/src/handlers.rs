@@ -587,16 +587,36 @@ fn ipc_only_poll_wait(
     ipc_revents: &mut [i16],
     timeout_ms: i32,
 ) -> i32 {
-    let start = std::time::Instant::now();
+    // Each ipc_wait_nap_signal_aware() iteration sleeps ~50µs, so the
+    // total wait is ~iters * 50µs.  Convert timeout (ms) to an
+    // iteration budget instead of carrying an `Instant` around — both
+    // because the per-iteration `Instant::now()` call has measurable
+    // overhead vs. the nap, and because the iteration-count form makes
+    // the no-timeout branch (`timeout_ms < 0` → loop forever) fall out
+    // as a single `if` on the budget instead of being an extra branch
+    // every iteration.
+    //
+    // 1ms ≈ 20 iterations of 50µs.  Use saturating math so a huge
+    // timeout doesn't overflow.
+    const ITERS_PER_MS: u64 = 20;
+    let mut remaining: Option<u64> = if timeout_ms < 0 {
+        None
+    } else {
+        Some((timeout_ms as u64).saturating_mul(ITERS_PER_MS))
+    };
+
     loop {
         let ready = reclassify_ipc_pollfds(
             cage_id, pollfds, original_fds, ipc_indices, ipc_revents,
         );
-        if ready > 0 { return ready; }
-        if timeout_ms >= 0 {
-            if start.elapsed().as_millis() >= timeout_ms as u128 {
+        if ready > 0 {
+            return ready;
+        }
+        if let Some(r) = remaining {
+            if r == 0 {
                 return 0;
             }
+            remaining = Some(r - 1);
         }
         if ipc_wait_nap_signal_aware() {
             return EINTR_NEG;
@@ -889,7 +909,13 @@ pub extern "C" fn select_handler(
             // Read the user's timeval (8-byte tv_sec + 4-byte tv_usec
             // + 4 bytes padding on wasm32; we read the full 16 bytes
             // and mask tv_usec).  NULL pointer means block forever.
-            let timeout_ns: Option<u128> = if arg5 == 0 {
+            //
+            // Convert the timeout into an iteration budget against our
+            // ~50µs nap, mirroring `ipc_only_poll_wait`.  Avoids the
+            // per-iteration `Instant::now()` overhead and keeps the
+            // no-timeout (block-forever) branch as a single `if` on
+            // the budget.
+            let mut iters_remaining: Option<u64> = if arg5 == 0 {
                 None
             } else {
                 let mut tv = [0u8; 16];
@@ -901,11 +927,11 @@ pub extern "C" fn select_handler(
                 );
                 let secs  = u64::from_le_bytes([tv[0], tv[1], tv[2], tv[3], tv[4], tv[5], tv[6], tv[7]]);
                 let usecs = u32::from_le_bytes([tv[8], tv[9], tv[10], tv[11]]) as u64;
-                Some((secs as u128).saturating_mul(1_000_000_000)
-                    .saturating_add((usecs as u128).saturating_mul(1_000)))
+                // 50µs per iteration → 20 iters/ms → 20_000 iters/sec.
+                let total_us = secs.saturating_mul(1_000_000).saturating_add(usecs);
+                Some(total_us.saturating_div(50))
             };
 
-            let start = std::time::Instant::now();
             loop {
                 // Re-classify IPC fds against current pipe / connection
                 // state.  read_set / write_set / except_set are
@@ -940,8 +966,9 @@ pub extern "C" fn select_handler(
                     }
                 }
                 if ipc_ready > 0 { break; }
-                if let Some(timeout) = timeout_ns {
-                    if start.elapsed().as_nanos() >= timeout { break; }
+                if let Some(r) = iters_remaining {
+                    if r == 0 { break; }
+                    iters_remaining = Some(r - 1);
                 }
                 if ipc_wait_nap_signal_aware() {
                     return EINTR_NEG;
