@@ -555,11 +555,15 @@ const EINTR_NEG: i32 = -4;
 /// SIGUSR1 handler that never gets to run).
 fn ipc_wait_nap_signal_aware() -> bool {
     unsafe {
-        // Request 1µs.  The Linux kernel rounds up to its timer
-        // granularity (~50µs) regardless, so going smaller is a
-        // no-op.  Going larger (e.g. 1ms) hurts throughput on
-        // pipe-style waits without improving signal latency.
-        let ts = libc::timespec { tv_sec: 0, tv_nsec: 1_000 };
+        // 1ms — proven-good value from 236c62b.  Was shrunk to 1µs on
+        // the theory that the kernel rounds up to timer granularity
+        // (~50µs) anyway, so smaller is free.  In practice that broke
+        // SetLatch / self-pipe-trick wakeups (postgres
+        // PM_STARTUP→PM_RUN handoff, `self_pipe_signal.c`): the cage
+        // got EINTR but its signal-handler dispatch wasn't given
+        // enough scheduler time to run between iterations.  Going
+        // back to 1ms restores reliable signal delivery.
+        let ts = libc::timespec { tv_sec: 0, tv_nsec: 1_000_000 };
         // For a valid timespec the only error nanosleep can return is
         // EINTR, so a negative return is conclusive.
         libc::nanosleep(&ts, std::ptr::null_mut()) < 0
