@@ -158,7 +158,6 @@ input_path_handler!(statfs_handler, SYS_STATFS, 0);
 input_path_handler!(mkdir_handler, SYS_MKDIR, 0);
 input_path_handler!(rmdir_handler, SYS_RMDIR, 0);
 input_path_handler!(unlink_handler, SYS_UNLINK, 0);
-input_path_handler!(unlinkat_handler, SYS_UNLINKAT, 1);
 input_path_handler!(chmod_handler, SYS_CHMOD, 0);
 input_path_handler!(truncate_handler, SYS_TRUNCATE, 0);
 
@@ -312,7 +311,7 @@ extern "C" fn readlinkat_handler(
         c_path.as_ptr() as u64,
         thiscage | GRATE_MEMORY_FLAG,
         result_buf.as_mut_ptr() as u64,
-        thiscage,
+        thiscage | GRATE_MEMORY_FLAG,
         bufsiz,
         thiscage,
         0,
@@ -334,6 +333,78 @@ extern "C" fn readlinkat_handler(
     let result = String::from_utf8_lossy(&result_buf[..result_len]).to_string();
     let final_result = strip_chroot_prefix(&result);
     write_bytes_to_cage(thiscage, buf, buf_cage, bufsiz, final_result.as_bytes())
+}
+
+/// `unlinkat(2)` handler.
+///
+/// Mirrors `readlinkat_handler`'s dirfd handling:
+/// - If `path` is absolute or `dirfd == AT_FDCWD`, chroot the path and pass
+///   `AT_FDCWD` through.
+/// - Otherwise, pass the relative path and the original `dirfd` through
+///   unchanged (the dirfd already refers to an open directory inside the
+///   chrooted tree at the kernel level).
+///
+/// Without this dirfd-aware logic, a relative path like `"file.txt"` against an
+/// `open(2)`-returned dirfd would be normalized against the cage's cwd and
+/// chrooted into an absolute path, causing the kernel to ignore `dirfd`.
+extern "C" fn unlinkat_handler(
+    cageid: u64,
+    dirfd: u64,
+    dirfd_cage: u64,
+    path_ptr: u64,
+    path_cage: u64,
+    flags: u64,
+    flags_cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let thiscage = getcageid();
+    const AT_FDCWD: i64 = -100;
+
+    let path = match read_path_from_cage(path_ptr, path_cage) {
+        Some(p) => p,
+        None => return -14, // EFAULT
+    };
+
+    let (c_path, use_chrooted) = if path.starts_with('/') || dirfd as i64 == AT_FDCWD {
+        let chrooted = chroot_path(&path, cageid);
+        (CString::new(chrooted).ok(), true)
+    } else {
+        (CString::new(path).ok(), false)
+    };
+
+    let c_path = match c_path {
+        Some(p) => p,
+        None => return -1,
+    };
+
+    match make_threei_call(
+        SYS_UNLINKAT as u32,
+        0,
+        cageid,
+        path_cage,
+        if use_chrooted { AT_FDCWD as u64 } else { dirfd },
+        dirfd_cage,
+        c_path.as_ptr() as u64,
+        thiscage | GRATE_MEMORY_FLAG,
+        flags,
+        flags_cage,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ) {
+        Ok(r) => r,
+        Err(GrateError::MakeSyscallError(n)) => n,
+        Err(_) => -1,
+    }
 }
 
 // -----------------------------------------------------------------------------
