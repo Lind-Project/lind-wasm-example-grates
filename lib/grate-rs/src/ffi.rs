@@ -39,6 +39,14 @@ pub struct stat {
     pub st_ctim: [u64; 2],
 }
 
+// Lind-compatible iovec struct for x86_64 guests.
+#[repr(C)]
+#[derive(Copy, Clone, Default, Debug)]
+pub struct iovec {
+    pub iov_base: u64,
+    pub iov_len: u64,
+}
+
 /// Flush stdio streams and terminate the process.
 ///
 /// This helper is shared by both the public library logic (`lib.rs`) and

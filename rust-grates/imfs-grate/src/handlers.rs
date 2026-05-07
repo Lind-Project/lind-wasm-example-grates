@@ -7,11 +7,12 @@
 
 use grate_rs::constants::*;
 use grate_rs::{copy_data_between_cages, getcageid, is_thread_clone, make_threei_call};
-use grate_rs::ffi::stat;
+use grate_rs::ffi::{iovec, stat};
 
 use crate::imfs;
 
 const MAX_PATH_LEN: usize = 256;
+const IOV_MAX: usize = 1024;
 
 /// Copy a null-terminated path string from a cage's address space into a local buffer.
 fn copy_path_from_cage(path_ptr: u64, path_cage: u64) -> Option<String> {
@@ -35,6 +36,39 @@ fn copy_path_from_cage(path_ptr: u64, path_cage: u64) -> Option<String> {
 
     let len = buf.iter().position(|&b| b == 0).unwrap_or(MAX_PATH_LEN);
     String::from_utf8(buf[..len].to_vec()).ok()
+}
+
+fn copy_iovecs_from_cage(iov_ptr: u64, iov_cage: u64, iovcnt: usize) -> Result<Vec<iovec>, i32> {
+    if iovcnt > IOV_MAX {
+        return Err(-22); // EINVAL
+    }
+
+    let this_cage = getcageid();
+    let mut iovecs = vec![iovec::default(); iovcnt];
+    let bytes = iovcnt
+        .checked_mul(std::mem::size_of::<iovec>())
+        .ok_or(-22)?;
+
+    match copy_data_between_cages(
+        this_cage,
+        iov_cage,
+        iov_ptr,
+        iov_cage,
+        iovecs.as_mut_ptr() as u64,
+        this_cage,
+        bytes as u64,
+        0,
+    ) {
+        Ok(_) => Ok(iovecs),
+        Err(_) => Err(-14), // EFAULT
+    }
+}
+
+fn total_iovec_len(iovecs: &[iovec]) -> Result<usize, i32> {
+    iovecs.iter().try_fold(0usize, |acc, iov| {
+        let len = usize::try_from(iov.iov_len).map_err(|_| -22)?;
+        acc.checked_add(len).ok_or(-22)
+    })
 }
 
 pub extern "C" fn enosys_handler(
@@ -774,6 +808,280 @@ pub extern "C" fn pwrite_handler(
     }
 
     imfs::with_imfs(|state| state.pwrite(cage_id, fd, &buf, offset))
+}
+
+pub extern "C" fn readv_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let cage_id = arg1cage;
+    let fd = arg1;
+    let iovecs = match copy_iovecs_from_cage(arg2, arg2cage, arg3 as usize) {
+        Ok(iovecs) => iovecs,
+        Err(e) => return e,
+    };
+
+    let total_len = match total_iovec_len(&iovecs) {
+        Ok(len) => len,
+        Err(e) => return e,
+    };
+
+    let this_cage = getcageid();
+    let mut buf = vec![0u8; total_len];
+    let ret = if fd < 3 {
+        unsafe { libc::read(fd as i32, buf.as_mut_ptr() as *mut _, total_len) as i32 }
+    } else {
+        imfs::with_imfs(|state| state.read(cage_id, fd, &mut buf))
+    };
+
+    if ret <= 0 {
+        return ret;
+    }
+
+    let mut copied = 0usize;
+    let total_read = ret as usize;
+    for iov in &iovecs {
+        if copied >= total_read {
+            break;
+        }
+        let len = match usize::try_from(iov.iov_len) {
+            Ok(len) => len,
+            Err(_) => return -22,
+        };
+        let chunk_len = (total_read - copied).min(len);
+        if chunk_len == 0 {
+            continue;
+        }
+        if copy_data_between_cages(
+            this_cage,
+            arg2cage,
+            buf[copied..copied + chunk_len].as_ptr() as u64,
+            this_cage,
+            iov.iov_base,
+            arg2cage,
+            chunk_len as u64,
+            0,
+        )
+        .is_err()
+        {
+            return -14;
+        }
+        copied += chunk_len;
+    }
+
+    ret
+}
+
+pub extern "C" fn writev_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let cage_id = arg1cage;
+    let fd = arg1;
+    let iovecs = match copy_iovecs_from_cage(arg2, arg2cage, arg3 as usize) {
+        Ok(iovecs) => iovecs,
+        Err(e) => return e,
+    };
+
+    let total_len = match total_iovec_len(&iovecs) {
+        Ok(len) => len,
+        Err(e) => return e,
+    };
+
+    let this_cage = getcageid();
+    let mut buf = Vec::with_capacity(total_len);
+    for iov in &iovecs {
+        let len = match usize::try_from(iov.iov_len) {
+            Ok(len) => len,
+            Err(_) => return -22,
+        };
+        if len == 0 {
+            continue;
+        }
+
+        let start = buf.len();
+        buf.resize(start + len, 0);
+        if copy_data_between_cages(
+            this_cage,
+            arg2cage,
+            iov.iov_base,
+            arg2cage,
+            buf[start..start + len].as_mut_ptr() as u64,
+            this_cage,
+            len as u64,
+            0,
+        )
+        .is_err()
+        {
+            return -14;
+        }
+    }
+
+    if fd < 3 {
+        unsafe { libc::write(fd as i32, buf.as_ptr() as *const _, buf.len()) as i32 }
+    } else {
+        imfs::with_imfs(|state| state.write(cage_id, fd, &buf))
+    }
+}
+
+pub extern "C" fn preadv_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    _arg3cage: u64,
+    arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let cage_id = arg1cage;
+    let fd = arg1;
+    let offset = arg4 as i64;
+    let iovecs = match copy_iovecs_from_cage(arg2, arg2cage, arg3 as usize) {
+        Ok(iovecs) => iovecs,
+        Err(e) => return e,
+    };
+
+    let total_len = match total_iovec_len(&iovecs) {
+        Ok(len) => len,
+        Err(e) => return e,
+    };
+
+    let this_cage = getcageid();
+    let mut buf = vec![0u8; total_len];
+    let ret = if fd < 3 {
+        unsafe { libc::pread(fd as i32, buf.as_mut_ptr() as *mut _, total_len, offset) as i32 }
+    } else {
+        imfs::with_imfs(|state| state.pread(cage_id, fd, &mut buf, offset))
+    };
+
+    if ret <= 0 {
+        return ret;
+    }
+
+    let mut copied = 0usize;
+    let total_read = ret as usize;
+    for iov in &iovecs {
+        if copied >= total_read {
+            break;
+        }
+        let len = match usize::try_from(iov.iov_len) {
+            Ok(len) => len,
+            Err(_) => return -22,
+        };
+        let chunk_len = (total_read - copied).min(len);
+        if chunk_len == 0 {
+            continue;
+        }
+        if copy_data_between_cages(
+            this_cage,
+            arg2cage,
+            buf[copied..copied + chunk_len].as_ptr() as u64,
+            this_cage,
+            iov.iov_base,
+            arg2cage,
+            chunk_len as u64,
+            0,
+        )
+        .is_err()
+        {
+            return -14;
+        }
+        copied += chunk_len;
+    }
+
+    ret
+}
+
+pub extern "C" fn pwritev_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    _arg3cage: u64,
+    arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let cage_id = arg1cage;
+    let fd = arg1;
+    let offset = arg4 as i64;
+    let iovecs = match copy_iovecs_from_cage(arg2, arg2cage, arg3 as usize) {
+        Ok(iovecs) => iovecs,
+        Err(e) => return e,
+    };
+
+    let total_len = match total_iovec_len(&iovecs) {
+        Ok(len) => len,
+        Err(e) => return e,
+    };
+
+    let this_cage = getcageid();
+    let mut buf = Vec::with_capacity(total_len);
+    for iov in &iovecs {
+        let len = match usize::try_from(iov.iov_len) {
+            Ok(len) => len,
+            Err(_) => return -22,
+        };
+        if len == 0 {
+            continue;
+        }
+
+        let start = buf.len();
+        buf.resize(start + len, 0);
+        if copy_data_between_cages(
+            this_cage,
+            arg2cage,
+            iov.iov_base,
+            arg2cage,
+            buf[start..start + len].as_mut_ptr() as u64,
+            this_cage,
+            len as u64,
+            0,
+        )
+        .is_err()
+        {
+            return -14;
+        }
+    }
+
+    if fd < 3 {
+        unsafe { libc::pwrite(fd as i32, buf.as_ptr() as *const _, buf.len(), offset) as i32 }
+    } else {
+        imfs::with_imfs(|state| state.pwrite(cage_id, fd, &buf, offset))
+    }
 }
 
 

@@ -188,6 +188,8 @@ fd_route_handler!(ns_read_handler, SYS_READ);
 fd_route_handler!(ns_write_handler, SYS_WRITE);
 fd_route_handler!(ns_pread_handler, SYS_PREAD);
 fd_route_handler!(ns_pwrite_handler, SYS_PWRITE);
+fd_route_handler!(ns_preadv_handler, SYS_PREADV);
+fd_route_handler!(ns_pwritev_handler, SYS_PWRITEV);
 fd_route_handler!(ns_lseek_handler, SYS_LSEEK);
 fd_route_handler!(ns_fstat_handler, SYS_FXSTAT);
 fd_route_handler!(ns_fcntl_handler, SYS_FCNTL);
@@ -541,6 +543,8 @@ pub fn get_ns_handler(syscall_nr: u64) -> Option<SyscallHandler> {
         SYS_CLOSE => Some(ns_close_handler),
         SYS_PREAD => Some(ns_pread_handler),
         SYS_PWRITE => Some(ns_pwrite_handler),
+        SYS_PREADV => Some(ns_preadv_handler),
+        SYS_PWRITEV => Some(ns_pwritev_handler),
         SYS_LSEEK => Some(ns_lseek_handler),
         SYS_FXSTAT => Some(ns_fstat_handler),
         SYS_FCNTL => Some(ns_fcntl_handler),
