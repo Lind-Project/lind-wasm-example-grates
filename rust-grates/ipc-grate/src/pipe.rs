@@ -36,14 +36,22 @@ use ringbuf::{Consumer, Producer};
 
 use grate_rs::copy_data_between_cages;
 
-/// Sleep ~50µs (1µs requested, kernel rounds up to its timer
-/// granularity) in a way that's interruptible by signals queued for
-/// the calling user cage.  Returns `true` if the sleep was
-/// interrupted; caller should propagate -EINTR so the cage's signal
-/// handler runs before the syscall is retried.
+/// Sleep 1ms in a way that's interruptible by signals queued for the
+/// calling user cage.  Returns `true` if the sleep was interrupted;
+/// caller should propagate -EINTR so the cage's signal handler runs
+/// before the syscall is retried.
+///
+/// History: this used to be 1µs on the theory that the kernel rounds
+/// up to its timer granularity (~50µs) anyway, so smaller is free.
+/// In practice that broke the SetLatch / self-pipe-trick pattern
+/// (postgres PM_STARTUP→PM_RUN handoff, `self_pipe_signal.c`):
+/// signals delivered during the wait got interrupted but the cage's
+/// signal-handler dispatch wasn't given enough scheduler time to run
+/// between iterations.  The proven-good value is 1ms — it's also what
+/// the original signal-aware-nap commit (236c62b) used.
 fn nap_signal_aware() -> bool {
     unsafe {
-        let ts = libc::timespec { tv_sec: 0, tv_nsec: 1_000 };
+        let ts = libc::timespec { tv_sec: 0, tv_nsec: 1_000_000 };
         libc::nanosleep(&ts, std::ptr::null_mut()) < 0
     }
 }
