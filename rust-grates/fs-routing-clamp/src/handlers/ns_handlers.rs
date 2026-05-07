@@ -188,14 +188,16 @@ fd_route_handler!(ns_read_handler, SYS_READ);
 fd_route_handler!(ns_write_handler, SYS_WRITE);
 fd_route_handler!(ns_pread_handler, SYS_PREAD);
 fd_route_handler!(ns_pwrite_handler, SYS_PWRITE);
+fd_route_handler!(ns_preadv_handler, SYS_PREADV);
+fd_route_handler!(ns_readv_handler, SYS_READV);
+fd_route_handler!(ns_writev_handler, SYS_WRITEV);
+fd_route_handler!(ns_pwritev_handler, SYS_PWRITEV);
 fd_route_handler!(ns_lseek_handler, SYS_LSEEK);
 fd_route_handler!(ns_fstat_handler, SYS_FXSTAT);
 fd_route_handler!(ns_fcntl_handler, SYS_FCNTL);
 fd_route_handler!(ns_ftruncate_handler, SYS_FTRUNCATE);
 fd_route_handler!(ns_fchmod_handler, SYS_FCHMOD);
 fd_route_handler!(ns_fchdir_handler, SYS_FCHDIR);
-fd_route_handler!(ns_readv_handler, SYS_READV);
-fd_route_handler!(ns_writev_handler, SYS_WRITEV);
 fd_route_handler!(ns_fsync_handler, SYS_FSYNC);
 fd_route_handler!(ns_fdatasync_handler, SYS_FDATASYNC);
 fd_route_handler!(ns_fstatfs_handler, SYS_FSTATFS);
@@ -539,16 +541,18 @@ pub fn get_ns_handler(syscall_nr: u64) -> Option<SyscallHandler> {
         SYS_READ => Some(ns_read_handler),
         SYS_WRITE => Some(ns_write_handler),
         SYS_CLOSE => Some(ns_close_handler),
+        SYS_WRITEV => Some(ns_writev_handler),
+        SYS_READV => Some(ns_readv_handler),
         SYS_PREAD => Some(ns_pread_handler),
         SYS_PWRITE => Some(ns_pwrite_handler),
+        SYS_PREADV => Some(ns_preadv_handler),
+        SYS_PWRITEV => Some(ns_pwritev_handler),
         SYS_LSEEK => Some(ns_lseek_handler),
         SYS_FXSTAT => Some(ns_fstat_handler),
         SYS_FCNTL => Some(ns_fcntl_handler),
         SYS_FTRUNCATE => Some(ns_ftruncate_handler),
         SYS_FCHMOD => Some(ns_fchmod_handler),
         SYS_FCHDIR => Some(ns_fchdir_handler),
-        SYS_READV => Some(ns_readv_handler),
-        SYS_WRITEV => Some(ns_writev_handler),
         SYS_FSYNC => Some(ns_fsync_handler),
         SYS_FDATASYNC => Some(ns_fdatasync_handler),
         SYS_FSTATFS => Some(ns_fstatfs_handler),
