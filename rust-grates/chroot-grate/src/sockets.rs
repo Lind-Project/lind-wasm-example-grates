@@ -89,6 +89,9 @@ macro_rules! socket_translate_handler {
                     0,
                 ) {
                     Ok(ret) => ret,
+                    // Propagate the actual -errno from the kernel
+                    // instead of collapsing to -1 / EPERM.
+                    Err(::grate_rs::GrateError::MakeSyscallError(n)) => n,
                     Err(_) => -1,
                 }
             }
