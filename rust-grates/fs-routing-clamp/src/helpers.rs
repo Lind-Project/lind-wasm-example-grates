@@ -16,7 +16,7 @@ use grate_rs::{GrateError, copy_data_between_cages, make_threei_call};
 // These are all the calls that the fs-namespace grate cares about. All of the
 // following calls from the target must be routed through the grate regardless
 // of whether the clamp interposed on them.
-pub const FS_CALLS: [u64; 43] = [
+pub const FS_CALLS: [u64; 45] = [
     SYS_OPEN,
     SYS_OPENAT,
     SYS_XSTAT,
@@ -40,6 +40,8 @@ pub const FS_CALLS: [u64; 43] = [
     SYS_READ,
     SYS_WRITE,
     SYS_CLOSE,
+    SYS_READV,
+    SYS_WRITEV,
     SYS_PREAD,
     SYS_PWRITE,
     SYS_PREADV,

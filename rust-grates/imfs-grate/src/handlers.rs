@@ -6,8 +6,8 @@
 //! copy data to/from the cage similarly.
 
 use grate_rs::constants::*;
-use grate_rs::{copy_data_between_cages, getcageid, is_thread_clone, make_threei_call};
 use grate_rs::ffi::{iovec, stat};
+use grate_rs::{copy_data_between_cages, getcageid, is_thread_clone, make_threei_call};
 
 use crate::imfs;
 
@@ -554,12 +554,12 @@ pub extern "C" fn stat_handler(
     }
 
     let mut statbuf = stat::default();
-    
+
     let pathname = match copy_path_from_cage(arg1, arg1cage) {
         Some(p) => p,
         None => return -14,
-    }; 
-    
+    };
+
     let ret = imfs::with_imfs(|state| state.stat(arg2cage, &pathname, &mut statbuf));
 
     if ret < 0 {
@@ -621,7 +621,6 @@ pub extern "C" fn fstat_handler(
 
     ret
 }
-
 
 // =====================================================================
 //  unlink (syscall 87)
@@ -1084,7 +1083,6 @@ pub extern "C" fn pwritev_handler(
     }
 }
 
-
 pub extern "C" fn chdir_handler(
     _cageid: u64,
     path: u64,
@@ -1101,10 +1099,10 @@ pub extern "C" fn chdir_handler(
     _arg6cage: u64,
 ) -> i32 {
     let pathname = match copy_path_from_cage(path, path_cage) {
-        Some(p) => p, 
+        Some(p) => p,
         None => return -14,
     };
-    
+
     imfs::with_imfs(|s| s.chdir(arg2cage, &pathname))
 }
 
