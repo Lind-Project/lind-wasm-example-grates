@@ -305,17 +305,11 @@ pub extern "C" fn pipe2_handler(
 /// read (syscall 0): read from pipe or forward.
 ///
 /// If arg1 (fd) is a pipe read-end in fdtables, read from the ring buffer
-/// directly into the user buffer.  Otherwise forward to make_syscall.
-///
-/// glibc's `read` wrapper translates the user buffer pointer to a host
-/// address before the syscall reaches the grate, so `arg2` is a host
-/// address — we hand it to the ringbuf as a slice and skip the
-/// intermediate `copy_data_between_cages`.  This halves the per-byte
-/// cost on the IPC fast path.
+/// and copy data to the cage. Otherwise forward to make_syscall.
 pub extern "C" fn read_handler(
     cageid: u64,
     arg1: u64, arg1cage: u64,    // fd
-    arg2: u64, arg2cage: u64,    // buf (host addr — glibc-translated)
+    arg2: u64, arg2cage: u64,    // buf
     arg3: u64, _arg3cage: u64,   // count
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
@@ -324,6 +318,7 @@ pub extern "C" fn read_handler(
     let cage_id = arg1cage;
     let fd = arg1;
     let count = arg3 as usize;
+    let this_cage = getcageid();
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, _arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -345,7 +340,7 @@ pub extern "C" fn read_handler(
             }
             with_ipc(|s| s.get_pipe(underfd))
         }
-        socket::IPC_SOCKET => with_ipc(|s| {
+        IPC_SOCKET => with_ipc(|s| {
             s.sockets.get(underfd).and_then(|sock| sock.recvpipe.clone())
         }),
         _ => return -9,
@@ -356,25 +351,26 @@ pub extern "C" fn read_handler(
         None => return -9,
     };
 
-    if count == 0 || arg2 == 0 {
-        return 0;
+    let mut buf = vec![0u8; count];
+    let ret = pipe.read(&mut buf, count, nonblocking);
+
+    if ret > 0 && arg2 != 0 {
+        let _ = copy_data_between_cages(
+            this_cage, arg2cage,
+            buf.as_ptr() as u64, this_cage,
+            arg2, arg2cage,
+            ret as u64, 0,
+        );
     }
-    // SAFETY: glibc has translated arg2 to a host address pointing at
-    // valid mapped cage memory of at least `count` bytes (the same
-    // contract copy_data_between_cages was relying on).
-    let dst = unsafe { std::slice::from_raw_parts_mut(arg2 as *mut u8, count) };
-    pipe.read(dst, count, nonblocking)
+
+    ret
 }
 
 /// write (syscall 1): write to pipe or forward.
-///
-/// As with `read_handler`, glibc translates the source pointer before
-/// the syscall reaches us, so we hand the ringbuf the user buffer
-/// directly instead of copying through a grate-side staging vec.
 pub extern "C" fn write_handler(
     cageid: u64,
     arg1: u64, arg1cage: u64,    // fd
-    arg2: u64, arg2cage: u64,    // buf (host addr — glibc-translated)
+    arg2: u64, arg2cage: u64,    // buf
     arg3: u64, _arg3cage: u64,   // count
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
@@ -383,6 +379,7 @@ pub extern "C" fn write_handler(
     let cage_id = arg1cage;
     let fd = arg1;
     let count = arg3 as usize;
+    let this_cage = getcageid();
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, _arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -403,7 +400,7 @@ pub extern "C" fn write_handler(
             }
             with_ipc(|s| s.get_pipe(underfd))
         }
-        socket::IPC_SOCKET => with_ipc(|s| {
+        IPC_SOCKET => with_ipc(|s| {
             s.sockets.get(underfd).and_then(|sock| sock.sendpipe.clone())
         }),
         _ => return -9,
@@ -414,13 +411,17 @@ pub extern "C" fn write_handler(
         None => return -9,
     };
 
-    if count == 0 || arg2 == 0 {
-        return 0;
-    }
-    // SAFETY: glibc has translated arg2 to a host address pointing at
-    // valid mapped cage memory of at least `count` bytes.
-    let src = unsafe { std::slice::from_raw_parts(arg2 as *const u8, count) };
-    pipe.write(src, count, nonblocking)
+    // Copy data from the cage's buffer.
+    let mut buf = vec![0u8; count];
+    let _ = copy_data_between_cages(
+        this_cage, arg2cage,
+        arg2, arg2cage,
+        buf.as_mut_ptr() as u64, this_cage,
+        count as u64, 0,
+    );
+
+    let ret = pipe.write(&buf, count, nonblocking);
+    ret
 }
 
 /// Compute the revents bits for an IPC fd given the requested events.
@@ -2824,13 +2825,17 @@ pub extern "C" fn sendto_handler(
 
     let nonblocking = (flags & O_NONBLOCK) != 0;
 
-    if count == 0 || arg2 == 0 {
+    if count == 0 {
         return 0;
     }
-    // SAFETY: glibc translates the buf pointer before invoking the
-    // syscall, so arg2 is a host address into valid cage memory.
-    let src = unsafe { std::slice::from_raw_parts(arg2 as *const u8, count) };
-    pipe.write(src, count, nonblocking)
+    let mut buf = vec![0u8; count];
+    let _ = copy_data_between_cages(
+        this_cage, arg2cage,
+        arg2, arg2cage,
+        buf.as_mut_ptr() as u64, this_cage,
+        count as u64, 0,
+    );
+    pipe.write(&buf, count, nonblocking)
 }
 
 /// recvfrom (syscall 45): IPC-aware mirror of sendto_handler.  For IPC
@@ -2875,14 +2880,16 @@ pub extern "C" fn recvfrom_handler(
 
     let nonblocking = (flags & O_NONBLOCK) != 0;
 
-    let ret = if count == 0 || arg2 == 0 {
-        0
-    } else {
-        // SAFETY: glibc translates the buf pointer before invoking the
-        // syscall, so arg2 is a host address into valid cage memory.
-        let dst = unsafe { std::slice::from_raw_parts_mut(arg2 as *mut u8, count) };
-        pipe.read(dst, count, nonblocking)
-    };
+    let mut buf = vec![0u8; count];
+    let ret = pipe.read(&mut buf, count, nonblocking);
+    if ret > 0 && arg2 != 0 {
+        let _ = copy_data_between_cages(
+            this_cage, arg2cage,
+            buf.as_ptr() as u64, this_cage,
+            arg2, arg2cage,
+            ret as u64, 0,
+        );
+    }
     // If caller supplied src_addr/addrlen, write addrlen=0 so they see
     // "no peer address available" rather than uninitialized bytes.
     if ret >= 0 && arg6 != 0 {
