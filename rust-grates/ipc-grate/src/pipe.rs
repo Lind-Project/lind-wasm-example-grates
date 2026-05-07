@@ -216,13 +216,25 @@ impl PipeBuffer {
             let cur_src = src_addr + total_written as u64;
 
             // SAFETY: SPSC contract — only the writer thread accesses the producer.
+            //
+            // CRITICAL: only count bytes that copy_data_between_cages
+            // actually moved.  If the host-side copy fails (e.g. the
+            // ringbuf storage pointer falls outside the grate's tracked
+            // vmmap, or any other validation rejection), telling
+            // push_access we wrote N bytes makes it advance tail past
+            // uninitialized slots — the consumer then reads garbage,
+            // which manifests as silent data corruption (e.g. postgres
+            // reading bad bytes off the postmaster→worker pipe).
+            // Stop on the first failure and report only what actually
+            // landed; the outer retry loop will pick up where we left
+            // off.
             let pushed = unsafe {
                 (*self.producer.get()).push_access(|left, right| {
                     let mut n = 0usize;
 
                     let n_left = want.min(left.len());
                     if n_left > 0 {
-                        let _ = copy_data_between_cages(
+                        if copy_data_between_cages(
                             this_cage,
                             src_cage,
                             cur_src,
@@ -231,13 +243,17 @@ impl PipeBuffer {
                             this_cage,
                             n_left as u64,
                             0,
-                        );
+                        )
+                        .is_err()
+                        {
+                            return n;
+                        }
                         n += n_left;
                     }
 
                     let n_right = (want - n).min(right.len());
                     if n_right > 0 {
-                        let _ = copy_data_between_cages(
+                        if copy_data_between_cages(
                             this_cage,
                             src_cage,
                             cur_src + n as u64,
@@ -246,7 +262,11 @@ impl PipeBuffer {
                             this_cage,
                             n_right as u64,
                             0,
-                        );
+                        )
+                        .is_err()
+                        {
+                            return n;
+                        }
                         n += n_right;
                     }
 
@@ -304,6 +324,12 @@ impl PipeBuffer {
 
         loop {
             // SAFETY: SPSC contract — only the reader thread accesses the consumer.
+            //
+            // CRITICAL: same correctness rule as write_from_cage.  If
+            // the host-side copy fails, returning a higher count would
+            // tell pop_access to advance head past slots whose data we
+            // never delivered to the user — silent data loss.  Stop on
+            // the first failure.
             let popped = unsafe {
                 (*self.consumer.get()).pop_access(|left, right| {
                     let mut n = 0usize;
@@ -311,7 +337,7 @@ impl PipeBuffer {
 
                     let n_left = want.min(left.len());
                     if n_left > 0 {
-                        let _ = copy_data_between_cages(
+                        if copy_data_between_cages(
                             this_cage,
                             dst_cage,
                             left.as_ptr() as u64,
@@ -320,13 +346,17 @@ impl PipeBuffer {
                             dst_cage,
                             n_left as u64,
                             0,
-                        );
+                        )
+                        .is_err()
+                        {
+                            return n;
+                        }
                         n += n_left;
                     }
 
                     let n_right = (want - n).min(right.len());
                     if n_right > 0 {
-                        let _ = copy_data_between_cages(
+                        if copy_data_between_cages(
                             this_cage,
                             dst_cage,
                             right.as_ptr() as u64,
@@ -335,7 +365,11 @@ impl PipeBuffer {
                             dst_cage,
                             n_right as u64,
                             0,
-                        );
+                        )
+                        .is_err()
+                        {
+                            return n;
+                        }
                         n += n_right;
                     }
 
