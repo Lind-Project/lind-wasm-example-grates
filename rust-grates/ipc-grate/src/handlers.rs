@@ -340,7 +340,7 @@ pub extern "C" fn read_handler(
             }
             with_ipc(|s| s.get_pipe(underfd))
         }
-        IPC_SOCKET => with_ipc(|s| {
+        socket::IPC_SOCKET => with_ipc(|s| {
             s.sockets.get(underfd).and_then(|sock| sock.recvpipe.clone())
         }),
         _ => return -9,
@@ -351,19 +351,13 @@ pub extern "C" fn read_handler(
         None => return -9,
     };
 
-    let mut buf = vec![0u8; count];
-    let ret = pipe.read(&mut buf, count, nonblocking);
-
-    if ret > 0 && arg2 != 0 {
-        let _ = copy_data_between_cages(
-            this_cage, arg2cage,
-            buf.as_ptr() as u64, this_cage,
-            arg2, arg2cage,
-            ret as u64, 0,
-        );
+    if count == 0 || arg2 == 0 {
+        return 0;
     }
-
-    ret
+    // Single-copy fast path: ringbuf storage is filled directly from
+    // the user cage via copy_data_between_cages (host-side memcpy),
+    // skipping the staging vec the previous design needed.
+    pipe.read_to_cage(arg2cage, arg2, count, nonblocking, this_cage)
 }
 
 /// write (syscall 1): write to pipe or forward.
@@ -400,7 +394,7 @@ pub extern "C" fn write_handler(
             }
             with_ipc(|s| s.get_pipe(underfd))
         }
-        IPC_SOCKET => with_ipc(|s| {
+        socket::IPC_SOCKET => with_ipc(|s| {
             s.sockets.get(underfd).and_then(|sock| sock.sendpipe.clone())
         }),
         _ => return -9,
@@ -411,17 +405,12 @@ pub extern "C" fn write_handler(
         None => return -9,
     };
 
-    // Copy data from the cage's buffer.
-    let mut buf = vec![0u8; count];
-    let _ = copy_data_between_cages(
-        this_cage, arg2cage,
-        arg2, arg2cage,
-        buf.as_mut_ptr() as u64, this_cage,
-        count as u64, 0,
-    );
-
-    let ret = pipe.write(&buf, count, nonblocking);
-    ret
+    if count == 0 || arg2 == 0 {
+        return 0;
+    }
+    // Single-copy fast path: copy_data_between_cages writes directly
+    // into ringbuf storage; no grate-side staging vec.
+    pipe.write_from_cage(arg2cage, arg2, count, nonblocking, this_cage)
 }
 
 /// Compute the revents bits for an IPC fd given the requested events.
@@ -2825,17 +2814,10 @@ pub extern "C" fn sendto_handler(
 
     let nonblocking = (flags & O_NONBLOCK) != 0;
 
-    if count == 0 {
+    if count == 0 || arg2 == 0 {
         return 0;
     }
-    let mut buf = vec![0u8; count];
-    let _ = copy_data_between_cages(
-        this_cage, arg2cage,
-        arg2, arg2cage,
-        buf.as_mut_ptr() as u64, this_cage,
-        count as u64, 0,
-    );
-    pipe.write(&buf, count, nonblocking)
+    pipe.write_from_cage(arg2cage, arg2, count, nonblocking, this_cage)
 }
 
 /// recvfrom (syscall 45): IPC-aware mirror of sendto_handler.  For IPC
@@ -2880,16 +2862,11 @@ pub extern "C" fn recvfrom_handler(
 
     let nonblocking = (flags & O_NONBLOCK) != 0;
 
-    let mut buf = vec![0u8; count];
-    let ret = pipe.read(&mut buf, count, nonblocking);
-    if ret > 0 && arg2 != 0 {
-        let _ = copy_data_between_cages(
-            this_cage, arg2cage,
-            buf.as_ptr() as u64, this_cage,
-            arg2, arg2cage,
-            ret as u64, 0,
-        );
-    }
+    let ret = if count == 0 || arg2 == 0 {
+        0
+    } else {
+        pipe.read_to_cage(arg2cage, arg2, count, nonblocking, this_cage)
+    };
     // If caller supplied src_addr/addrlen, write addrlen=0 so they see
     // "no peer address available" rather than uninitialized bytes.
     if ret >= 0 && arg6 != 0 {

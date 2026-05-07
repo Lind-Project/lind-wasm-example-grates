@@ -34,6 +34,8 @@ use std::cell::UnsafeCell;
 use ringbuf::RingBuffer;
 use ringbuf::{Consumer, Producer};
 
+use grate_rs::copy_data_between_cages;
+
 /// Sleep ~50µs (1µs requested, kernel rounds up to its timer
 /// granularity) in a way that's interruptible by signals queued for
 /// the calling user cage.  Returns `true` if the sleep was
@@ -176,6 +178,186 @@ impl PipeBuffer {
         }
 
         total_written as i32
+    }
+
+    /// Write into the pipe by copying directly from another cage's
+    /// memory region using `copy_data_between_cages`.
+    ///
+    /// This is the fast-path for `read`/`write`/`sendto`/`recvfrom`
+    /// handlers: glibc translates the user buffer pointer to a host
+    /// address and we hand that address to threei's host-side memcpy,
+    /// which writes straight into the ringbuf's internal storage.  The
+    /// previous design copied user → grate-side `vec![0u8; count]` →
+    /// ringbuf, paying for two memcpys, an allocation, and a zeroing
+    /// pass on every syscall.
+    ///
+    /// `src_cage` is the user cage id; `src_addr` is the host address
+    /// of the user buffer (already translated by glibc).  `this_cage`
+    /// is the grate's own cage id, used so threei validates the
+    /// ringbuf-storage pointer against the grate's vmmap.
+    pub fn write_from_cage(
+        &self,
+        src_cage: u64,
+        src_addr: u64,
+        count: usize,
+        nonblocking: bool,
+        this_cage: u64,
+    ) -> i32 {
+        if self.read_refs.load(Ordering::Acquire) == 0 {
+            return -32; // EPIPE
+        }
+        if count == 0 {
+            return 0;
+        }
+
+        let mut total_written = 0usize;
+        while total_written < count {
+            let want = count - total_written;
+            let cur_src = src_addr + total_written as u64;
+
+            // SAFETY: SPSC contract — only the writer thread accesses the producer.
+            let pushed = unsafe {
+                (*self.producer.get()).push_access(|left, right| {
+                    let mut n = 0usize;
+
+                    let n_left = want.min(left.len());
+                    if n_left > 0 {
+                        let _ = copy_data_between_cages(
+                            this_cage,
+                            src_cage,
+                            cur_src,
+                            src_cage,
+                            left.as_mut_ptr() as u64,
+                            this_cage,
+                            n_left as u64,
+                            0,
+                        );
+                        n += n_left;
+                    }
+
+                    let n_right = (want - n).min(right.len());
+                    if n_right > 0 {
+                        let _ = copy_data_between_cages(
+                            this_cage,
+                            src_cage,
+                            cur_src + n as u64,
+                            src_cage,
+                            right.as_mut_ptr() as u64,
+                            this_cage,
+                            n_right as u64,
+                            0,
+                        );
+                        n += n_right;
+                    }
+
+                    n
+                })
+            };
+
+            total_written += pushed;
+            if total_written >= count {
+                break;
+            }
+
+            // Pipe full or partial push — re-check for broken pipe, then
+            // honor nonblocking / signal semantics matching `write()`.
+            if self.read_refs.load(Ordering::Acquire) == 0 {
+                return -32; // EPIPE
+            }
+            if nonblocking {
+                if total_written > 0 {
+                    return total_written as i32;
+                }
+                return -11; // EAGAIN
+            }
+            if nap_signal_aware() {
+                if total_written > 0 {
+                    return total_written as i32;
+                }
+                return -4; // EINTR
+            }
+        }
+
+        total_written as i32
+    }
+
+    /// Read from the pipe by copying directly into another cage's
+    /// memory region using `copy_data_between_cages`.  Mirror of
+    /// `write_from_cage`.
+    ///
+    /// Returns the same status codes as `read()`:
+    ///   > 0: number of bytes read
+    ///   0: EOF
+    ///   -4: EINTR
+    ///   -11: EAGAIN
+    pub fn read_to_cage(
+        &self,
+        dst_cage: u64,
+        dst_addr: u64,
+        count: usize,
+        nonblocking: bool,
+        this_cage: u64,
+    ) -> i32 {
+        if count == 0 {
+            return 0;
+        }
+
+        loop {
+            // SAFETY: SPSC contract — only the reader thread accesses the consumer.
+            let popped = unsafe {
+                (*self.consumer.get()).pop_access(|left, right| {
+                    let mut n = 0usize;
+                    let want = count;
+
+                    let n_left = want.min(left.len());
+                    if n_left > 0 {
+                        let _ = copy_data_between_cages(
+                            this_cage,
+                            dst_cage,
+                            left.as_ptr() as u64,
+                            this_cage,
+                            dst_addr,
+                            dst_cage,
+                            n_left as u64,
+                            0,
+                        );
+                        n += n_left;
+                    }
+
+                    let n_right = (want - n).min(right.len());
+                    if n_right > 0 {
+                        let _ = copy_data_between_cages(
+                            this_cage,
+                            dst_cage,
+                            right.as_ptr() as u64,
+                            this_cage,
+                            dst_addr + n as u64,
+                            dst_cage,
+                            n_right as u64,
+                            0,
+                        );
+                        n += n_right;
+                    }
+
+                    n
+                })
+            };
+
+            if popped > 0 {
+                return popped as i32;
+            }
+
+            // Buffer empty — check EOF, then nonblocking / signal semantics.
+            if self.eof.load(Ordering::Acquire) {
+                return 0;
+            }
+            if nonblocking {
+                return -11; // EAGAIN
+            }
+            if nap_signal_aware() {
+                return -4; // EINTR
+            }
+        }
     }
 
     /// Increment the write-end reference count (called on dup of a write fd).
