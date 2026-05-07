@@ -9,7 +9,7 @@ use grate_rs::constants::{
     SYS_STATFS, SYS_TRUNCATE, SYS_UNLINK, SYS_UNLINKAT, SYS_XSTAT,
 };
 use grate_rs::ffi::stat;
-use grate_rs::{GrateBuilder, copy_data_between_cages, getcageid, make_threei_call};
+use grate_rs::{GrateBuilder, GrateError, copy_data_between_cages, getcageid, make_threei_call};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::ffi::c_char;
@@ -98,6 +98,11 @@ fn call_with_rewrites(
         0,
     ) {
         Ok(ret) => ret,
+        // Propagate the kernel's actual -errno (e.g. -ENOENT, -EEXIST,
+        // -EISDIR) instead of collapsing every failure to -1 / EPERM.
+        // glibc's MAKE_LEGACY_SYSCALL with TRANSLATE_ERRNO_ON converts
+        // negative values in [-MAX_ERRNO, -1] into errno + return -1.
+        Err(GrateError::MakeSyscallError(n)) => n,
         Err(_) => -1,
     }
 }
@@ -234,6 +239,7 @@ extern "C" fn readlink_handler(
         0,
     ) {
         Ok(r) => r,
+        Err(GrateError::MakeSyscallError(n)) => return n,
         Err(_) => return -1,
     };
 
@@ -316,6 +322,7 @@ extern "C" fn readlinkat_handler(
         0,
     ) {
         Ok(r) => r,
+        Err(GrateError::MakeSyscallError(n)) => return n,
         Err(_) => return -1,
     };
 
@@ -373,6 +380,7 @@ extern "C" fn fork_handler(
         0,
     ) {
         Ok(r) => r,
+        Err(GrateError::MakeSyscallError(n)) => return n,
         Err(_) => return -1,
     };
 
@@ -433,6 +441,7 @@ extern "C" fn execve_handler(
         0,
     ) {
         Ok(r) => return r,
+        Err(GrateError::MakeSyscallError(n)) => return n,
         Err(_) => return -1,
     }
 }
