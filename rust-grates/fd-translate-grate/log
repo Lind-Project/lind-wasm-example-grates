@@ -1,0 +1,73 @@
+[Grate Init]: Initializing FD Translate Grate
+[fdt-test] preexec: cage_id=2
+[inside] called with fn_ptr=0x7, cageid=1
+[inside] called with fn_ptr=0x44, cageid=1
+[fd_translation_handler_impl] syscall_num=2, cageid=1
+[fd_translation_handler_impl] creating fd=3 in cageid=2, should_cloexec=false
+[inside] called with fn_ptr=0x47, cageid=1
+[fd_translation_handler_impl] syscall_num=292, cageid=1
+[fd_translation_handler_impl] duping fd=3 from cageid=2 to new_fd=4, should_cloexec=true, flags=0x80000
+[inside] called with fn_ptr=0x20, cageid=1
+[fd_translation_handler_impl] syscall_num=72, cageid=1
+[fd_translation_handler_impl] translating fd arg: index=0, kernel_fd=4, fd_cageid=2
+[translate_fd_arg] translating fd arg: cageid=2, arg=4, kind=Fd
+[fd_translation_handler_impl] translated fd arg: index=0, underfd=4
+[inside] called with fn_ptr=0x1e, cageid=1
+[fd_translation_handler_impl] syscall_num=1, cageid=1
+[fd_translation_handler_impl] translating fd arg: index=0, kernel_fd=3, fd_cageid=2
+[translate_fd_arg] translating fd arg: cageid=2, arg=3, kind=Fd
+[fd_translation_handler_impl] translated fd arg: index=0, underfd=3
+[inside] called with fn_ptr=0x1e, cageid=1
+[fd_translation_handler_impl] syscall_num=1, cageid=1
+[fd_translation_handler_impl] translating fd arg: index=0, kernel_fd=4, fd_cageid=2
+[translate_fd_arg] translating fd arg: cageid=2, arg=4, kind=Fd
+[fd_translation_handler_impl] translated fd arg: index=0, underfd=4
+[inside] called with fn_ptr=0x1f, cageid=1
+[fd_translation_handler_impl] syscall_num=3, cageid=1
+[fd_translation_handler_impl] translating fd arg: index=0, kernel_fd=3, fd_cageid=2
+[translate_fd_arg] translating fd arg: cageid=2, arg=3, kind=Fd
+[fd_translation_handler_impl] translated fd arg: index=0, underfd=3
+[inside] called with fn_ptr=0x1f, cageid=1
+[fd_translation_handler_impl] syscall_num=3, cageid=1
+[fd_translation_handler_impl] translating fd arg: index=0, kernel_fd=4, fd_cageid=2
+[translate_fd_arg] translating fd arg: cageid=2, arg=4, kind=Fd
+[fd_translation_handler_impl] translated fd arg: index=0, underfd=4
+[inside] called with fn_ptr=0x44, cageid=1
+[fd_translation_handler_impl] syscall_num=2, cageid=1
+[fd_translation_handler_impl] creating fd=3 in cageid=2, should_cloexec=false
+[inside] called with fn_ptr=0x23, cageid=1
+[fd_translation_handler_impl] syscall_num=5, cageid=1
+[fd_translation_handler_impl] translating fd arg: index=0, kernel_fd=5, fd_cageid=2
+[translate_fd_arg] translating fd arg: cageid=2, arg=5, kind=Fd
+[fd_translation_handler_impl] translated fd arg: index=0, underfd=3
+[inside] called with fn_ptr=0x1d, cageid=1
+[fd_translation_handler_impl] syscall_num=0, cageid=1
+[fd_translation_handler_impl] translating fd arg: index=0, kernel_fd=5, fd_cageid=2
+[translate_fd_arg] translating fd arg: cageid=2, arg=5, kind=Fd
+[fd_translation_handler_impl] translated fd arg: index=0, underfd=3
+[inside] called with fn_ptr=0x1d, cageid=1
+[fd_translation_handler_impl] syscall_num=0, cageid=1
+[fd_translation_handler_impl] translating fd arg: index=0, kernel_fd=5, fd_cageid=2
+[translate_fd_arg] translating fd arg: cageid=2, arg=5, kind=Fd
+[fd_translation_handler_impl] translated fd arg: index=0, underfd=3
+[inside] called with fn_ptr=0x1f, cageid=1
+[fd_translation_handler_impl] syscall_num=3, cageid=1
+[fd_translation_handler_impl] translating fd arg: index=0, kernel_fd=5, fd_cageid=2
+[translate_fd_arg] translating fd arg: cageid=2, arg=5, kind=Fd
+[fd_translation_handler_impl] translated fd arg: index=0, underfd=3
+[inside] called with fn_ptr=0x1e, cageid=1
+[fd_translation_handler_impl] syscall_num=1, cageid=1
+[fd_translation_handler_impl] translating fd arg: index=0, kernel_fd=1, fd_cageid=2
+[translate_fd_arg] translating fd arg: cageid=2, arg=1, kind=Fd
+[fd_translation_handler_impl] translated fd arg: index=0, underfd=1
+dup3 basic test passed.[inside] called with fn_ptr=0x23, cageid=1
+[fd_translation_handler_impl] syscall_num=5, cageid=1
+[fd_translation_handler_impl] translating fd arg: index=0, kernel_fd=1, fd_cageid=2
+[translate_fd_arg] translating fd arg: cageid=2, arg=1, kind=Fd
+[fd_translation_handler_impl] translated fd arg: index=0, underfd=1
+[inside] called with fn_ptr=0x1e, cageid=1
+[fd_translation_handler_impl] syscall_num=1, cageid=1
+[fd_translation_handler_impl] translating fd arg: index=0, kernel_fd=1, fd_cageid=2
+[translate_fd_arg] translating fd arg: cageid=2, arg=1, kind=Fd
+[fd_translation_handler_impl] translated fd arg: index=0, underfd=1
+
