@@ -36,14 +36,22 @@ use ringbuf::{Consumer, Producer};
 
 use grate_rs::copy_data_between_cages;
 
-/// Sleep ~50µs (1µs requested, kernel rounds up to its timer
-/// granularity) in a way that's interruptible by signals queued for
-/// the calling user cage.  Returns `true` if the sleep was
-/// interrupted; caller should propagate -EINTR so the cage's signal
-/// handler runs before the syscall is retried.
+/// Sleep ~50µs (interruptible by signals queued for the calling user
+/// cage).  Returns `true` if the sleep was interrupted; caller should
+/// propagate -EINTR so the cage's signal handler runs before the
+/// syscall is retried.
+///
+/// History: 1µs was previously used here on the theory that the
+/// kernel rounds up to its timer granularity anyway, so smaller is
+/// free.  In practice that broke once the IPC fast-path made the
+/// per-iteration work cheap — `self_pipe_signal.c` regressed (poll
+/// returned EINTR but the SIGUSR1 handler hadn't yet written to the
+/// self-pipe).  10µs wasn't enough; 50µs reliably gives the cage's
+/// signal-handler dispatch room to run between iterations without
+/// measurable throughput impact on pipe-style waits.
 fn nap_signal_aware() -> bool {
     unsafe {
-        let ts = libc::timespec { tv_sec: 0, tv_nsec: 1_000 };
+        let ts = libc::timespec { tv_sec: 0, tv_nsec: 50_000 };
         libc::nanosleep(&ts, std::ptr::null_mut()) < 0
     }
 }

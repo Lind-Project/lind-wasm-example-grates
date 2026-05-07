@@ -555,11 +555,15 @@ const EINTR_NEG: i32 = -4;
 /// SIGUSR1 handler that never gets to run).
 fn ipc_wait_nap_signal_aware() -> bool {
     unsafe {
-        // Request 1µs.  The Linux kernel rounds up to its timer
-        // granularity (~50µs) regardless, so going smaller is a
-        // no-op.  Going larger (e.g. 1ms) hurts throughput on
-        // pipe-style waits without improving signal latency.
-        let ts = libc::timespec { tv_sec: 0, tv_nsec: 1_000 };
+        // Request 50µs.  Was 1µs on the theory that the kernel rounds
+        // up to timer granularity anyway, so smaller is free.  That
+        // broke once the IPC fast-path made the per-iteration work
+        // cheap — `self_pipe_signal.c` regressed because the cage's
+        // signal-handler dispatch didn't get a chance to run between
+        // iterations.  10µs wasn't enough; 50µs reliably gives the
+        // dispatch room without measurable throughput impact on
+        // pipe-style waits.
+        let ts = libc::timespec { tv_sec: 0, tv_nsec: 50_000 };
         // For a valid timespec the only error nanosleep can return is
         // EINTR, so a negative return is conclusive.
         libc::nanosleep(&ts, std::ptr::null_mut()) < 0
