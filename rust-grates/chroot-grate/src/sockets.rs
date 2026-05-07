@@ -128,6 +128,15 @@ macro_rules! socket_untranslate_handler {
             let cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
             // Call the real syscall.
+            //
+            // grate-rs's `make_threei_call` maps every negative return into
+            // `Err(MakeSyscallError(n))` — including normal blocking-syscall
+            // errnos like -EAGAIN, -EINTR, -ECONNREFUSED.  We have to
+            // propagate those to the cage as-is; collapsing them to -1
+            // would surface as EPERM via glibc's errno translation and
+            // break recvfrom/accept/getsockname/getpeername on any
+            // transient failure.  Only treat dispatch-layer errors
+            // (e.g. ELINDAPIABORTED) as a hard EIO.
             let ret = match make_threei_call(
                 $syscall_const as u32,
                 0,
@@ -148,7 +157,8 @@ macro_rules! socket_untranslate_handler {
                 0,
             ) {
                 Ok(r) => r,
-                Err(_) => return -1,
+                Err(::grate_rs::GrateError::MakeSyscallError(n)) => n,
+                Err(_) => return -(::libc::EIO as i32),
             };
 
             // On success, untranslate the returned peer sockaddr (strip chroot from AF_UNIX).
