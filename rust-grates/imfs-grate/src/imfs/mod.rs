@@ -120,10 +120,10 @@ impl ImfsState {
         }
 
         match self.nodes[idx].node_type {
-            NodeType::Dir => libc::DT_DIR,
-            NodeType::Reg => libc::DT_REG,
-            NodeType::Lnk => libc::DT_LNK,
-            _ => libc::DT_UNKNOWN,
+            NodeType::Dir => DT_DIR,
+            NodeType::Reg => DT_REG,
+            NodeType::Lnk => DT_LNK,
+            _ => DT_UNKNOWN,
         }
     }
 

@@ -91,7 +91,7 @@ fn main() {
         .register(SYS_FCHMOD, handlers::enosys_handler)
         .register(SYS_READV, handlers::readv_handler)
         .register(SYS_WRITEV, handlers::writev_handler)
-        .register(SYS_FSYNC, handlers::enosys_handler)
+        .register(SYS_FSYNC, handlers::fsync_handler)
         .register(SYS_FDATASYNC, handlers::enosys_handler)
         .register(SYS_STATFS, handlers::enosys_handler)
         .register(SYS_FSTATFS, handlers::enosys_handler)
