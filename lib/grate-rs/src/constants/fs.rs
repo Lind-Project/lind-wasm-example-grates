@@ -39,3 +39,6 @@ pub const F_OK: i32 = 0;
 pub const R_OK: i32 = 4;
 pub const W_OK: i32 = 2;
 pub const X_OK: i32 = 1;
+
+pub const F_DUPFD: i32 = 0;
+pub const F_DUPFD_CLOEXEC: i32 = 1030;
