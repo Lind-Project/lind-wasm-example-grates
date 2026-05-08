@@ -4,7 +4,15 @@ use crate::constants::syscall_numbers::*;
 
 // todo:
 // fcntl: check for F_DUPFD, F_DUPFD_CLOEXEC and handle fd translation for the new fd.
-// dup2, dup3: handle individually
+// poll/ppoll: translate all fds in the fd sets.
+// mmap
+
+#[derive(Eq, PartialEq, Default, Copy, Clone, Debug)]
+#[repr(C)]
+pub struct SockPair {
+    pub sock1: i32,
+    pub sock2: i32,
+}
 
 pub const FDKIND_KERNEL: u32 = 1;
 pub const O_CLOEXEC: i32 = 0o2000000; // Close on exec
@@ -24,6 +32,10 @@ pub enum FdArgKind {
     /// todo: integrate with current logic
     NewFd,
 
+    SOCKPAIR,
+
+    EPFD,
+
     FLAG,
 
     CREAT,
@@ -41,9 +53,18 @@ pub struct SyscallFdSpec {
     pub fd_args: &'static [FdArgSpec],
 }
 
+pub const CREATION: &[FdArgSpec] = &[
+    FdArgSpec { index: 0, kind: FdArgKind::CREAT },
+];
+
 pub const CREATION_DIRFD_1_FLAG_3: &[FdArgSpec] = &[
     FdArgSpec { index: 0, kind: FdArgKind::DirFd },
     FdArgSpec { index: 2, kind: FdArgKind::FLAG },
+    FdArgSpec { index: 0, kind: FdArgKind::CREAT },
+];
+
+pub const CREATION_FLAG_1: &[FdArgSpec] = &[
+    FdArgSpec { index: 0, kind: FdArgKind::FLAG },
     FdArgSpec { index: 0, kind: FdArgKind::CREAT },
 ];
 
@@ -92,6 +113,16 @@ pub const OLD_FD_1_NEW_FD_2_FLAG: &[FdArgSpec] = &[
     FdArgSpec { index: 2, kind: FdArgKind::FLAG },
 ];
 
+pub const SOCKPAIR: &[FdArgSpec] = &[
+    FdArgSpec { index: 3, kind: FdArgKind::SOCKPAIR },
+    FdArgSpec { index: 1, kind: FdArgKind::FLAG },
+];
+
+pub const EPOLL_1_FD_3: &[FdArgSpec] = &[
+    FdArgSpec { index: 2, kind: FdArgKind::EPFD },
+    FdArgSpec { index: 0, kind: FdArgKind::Fd },
+];
+
 const AT_FDCWD_U64: u64 = (-100i64) as u64;
 
 fn translate_fd_arg(cageid: u64, arg: u64, kind: FdArgKind) -> Result<u64, u64> {
@@ -111,7 +142,7 @@ fn fd_translation_handler_impl(
     syscall_num: u64,
     fd_specs: &'static [FdArgSpec],
 
-    cageid: u64,
+    this_grateid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -126,10 +157,11 @@ fn fd_translation_handler_impl(
     arg6cage: u64,
 ) -> i32 {
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
-    let argcages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+    let mut argcages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
     let mut should_create_vfd = false;
     let mut should_cloexec = false;
+    let mut should_socketpair = false;
 
     let mut old_fd_entry = fdtables::FDTableEntry {
         fdkind: 0,
@@ -143,6 +175,9 @@ fn fd_translation_handler_impl(
     let mut new_fd_cageid = 0;
 
     let mut should_dup2 = false;
+
+    let mut origin_socket_vector_ptr: u64 = 0;
+    let mut kernel_socket_vector: [i32; 2] = [0, 0];
 
     for spec in fd_specs {
         match spec.kind {
@@ -183,6 +218,23 @@ fn fd_translation_handler_impl(
                 old_fd_cageid = argcages[spec.index];
                 args[spec.index] = old_fd_entry.underfd;
             }
+
+            FdArgKind::SOCKPAIR => {
+                should_socketpair = true;
+                origin_socket_vector_ptr = args[spec.index];
+                args[spec.index] = kernel_socket_vector.as_ptr() as u64;
+                argcages[spec.index] = this_grateid;
+                println!("origin socket pair ptr={}, cage_id={}, grate_id={}", origin_socket_vector_ptr, argcages[spec.index], this_grateid);
+            }
+
+            FdArgKind::EPFD => {
+                args[spec.index] = *fdtables::epoll_get_underfd_hashmap(cageid, epfd_arg)
+                    .unwrap()
+                    .get(&FDKIND_KERNEL)
+                    .unwrap();
+                argcages[spec.index] = this_grateid;
+            }
+
             FdArgKind::FLAG => {
                 should_cloexec |= ((args[spec.index] as i32) & O_CLOEXEC) != 0;
             }
@@ -193,12 +245,15 @@ fn fd_translation_handler_impl(
         }
     }
 
+    if syscall_num == SYS_SOCKETPAIR {
+        println!("socketpair syscall, should_socketpair: {}", should_socketpair);
+    }
     
 
     let ret = match make_threei_call(
         syscall_num as u32,
         0,
-        cageid,
+        this_grateid,
         arg1cage,
         args[0],
         argcages[0],
@@ -257,6 +312,21 @@ fn fd_translation_handler_impl(
             Ok(vfd) => vfd as i32,
             Err(_) => EMFILE,
         };
+    }
+
+    if should_socketpair {
+        println!("kernel socket pair: {}, {}", kernel_socket_vector[0], kernel_socket_vector[1]);
+        let ksv_1 = kernel_socket_vector[0];
+        let ksv_2 = kernel_socket_vector[1];
+        let vsv_1 =
+            fdtables::get_unused_virtual_fd(arg1cage, FDKIND_KERNEL, ksv_1 as u64, should_cloexec, 0).unwrap();
+        let vsv_2 =
+            fdtables::get_unused_virtual_fd(arg1cage, FDKIND_KERNEL, ksv_2 as u64, should_cloexec, 0).unwrap();
+        let virtual_socket_vector = origin_socket_vector_ptr as *mut SockPair;
+        unsafe {
+            (*virtual_socket_vector).sock1 = vsv_1 as i32;
+            (*virtual_socket_vector).sock2 = vsv_2 as i32;
+        }
     }
 
     ret
@@ -392,7 +462,13 @@ define_fd_handler!(fd_openat_handler, SYS_OPENAT, CREATION_DIRFD_ARG_1_FLAG);
 define_fd_handler!(fd_dup_handler, SYS_DUP, CREATION_FD_1);
 define_fd_handler!(fd_dup2_handler, SYS_DUP2, OLD_FD_1_NEW_FD_2);
 define_fd_handler!(fd_dup3_handler, SYS_DUP3, OLD_FD_1_NEW_FD_2_FLAG);
+
 define_fd_handler!(fd_socket_handler, SYS_SOCKET, CREATION_FLAG_2);
+define_fd_handler!(fd_socketpair_handler, SYS_SOCKETPAIR, SOCKPAIR);
+define_fd_handler!(fd_epoll_create_handler, SYS_EPOLL_CREATE, CREATION);
+define_fd_handler!(fd_epoll_create1_handler, SYS_EPOLL_CREATE1, CREATION_FLAG_1);
+
+define_fd_handler!(fd_epoll_ctl_handler, SYS_EPOLL_CTL, EPOLL_1_FD_3);
 
 pub const FD_HANDLER_TABLE: &[(u64, SyscallHandler)] = &[
     (SYS_READ, fd_read_handler as SyscallHandler),
@@ -442,5 +518,11 @@ pub const FD_HANDLER_TABLE: &[(u64, SyscallHandler)] = &[
     (SYS_DUP, fd_dup_handler as SyscallHandler),
     (SYS_DUP2, fd_dup2_handler as SyscallHandler),
     (SYS_DUP3, fd_dup3_handler as SyscallHandler),
+
     (SYS_SOCKET, fd_socket_handler as SyscallHandler),
+    (SYS_SOCKETPAIR, fd_socketpair_handler as SyscallHandler),
+    (SYS_EPOLL_CREATE, fd_epoll_create_handler as SyscallHandler),
+    (SYS_EPOLL_CREATE1, fd_epoll_create1_handler as SyscallHandler),
+
+    (SYS_EPOLL_CTL, fd_epoll_ctl_handler as SyscallHandler),
 ];
