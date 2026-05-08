@@ -87,9 +87,15 @@ fn main() {
         .register(SYS_FTRUNCATE, handlers::ftruncate_handler)
         .register(SYS_FCHDIR, handlers::enosys_handler)
         .register(SYS_FCHMOD, handlers::enosys_handler)
+<<<<<<< Updated upstream
         .register(SYS_READV, handlers::enosys_handler)
         .register(SYS_WRITEV, handlers::enosys_handler)
         .register(SYS_FSYNC, handlers::enosys_handler)
+=======
+        .register(SYS_READV, handlers::readv_handler)
+        .register(SYS_WRITEV, handlers::writev_handler)
+        .register(SYS_FSYNC, handlers::fsync_handler)
+>>>>>>> Stashed changes
         .register(SYS_FDATASYNC, handlers::enosys_handler)
         .register(SYS_STATFS, handlers::enosys_handler)
         .register(SYS_FSTATFS, handlers::enosys_handler)

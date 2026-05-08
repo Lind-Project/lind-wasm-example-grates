@@ -244,17 +244,12 @@ pub extern "C" fn ns_open_handler(
 
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
 
-    // On success, record the fd in fdtables with the clamped flag.
-    // perfdinfo=1 means "this fd was opened under the clamped prefix."
+    // On success, tag the existing fdtable entry with the clamped flag.
+    // Do not replace the entry: the underlying implementation (RawPOSIX,
+    // IMFS, etc.) owns the real fdkind/underfd mapping.
     if ret >= 0 {
         let clamped = if matches { 1u64 } else { 0 };
-        let _ = fdtables::get_specific_virtual_fd(
-            arg1cage, ret as u64, // virtual fd = the returned fd
-            0,          // fdkind (unused)
-            ret as u64, // underfd = same (identity mapping)
-            false,      // should_cloexec
-            clamped,    // perfdinfo: 1=clamped, 0=not
-        );
+        let _ = fdtables::set_perfdinfo(arg1cage, ret as u64, clamped);
     }
 
     ret
@@ -333,11 +328,10 @@ pub extern "C" fn ns_dup_handler(
 
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
 
-    // On success, record the new fd with the same clamped status as the old one.
+    // On success, tag the new fd with the same clamped status as the old one.
+    // The underlying implementation already created the real fdtable entry.
     if ret >= 0 {
-        let _ = fdtables::get_specific_virtual_fd(
-            arg1cage, ret as u64, 0, ret as u64, false, perfdinfo,
-        );
+        let _ = fdtables::set_perfdinfo(arg1cage, ret as u64, perfdinfo);
     }
 
     ret
@@ -375,9 +369,9 @@ pub extern "C" fn ns_dup2_handler(
 
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
 
-    // arg2 is the target fd for dup2.
+    // arg2 is the target fd for dup2. Only tag the existing entry.
     if ret >= 0 {
-        let _ = fdtables::get_specific_virtual_fd(arg1cage, arg2, 0, arg2, false, perfdinfo);
+        let _ = fdtables::set_perfdinfo(arg1cage, arg2, perfdinfo);
     }
 
     ret
@@ -415,9 +409,9 @@ pub extern "C" fn ns_dup3_handler(
 
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
 
-    // arg2 is the target fd for dup3.
+    // arg2 is the target fd for dup3. Only tag the existing entry.
     if ret >= 0 {
-        let _ = fdtables::get_specific_virtual_fd(arg1cage, arg2, 0, arg2, false, perfdinfo);
+        let _ = fdtables::set_perfdinfo(arg1cage, arg2, perfdinfo);
     }
 
     ret
