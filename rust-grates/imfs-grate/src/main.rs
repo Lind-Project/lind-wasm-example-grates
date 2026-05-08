@@ -75,6 +75,8 @@ fn main() {
         .register(SYS_READLINKAT, handlers::enosys_handler)
         .register(SYS_PREAD, handlers::pread_handler)
         .register(SYS_PWRITE, handlers::pwrite_handler)
+        .register(SYS_PREADV, handlers::preadv_handler)
+        .register(SYS_PWRITEV, handlers::pwritev_handler)
         .register(SYS_MKDIR, handlers::mkdir_handler)
         .register(SYS_CLONE, handlers::fork_handler)
         .register(SYS_EXEC, handlers::exec_handler)
@@ -87,15 +89,12 @@ fn main() {
         .register(SYS_FTRUNCATE, handlers::ftruncate_handler)
         .register(SYS_FCHDIR, handlers::enosys_handler)
         .register(SYS_FCHMOD, handlers::enosys_handler)
-<<<<<<< Updated upstream
         .register(SYS_READV, handlers::enosys_handler)
         .register(SYS_WRITEV, handlers::enosys_handler)
         .register(SYS_FSYNC, handlers::enosys_handler)
-=======
         .register(SYS_READV, handlers::readv_handler)
         .register(SYS_WRITEV, handlers::writev_handler)
         .register(SYS_FSYNC, handlers::fsync_handler)
->>>>>>> Stashed changes
         .register(SYS_FDATASYNC, handlers::enosys_handler)
         .register(SYS_STATFS, handlers::enosys_handler)
         .register(SYS_FSTATFS, handlers::enosys_handler)
