@@ -1177,6 +1177,24 @@ pub extern "C" fn mknod_handler(
     -38 // ENOSYS
 }
 
+pub extern "C" fn fsync_handler(
+    _cageid: u64,
+    _arg1: u64,
+    _arg1cage: u64,
+    _arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    0
+}
+
 // =====================================================================
 //  fork (syscall 57)
 //
