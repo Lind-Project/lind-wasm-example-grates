@@ -493,7 +493,6 @@ macro_rules! define_fd_creation_handler {
 define_fd_handler!(fd_read_handler, SYS_READ, FD_ARG_1);
 define_fd_handler!(fd_write_handler, SYS_WRITE, FD_ARG_1);
 define_fd_handler!(fd_close_handler, SYS_CLOSE, FD_ARG_1);
-define_fd_handler!(fd_fcntl_handler, SYS_FCNTL, FD_ARG_1);
 define_fd_handler!(fd_lseek_handler, SYS_LSEEK, FD_ARG_1);
 define_fd_handler!(fd_ioctl_handler, SYS_IOCTL, FD_ARG_1);
 define_fd_handler!(fd_fstat_handler, SYS_FSTAT, FD_ARG_1);
@@ -549,7 +548,6 @@ pub const FD_HANDLER_TABLE: &[(u64, SyscallHandler)] = &[
     (SYS_READ, fd_read_handler as SyscallHandler),
     (SYS_WRITE, fd_write_handler as SyscallHandler),
     (SYS_CLOSE, fd_close_handler as SyscallHandler),
-    (SYS_FCNTL, fd_fcntl_handler as SyscallHandler),
     (SYS_LSEEK, fd_lseek_handler as SyscallHandler),
     (SYS_IOCTL, fd_ioctl_handler as SyscallHandler),
     (SYS_FSTAT, fd_fstat_handler as SyscallHandler),
