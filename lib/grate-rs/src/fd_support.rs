@@ -11,7 +11,6 @@ pub struct SockPair {
 }
 
 pub const FDKIND_KERNEL: u32 = 1;
-pub const O_CLOEXEC: i32 = 0o2000000; // Close on exec
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FdArgKind {
@@ -537,7 +536,7 @@ define_fd_handler!(fd_openat_handler, SYS_OPENAT, CREATION_DIRFD_ARG_1_FLAG);
 define_fd_handler!(fd_dup_handler, SYS_DUP, CREATION_FD_1);
 define_fd_handler!(fd_dup2_handler, SYS_DUP2, OLD_FD_1_NEW_FD_2);
 define_fd_handler!(fd_dup3_handler, SYS_DUP3, OLD_FD_1_NEW_FD_2_FLAG);
-define_fd_handler!(fd_fcntll_handler, SYS_FCNTL, FCNTL_FD_1_FLAG_2);
+define_fd_handler!(fd_fcntl_handler, SYS_FCNTL, FCNTL_FD_1_FLAG_2);
 
 define_fd_handler!(fd_socket_handler, SYS_SOCKET, CREATION_FLAG_2);
 define_fd_handler!(fd_socketpair_handler, SYS_SOCKETPAIR, SOCKPAIR);
@@ -594,7 +593,7 @@ pub const FD_HANDLER_TABLE: &[(u64, SyscallHandler)] = &[
     (SYS_DUP, fd_dup_handler as SyscallHandler),
     (SYS_DUP2, fd_dup2_handler as SyscallHandler),
     (SYS_DUP3, fd_dup3_handler as SyscallHandler),
-    (SYS_FCNTL, fd_fcntll_handler as SyscallHandler),
+    (SYS_FCNTL, fd_fcntl_handler as SyscallHandler),
 
     (SYS_SOCKET, fd_socket_handler as SyscallHandler),
     (SYS_SOCKETPAIR, fd_socketpair_handler as SyscallHandler),
