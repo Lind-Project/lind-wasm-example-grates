@@ -13,6 +13,7 @@ pub const O_EXCL: i32 = 0o200;
 pub const O_TRUNC: i32 = 0o1000;
 pub const O_APPEND: i32 = 0o2000;
 pub const O_DIRECTORY: i32 = 0o200000;
+pub const O_CLOEXEC: i32 = 0o2000000; // Close on exec
 
 pub const DT_UNKNOWN: u8 = 0;
 pub const DT_FIFO: u8 = 1;
@@ -39,3 +40,6 @@ pub const F_OK: i32 = 0;
 pub const R_OK: i32 = 4;
 pub const W_OK: i32 = 2;
 pub const X_OK: i32 = 1;
+
+pub const F_DUPFD: i32 = 0;
+pub const F_DUPFD_CLOEXEC: i32 = 1030;
