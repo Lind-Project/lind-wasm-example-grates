@@ -772,12 +772,9 @@ define_fd_handler!(fd_getpeername_handler, SYS_GETPEERNAME, FD_ARG_1);
 define_fd_handler!(fd_epoll_wait_handler, SYS_EPOLL_WAIT, FD_ARG_1);
 define_fd_handler!(fd_mmap_handler, SYS_MMAP, FD_ARG_5);
 
-define_fd_handler!(fd_mkdir_handler, SYS_MKDIR, DIRFD_ARG_1);
-define_fd_handler!(fd_mknod_handler, SYS_MKNOD, DIRFD_ARG_1);
 define_fd_handler!(fd_unlinkat_handler, SYS_UNLINKAT, DIRFD_ARG_1);
 define_fd_handler!(fd_symlinkat_handler, SYS_SYMLINKAT, DIRFD_ARG_1);
 define_fd_handler!(fd_readlinkat_handler, SYS_READLINKAT, DIRFD_ARG_1);
-define_fd_handler!(fd_access_handler, SYS_ACCESS, DIRFD_ARG_1);
 
 define_fd_handler!(fd_open_handler, SYS_OPEN, CREATION_FLAG_2);
 define_fd_handler!(fd_openat_handler, SYS_OPENAT, CREATION_DIRFD_1_FLAG_3);
