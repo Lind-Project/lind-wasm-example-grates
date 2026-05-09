@@ -77,6 +77,12 @@ pub const CREATION_FD_1: &[FdArgSpec] = &[
     FdArgSpec { index: 0, kind: FdArgKind::CREAT },
 ];
 
+pub const CREATION_FD_1_FLAG_4: &[FdArgSpec] = &[
+    FdArgSpec { index: 4, kind: FdArgKind::FLAG },
+    FdArgSpec { index: 0, kind: FdArgKind::Fd },
+    FdArgSpec { index: 0, kind: FdArgKind::CREAT },
+];
+
 pub const CREATION_DIRFD_ARG_1_FLAG: &[FdArgSpec] = &[
     FdArgSpec { index: 0, kind: FdArgKind::DirFd },
     FdArgSpec { index: 2, kind: FdArgKind::FLAG },
@@ -350,6 +356,7 @@ fn fd_translation_handler_impl(
         return ret;
     }
 
+
     if should_dup2 {
         let flags = fd_specs
             .iter()
@@ -537,6 +544,8 @@ define_fd_handler!(fd_dup2_handler, SYS_DUP2, OLD_FD_1_NEW_FD_2);
 define_fd_handler!(fd_dup3_handler, SYS_DUP3, OLD_FD_1_NEW_FD_2_FLAG);
 define_fd_handler!(fd_fcntl_handler, SYS_FCNTL, FCNTL_FD_1_FLAG_2);
 
+define_fd_handler!(fd_accept_handler, SYS_ACCEPT, CREATION_FD_1);
+define_fd_handler!(fd_accept4_handler, SYS_ACCEPT4, CREATION_FD_1_FLAG_4);
 define_fd_handler!(fd_socket_handler, SYS_SOCKET, CREATION_FLAG_2);
 define_fd_handler!(fd_socketpair_handler, SYS_SOCKETPAIR, SOCKPAIR);
 define_fd_handler!(fd_epoll_create_handler, SYS_EPOLL_CREATE, CREATION);
@@ -593,6 +602,8 @@ pub const FD_HANDLER_TABLE: &[(u64, SyscallHandler)] = &[
     (SYS_DUP3, fd_dup3_handler as SyscallHandler),
     (SYS_FCNTL, fd_fcntl_handler as SyscallHandler),
 
+    (SYS_ACCEPT, fd_accept_handler as SyscallHandler),
+    (SYS_ACCEPT4, fd_accept4_handler as SyscallHandler),
     (SYS_SOCKET, fd_socket_handler as SyscallHandler),
     (SYS_SOCKETPAIR, fd_socketpair_handler as SyscallHandler),
     (SYS_EPOLL_CREATE, fd_epoll_create_handler as SyscallHandler),
