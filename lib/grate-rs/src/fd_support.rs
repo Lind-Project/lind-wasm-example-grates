@@ -17,6 +17,18 @@ pub struct PipeArray {
     pub writefd: i32,
 }
 
+const FD_SETSIZE: usize = 1024;
+const FD_SET_WORDS: usize = FD_SETSIZE / 32;
+const FD_SET_BYTES: usize = FD_SET_WORDS * 4;
+const ARG_TRANSLATE_FLAG: u64 = 1u64 << 63;
+
+#[inline] fn fd_isset(fd: usize, set: &[u32; FD_SET_WORDS]) -> bool {
+    fd < FD_SETSIZE && (set[fd >> 5] & (1u32 << (fd & 31))) != 0
+}
+#[inline] fn fd_set_bit(fd: usize, set: &mut [u32; FD_SET_WORDS]) {
+    if fd < FD_SETSIZE { set[fd >> 5] |= 1u32 << (fd & 31); }
+}
+
 pub const FDKIND_KERNEL: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -158,9 +170,7 @@ pub const PIPE_FD_FLAG: &[FdArgSpec] = &[
 ];
 
 pub const SELECT_FDS: &[FdArgSpec] = &[
-    FdArgSpec { index: 1, kind: FdArgKind::SELECTFD }, // readfds
-    FdArgSpec { index: 2, kind: FdArgKind::SELECTFD }, // writefds
-    FdArgSpec { index: 3, kind: FdArgKind::SELECTFD }, // exceptfds
+    FdArgSpec { index: 1, kind: FdArgKind::SELECTFD }, 
 ];
 
 const AT_FDCWD_U64: u64 = (-100i64) as u64;
@@ -175,78 +185,6 @@ fn translate_fd_arg(cageid: u64, arg: u64, kind: FdArgKind) -> Result<u64, u64> 
         Err(_) => {
             Err(EBADF as u64)
         }
-    }
-}
-
-unsafe fn translate_fdset_to_kernel(
-    cageid: u64,
-    virtual_nfds: i32,
-    virtual_set_ptr: *const libc::fd_set,
-    kernel_set: *mut libc::fd_set,
-    mappings: &mut Vec<(i32, i32)>, // (virtual_fd, kernel_fd)
-    kernel_nfds: &mut i32,
-) -> Result<(), i32> {
-    if virtual_set_ptr.is_null() {
-        return Ok(());
-    }
-
-    libc::FD_ZERO(kernel_set);
-
-    for vfd in 0..virtual_nfds {
-        if libc::FD_ISSET(vfd, virtual_set_ptr) {
-            let entry = fdtables::translate_virtual_fd(cageid, vfd as u64)
-                .map_err(|_| -(EBADF as i32))?;
-
-            let kfd = entry.underfd as i32;
-            libc::FD_SET(kfd, kernel_set);
-
-            if kfd + 1 > *kernel_nfds {
-                *kernel_nfds = kfd + 1;
-            }
-
-            mappings.push((vfd, kfd));
-        }
-    }
-
-    Ok(())
-}
-
-unsafe fn translate_fdset_back_to_virtual(
-    this_grateid: u64,
-    virtual_set_ptr: *mut libc::fd_set,
-    virtual_set_cageid: u64,
-    kernel_set: *const libc::fd_set,
-    mappings: &[(i32, i32)],
-) -> Result<(), i32> {
-    if virtual_set_ptr.is_null() {
-        return Ok(());
-    }
-
-    let mut virtual_result_set: libc::fd_set = std::mem::zeroed();
-    libc::FD_ZERO(&mut virtual_result_set);
-
-    for &(vfd, kfd) in mappings {
-        if libc::FD_ISSET(kfd, kernel_set) {
-            libc::FD_SET(vfd, &mut virtual_result_set);
-        }
-    }
-
-    let srcaddr = &virtual_result_set as *const libc::fd_set as u64;
-    let destaddr = virtual_set_ptr as u64;
-    let len = std::mem::size_of::<libc::fd_set>() as u64;
-
-    match copy_data_between_cages(
-        this_grateid,
-        virtual_set_cageid,
-        srcaddr,
-        this_grateid,
-        destaddr,
-        virtual_set_cageid,
-        len,
-        /* copytype */ 0,
-    ) {
-        Ok(_) => Ok(()),
-        Err(e) => panic!("copy_data_between_cages failed: {:?}", e),
     }
 }
 
@@ -298,28 +236,23 @@ fn fd_translation_handler_impl(
     let mut origin_socket_cageid: u64 = 0;
     let mut kernel_socket_vector: [i32; 2] = [0, 0];
 
-    let mut pollfds_ptr: *mut libc::pollfd = std::ptr::null_mut();
+    let mut origin_pollfds_ptr: u64 = 0;
     let mut pollfd_cageid: u64 = 0;
 
     let mut should_select = false;
-
-    let mut readfds_ptr: *mut libc::fd_set = std::ptr::null_mut();
-    let mut writefds_ptr: *mut libc::fd_set = std::ptr::null_mut();
-    let mut exceptfds_ptr: *mut libc::fd_set = std::ptr::null_mut();
-
-    let mut k_readfds: libc::fd_set = unsafe { std::mem::zeroed() };
-    let mut k_writefds: libc::fd_set = unsafe { std::mem::zeroed() };
-    let mut k_exceptfds: libc::fd_set = unsafe { std::mem::zeroed() };
-
-    let mut read_map = Vec::new();
-    let mut write_map = Vec::new();
-    let mut except_map = Vec::new();
-    let mut kernel_nfds: i32 = 0;
-
-    let mut readfds_cageid: u64 = 0;
-    let mut writefds_cageid: u64 = 0;
-    let mut exceptfds_cageid: u64 = 0;
-
+    let mut select_cageid = 0;
+    let mut rev_map: Vec<Option<usize>> = vec![None; FD_SETSIZE];
+    let mut max_under: usize = 0;
+    let mut have_r = false;
+    let mut have_w = false;
+    let mut have_e = false;
+    
+    let mut v_read: u64 = 0;
+    let mut v_write: u64 = 0;
+    let mut v_except: u64 = 0;
+    let mut k_read:   [u32; FD_SET_WORDS] = [0; FD_SET_WORDS];
+    let mut k_write:  [u32; FD_SET_WORDS] = [0; FD_SET_WORDS];
+    let mut k_except: [u32; FD_SET_WORDS] = [0; FD_SET_WORDS];
 
     for spec in fd_specs {
         match spec.kind {
@@ -395,8 +328,7 @@ fn fd_translation_handler_impl(
                 origin_pipe_ptr = args[spec.index];
                 origin_pipe_cageid = argcages[spec.index];
                 args[spec.index] = kernel_pipe_vector.as_ptr() as u64;
-                argcages[spec.index] = this_grateid;
-                println!("[fd translate] set up pipe vector arg: ptr=0x{:x}, cageid={}", args[spec.index], argcages[spec.index]);
+                argcages[spec.index] = this_grateid | ARG_TRANSLATE_FLAG;
             }
 
             FdArgKind::SOCKPAIR => {
@@ -409,8 +341,17 @@ fn fd_translation_handler_impl(
 
             FdArgKind::POLLFD => {
                 should_poll = true;
-                pollfds_ptr = args[spec.index] as *mut libc::pollfd;
+                origin_pollfds_ptr = args[spec.index];
                 pollfd_cageid = argcages[spec.index];
+                let mut pollfds_ptr: *mut libc::pollfd = std::ptr::null_mut();
+                
+                let ret = copy_data_between_cages(
+                    this_grateid, pollfd_cageid,
+                    origin_pollfds_ptr, pollfd_cageid,
+                    pollfds_ptr as u64, this_grateid,
+                    4096, 1,
+                );
+                
                 let nfds = args[spec.index + 1] as libc::nfds_t;
 
                 if !pollfds_ptr.is_null() {
@@ -441,91 +382,99 @@ fn fd_translation_handler_impl(
             }
 
             FdArgKind::EPFD => {
-                args[spec.index] = *fdtables::epoll_get_underfd_hashmap(this_grateid, argcages[spec.index])
-                    .unwrap()
-                    .get(&FDKIND_KERNEL)
-                    .unwrap();
-                argcages[spec.index] = this_grateid;
+                let kernel_fd = args[spec.index];
+                let fd_cageid = argcages[spec.index];
+                match translate_fd_arg(fd_cageid, kernel_fd, spec.kind) {
+                    Ok(underfd) => {
+
+                        args[spec.index] = underfd;
+
+                        if syscall_num == SYS_CLOSE {
+                            let _ = fdtables::close_virtualfd(fd_cageid, kernel_fd);
+                        }
+                    }
+
+                    Err(errno_ret) => {
+                        return -(errno_ret as i32);
+                    }
+                }
             }
 
             FdArgKind::SELECTFD => {
                 should_select = true;
 
-                println!("[fd translate] entering select fd translation");
-                let virtual_nfds = args[0] as i32;
-                let set_ptr = args[spec.index] as *mut libc::fd_set;
-                let set_cageid = argcages[spec.index];
+                let nfds = args[0] as i32;
+                select_cageid = argcages[spec.index];
 
-                println!("[fd translate] select fdset arg{}: nfds={}, ptr=0x{:x}, cageid={}", spec.index, virtual_nfds, set_ptr as u64, set_cageid);
+                let mut read_set:   [u32; FD_SET_WORDS] = [0; FD_SET_WORDS];
+                let mut write_set:  [u32; FD_SET_WORDS] = [0; FD_SET_WORDS];
+                let mut except_set: [u32; FD_SET_WORDS] = [0; FD_SET_WORDS];
+                have_r = arg2 != 0;
+                have_w = arg3 != 0;
+                have_e = arg4 != 0;
 
-                match spec.index {
-                    1 => {
-                        readfds_ptr = set_ptr;
-                        match unsafe {
-                            translate_fdset_to_kernel(
-                                set_cageid,
-                                virtual_nfds,
-                                set_ptr,
-                                &mut k_readfds,
-                                &mut read_map,
-                                &mut kernel_nfds,
-                            ) 
-                        } {
-                            Ok(_) => {}
-                            Err(_) => panic!("[default fd] too many fds in readfds"),
-                        }
-                        readfds_cageid = argcages[spec.index];
-                        args[1] = if set_ptr.is_null() { 0 } else { &mut k_readfds as *mut _ as u64 };
-                        argcages[1] = this_grateid;
-                    }
+                v_read = args[1];
+                v_write = args[2];
+                v_except = args[3];
 
-                    2 => {
-                        writefds_ptr = set_ptr;
-                        match unsafe {
-                            translate_fdset_to_kernel(
-                                set_cageid,
-                                virtual_nfds,
-                                set_ptr,
-                                &mut k_writefds,
-                                &mut write_map,
-                                &mut kernel_nfds,
-                            ) 
-                        } {
-                            Ok(_) => {}
-                            Err(_) => panic!("[default fd] too many fds in writefds"),
-                        }
-                        writefds_cageid = argcages[spec.index];
-                        args[2] = if set_ptr.is_null() { 0 } else { &mut k_writefds as *mut _ as u64 };
-                        argcages[2] = this_grateid;
-                    }
-
-                    3 => {
-                        exceptfds_ptr = set_ptr;
-                        match unsafe {
-                            translate_fdset_to_kernel(
-                                set_cageid,
-                                virtual_nfds,
-                                set_ptr,
-                                &mut k_exceptfds,
-                                &mut except_map,
-                                &mut kernel_nfds,
-                            )
-                        } {
-                            Ok(_) => {}
-                            Err(_) => panic!("[default fd] too many fds in exceptfds"),
-                        }
-                        exceptfds_cageid = argcages[spec.index];
-                        args[3] = if set_ptr.is_null() { 0 } else { &mut k_exceptfds as *mut _ as u64 };
-                        argcages[3] = this_grateid;
-                    }
-
-                    _ => {}
+                if have_r {
+                    let _ = copy_data_between_cages(
+                        this_grateid, select_cageid,
+                        args[1], select_cageid,
+                        read_set.as_mut_ptr() as u64, this_grateid,
+                        FD_SET_BYTES as u64, 0,
+                    );
+                }
+                if have_w {
+                    let _ = copy_data_between_cages(
+                        this_grateid, select_cageid,
+                        args[2], select_cageid,
+                        write_set.as_mut_ptr() as u64, this_grateid,
+                        FD_SET_BYTES as u64, 0,
+                    );
+                }
+                if have_e {
+                    let _ = copy_data_between_cages(
+                        this_grateid, select_cageid,
+                        args[3], select_cageid,
+                        except_set.as_mut_ptr() as u64, this_grateid,
+                        FD_SET_BYTES as u64, 0,
+                    );
                 }
 
-                args[0] = kernel_nfds as u64;
-                argcages[0] = this_grateid;
+                for fd in 0..nfds {
+                    let want_r = have_r && fd_isset(fd as usize, &read_set);
+                    let want_w = have_w && fd_isset(fd as usize, &write_set);
+                    let want_e = have_e && fd_isset(fd as usize, &except_set);
+                    if !want_r && !want_w && !want_e { continue; }
 
-                println!("[fd translate] done");
+                    let under = match translate_fd_arg(select_cageid, fd as u64, FdArgKind::Fd) {
+                        Ok(u) => u as usize,
+                        Err(_) => continue,  // unknown fd — drop it
+                    };
+                    if under < FD_SETSIZE {
+                        rev_map[under] = Some(fd as usize);
+                        if under > max_under { max_under = under; }
+                        if want_r { fd_set_bit(under, &mut k_read); }
+                        if want_w { fd_set_bit(under, &mut k_write); }
+                        if want_e { fd_set_bit(under, &mut k_except); }
+                    }
+                }
+
+                let runtime_nfds = if max_under > 0 { (max_under + 1) as u64 } else { arg1 };
+                let r_ptr = if have_r { k_read.as_mut_ptr() as u64 } else { 0 };
+                let w_ptr = if have_w { k_write.as_mut_ptr() as u64 } else { 0 };
+                let e_ptr = if have_e { k_except.as_mut_ptr() as u64 } else { 0 };
+                
+                args[0] = runtime_nfds;
+                args[1] = r_ptr;
+                args[2] = w_ptr;
+                args[3] = e_ptr;
+                
+                let translated_cage = this_grateid | ARG_TRANSLATE_FLAG;
+                argcages[1] = translated_cage;
+                argcages[2] = translated_cage;
+                argcages[3] = translated_cage;
             }
 
             FdArgKind::FLAG => {
@@ -613,12 +562,15 @@ fn fd_translation_handler_impl(
             
         let fds: [i32; 2] = [vsv_1 as i32, vsv_2 as i32];
         
-        let _ = copy_data_between_cages(
+        match copy_data_between_cages(
             this_grateid, origin_pipe_cageid,
             fds.as_ptr() as u64, this_grateid,
             origin_pipe_ptr, origin_pipe_cageid,
             8, 0, // 2 x i32 = 8 bytes
-        );
+        ) {
+            Ok(_) => {}
+            Err(e) => panic!("[fd translate] copy pipe fds back to cage failed: {:?}", e),
+        }
         
         argcages[0] = origin_pipe_cageid;
     }
@@ -633,60 +585,67 @@ fn fd_translation_handler_impl(
         
         let fds: [i32; 2] = [vsv_1 as i32, vsv_2 as i32];
         
-        let _ = copy_data_between_cages(
+        match copy_data_between_cages(
             this_grateid, origin_socket_cageid,
             fds.as_ptr() as u64, this_grateid,
             origin_socket_vector_ptr, origin_socket_cageid,
             8, 0, // 2 x i32 = 8 bytes
-        );
+        ) {
+            Ok(_) => {}
+            Err(e) => panic!("[fd translate] copy socketpair fds back to cage failed: {:?}", e),
+        }
         argcages[0] = origin_socket_cageid;
     }
 
     if should_poll {
-        args[0] = pollfds_ptr as u64;
+        args[0] = origin_pollfds_ptr as u64;
     }
 
     if should_select {
-        unsafe {
-            if let Err(errno) = unsafe {
-                translate_fdset_back_to_virtual(
-                    this_grateid,
-                    readfds_ptr,
-                    readfds_cageid,
-                    &k_readfds,
-                    &read_map,
-                )
-            } {
-                return errno;
-            }
+        let mut out_r: [u32; FD_SET_WORDS] = [0; FD_SET_WORDS];
+        let mut out_w: [u32; FD_SET_WORDS] = [0; FD_SET_WORDS];
+        let mut out_e: [u32; FD_SET_WORDS] = [0; FD_SET_WORDS];
 
-            if let Err(errno) = unsafe {
-                translate_fdset_back_to_virtual(
-                    this_grateid,
-                    writefds_ptr,
-                    writefds_cageid,
-                    &k_writefds,
-                    &write_map,
-                )
-            } {
-                return errno;
+        for under in 0..=max_under {
+            if let Some(grate_fd) = rev_map[under] {
+                if have_r && fd_isset(under, &k_read)   { fd_set_bit(grate_fd, &mut out_r); }
+                if have_w && fd_isset(under, &k_write)  { fd_set_bit(grate_fd, &mut out_w); }
+                if have_e && fd_isset(under, &k_except) { fd_set_bit(grate_fd, &mut out_e); }
             }
+        }
 
-            if let Err(errno) = unsafe {
-                translate_fdset_back_to_virtual(
-                    this_grateid,
-                    exceptfds_ptr,
-                    exceptfds_cageid,
-                    &k_exceptfds,
-                    &except_map,
-                )
-            } {
-                return errno;
+        if have_r {
+            match copy_data_between_cages(
+                this_grateid, select_cageid,
+                out_r.as_ptr() as u64, this_grateid,
+                v_read, select_cageid,
+                FD_SET_BYTES as u64, 0,
+            ) {
+                Ok(_) => {}
+                Err(e) => panic!("[fd translate] copy select out_read back to cage failed: {:?}", e),
             }
-
-            argcages[1] = readfds_cageid;
-            argcages[2] = writefds_cageid;
-            argcages[3] = exceptfds_cageid;
+        }
+        if have_w {
+            match copy_data_between_cages(
+                this_grateid, select_cageid,
+                out_w.as_ptr() as u64, this_grateid,
+                v_write, select_cageid,
+                FD_SET_BYTES as u64, 0,
+            ) {
+                Ok(_) => {}
+                Err(e) => panic!("[fd translate] copy select out_write back to cage failed: {:?}", e),
+            }
+        }
+        if have_e {
+            match copy_data_between_cages(
+                this_grateid, select_cageid,
+                out_e.as_ptr() as u64, this_grateid,
+                v_except, select_cageid,
+                FD_SET_BYTES as u64, 0,
+            ) {
+                Ok(_) => {}
+                Err(e) => panic!("[fd translate] copy select out_except back to cage failed: {:?}", e),
+            }
         }
     }
 
