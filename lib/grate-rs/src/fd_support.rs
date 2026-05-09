@@ -1,4 +1,4 @@
-use crate::{make_threei_call, GrateError, SyscallHandler};
+use crate::{make_threei_call, GrateError, SyscallHandler, copy_data_between_cages};
 use crate::constants::error::{EBADF, ENOSYS, EMFILE};
 use crate::constants::syscall_numbers::*;
 use crate::constants::fs::*;
@@ -8,6 +8,13 @@ use crate::constants::fs::*;
 pub struct SockPair {
     pub sock1: i32,
     pub sock2: i32,
+}
+
+#[derive(Eq, PartialEq, Default, Copy, Clone, Debug)]
+#[repr(C)]
+pub struct PipeArray {
+    pub readfd: i32,
+    pub writefd: i32,
 }
 
 pub const FDKIND_KERNEL: u32 = 1;
@@ -27,6 +34,8 @@ pub enum FdArgKind {
     /// todo: integrate with current logic
     NewFd,
 
+    PIPEFD,
+
     FcntlFd,
 
     SOCKPAIR,
@@ -34,6 +43,8 @@ pub enum FdArgKind {
     POLLFD,
 
     EPFD,
+
+    SELECTFD,
 
     FLAG,
 
@@ -83,11 +94,7 @@ pub const CREATION_FD_1_FLAG_4: &[FdArgSpec] = &[
     FdArgSpec { index: 0, kind: FdArgKind::CREAT },
 ];
 
-pub const CREATION_DIRFD_ARG_1_FLAG: &[FdArgSpec] = &[
-    FdArgSpec { index: 0, kind: FdArgKind::DirFd },
-    FdArgSpec { index: 2, kind: FdArgKind::FLAG },
-    FdArgSpec { index: 0, kind: FdArgKind::CREAT },
-];
+
 
 pub const FD_ARG_1: &[FdArgSpec] = &[
     FdArgSpec { index: 0, kind: FdArgKind::Fd },
@@ -140,6 +147,22 @@ pub const EPOLL_1_FD_3: &[FdArgSpec] = &[
     FdArgSpec { index: 0, kind: FdArgKind::Fd },
 ];
 
+pub const PIPE_FD: &[FdArgSpec] = &[
+    FdArgSpec { index: 0, kind: FdArgKind::PIPEFD },
+];
+
+
+pub const PIPE_FD_FLAG: &[FdArgSpec] = &[
+    FdArgSpec { index: 0, kind: FdArgKind::PIPEFD },
+    FdArgSpec { index: 1, kind: FdArgKind::FLAG },
+];
+
+pub const SELECT_FDS: &[FdArgSpec] = &[
+    FdArgSpec { index: 1, kind: FdArgKind::SELECTFD }, // readfds
+    FdArgSpec { index: 2, kind: FdArgKind::SELECTFD }, // writefds
+    FdArgSpec { index: 3, kind: FdArgKind::SELECTFD }, // exceptfds
+];
+
 const AT_FDCWD_U64: u64 = (-100i64) as u64;
 
 fn translate_fd_arg(cageid: u64, arg: u64, kind: FdArgKind) -> Result<u64, u64> {
@@ -152,6 +175,78 @@ fn translate_fd_arg(cageid: u64, arg: u64, kind: FdArgKind) -> Result<u64, u64> 
         Err(_) => {
             Err(EBADF as u64)
         }
+    }
+}
+
+unsafe fn translate_fdset_to_kernel(
+    cageid: u64,
+    virtual_nfds: i32,
+    virtual_set_ptr: *const libc::fd_set,
+    kernel_set: *mut libc::fd_set,
+    mappings: &mut Vec<(i32, i32)>, // (virtual_fd, kernel_fd)
+    kernel_nfds: &mut i32,
+) -> Result<(), i32> {
+    if virtual_set_ptr.is_null() {
+        return Ok(());
+    }
+
+    libc::FD_ZERO(kernel_set);
+
+    for vfd in 0..virtual_nfds {
+        if libc::FD_ISSET(vfd, virtual_set_ptr) {
+            let entry = fdtables::translate_virtual_fd(cageid, vfd as u64)
+                .map_err(|_| -(EBADF as i32))?;
+
+            let kfd = entry.underfd as i32;
+            libc::FD_SET(kfd, kernel_set);
+
+            if kfd + 1 > *kernel_nfds {
+                *kernel_nfds = kfd + 1;
+            }
+
+            mappings.push((vfd, kfd));
+        }
+    }
+
+    Ok(())
+}
+
+unsafe fn translate_fdset_back_to_virtual(
+    this_grateid: u64,
+    virtual_set_ptr: *mut libc::fd_set,
+    virtual_set_cageid: u64,
+    kernel_set: *const libc::fd_set,
+    mappings: &[(i32, i32)],
+) -> Result<(), i32> {
+    if virtual_set_ptr.is_null() {
+        return Ok(());
+    }
+
+    let mut virtual_result_set: libc::fd_set = std::mem::zeroed();
+    libc::FD_ZERO(&mut virtual_result_set);
+
+    for &(vfd, kfd) in mappings {
+        if libc::FD_ISSET(kfd, kernel_set) {
+            libc::FD_SET(vfd, &mut virtual_result_set);
+        }
+    }
+
+    let srcaddr = &virtual_result_set as *const libc::fd_set as u64;
+    let destaddr = virtual_set_ptr as u64;
+    let len = std::mem::size_of::<libc::fd_set>() as u64;
+
+    match copy_data_between_cages(
+        this_grateid,
+        virtual_set_cageid,
+        srcaddr,
+        this_grateid,
+        destaddr,
+        virtual_set_cageid,
+        len,
+        /* copytype */ 0,
+    ) {
+        Ok(_) => Ok(()),
+        Err(e) => panic!("copy_data_between_cages failed: {:?}", e),
     }
 }
 
@@ -180,6 +275,7 @@ fn fd_translation_handler_impl(
     let mut should_cloexec = false;
     let mut should_socketpair = false;
     let mut should_poll = false;
+    let mut should_pipe = false;
 
     let mut old_fd_entry = fdtables::FDTableEntry {
         fdkind: 0,
@@ -194,11 +290,36 @@ fn fd_translation_handler_impl(
 
     let mut should_dup2 = false;
 
+    let mut origin_pipe_ptr: u64 = 0;
+    let mut origin_pipe_cageid: u64 = 0;
+    let mut kernel_pipe_vector: [i32; 2] = [0, 0];
+
     let mut origin_socket_vector_ptr: u64 = 0;
+    let mut origin_socket_cageid: u64 = 0;
     let mut kernel_socket_vector: [i32; 2] = [0, 0];
 
     let mut pollfds_ptr: *mut libc::pollfd = std::ptr::null_mut();
     let mut pollfd_cageid: u64 = 0;
+
+    let mut should_select = false;
+
+    let mut readfds_ptr: *mut libc::fd_set = std::ptr::null_mut();
+    let mut writefds_ptr: *mut libc::fd_set = std::ptr::null_mut();
+    let mut exceptfds_ptr: *mut libc::fd_set = std::ptr::null_mut();
+
+    let mut k_readfds: libc::fd_set = unsafe { std::mem::zeroed() };
+    let mut k_writefds: libc::fd_set = unsafe { std::mem::zeroed() };
+    let mut k_exceptfds: libc::fd_set = unsafe { std::mem::zeroed() };
+
+    let mut read_map = Vec::new();
+    let mut write_map = Vec::new();
+    let mut except_map = Vec::new();
+    let mut kernel_nfds: i32 = 0;
+
+    let mut readfds_cageid: u64 = 0;
+    let mut writefds_cageid: u64 = 0;
+    let mut exceptfds_cageid: u64 = 0;
+
 
     for spec in fd_specs {
         match spec.kind {
@@ -269,9 +390,19 @@ fn fd_translation_handler_impl(
                 }
             }
 
+            FdArgKind::PIPEFD => {
+                should_pipe = true;
+                origin_pipe_ptr = args[spec.index];
+                origin_pipe_cageid = argcages[spec.index];
+                args[spec.index] = kernel_pipe_vector.as_ptr() as u64;
+                argcages[spec.index] = this_grateid;
+                println!("[fd translate] set up pipe vector arg: ptr=0x{:x}, cageid={}", args[spec.index], argcages[spec.index]);
+            }
+
             FdArgKind::SOCKPAIR => {
                 should_socketpair = true;
                 origin_socket_vector_ptr = args[spec.index];
+                origin_socket_cageid = argcages[spec.index];
                 args[spec.index] = kernel_socket_vector.as_ptr() as u64;
                 argcages[spec.index] = this_grateid;
             }
@@ -315,6 +446,86 @@ fn fd_translation_handler_impl(
                     .get(&FDKIND_KERNEL)
                     .unwrap();
                 argcages[spec.index] = this_grateid;
+            }
+
+            FdArgKind::SELECTFD => {
+                should_select = true;
+
+                println!("[fd translate] entering select fd translation");
+                let virtual_nfds = args[0] as i32;
+                let set_ptr = args[spec.index] as *mut libc::fd_set;
+                let set_cageid = argcages[spec.index];
+
+                println!("[fd translate] select fdset arg{}: nfds={}, ptr=0x{:x}, cageid={}", spec.index, virtual_nfds, set_ptr as u64, set_cageid);
+
+                match spec.index {
+                    1 => {
+                        readfds_ptr = set_ptr;
+                        match unsafe {
+                            translate_fdset_to_kernel(
+                                set_cageid,
+                                virtual_nfds,
+                                set_ptr,
+                                &mut k_readfds,
+                                &mut read_map,
+                                &mut kernel_nfds,
+                            ) 
+                        } {
+                            Ok(_) => {}
+                            Err(_) => panic!("[default fd] too many fds in readfds"),
+                        }
+                        readfds_cageid = argcages[spec.index];
+                        args[1] = if set_ptr.is_null() { 0 } else { &mut k_readfds as *mut _ as u64 };
+                        argcages[1] = this_grateid;
+                    }
+
+                    2 => {
+                        writefds_ptr = set_ptr;
+                        match unsafe {
+                            translate_fdset_to_kernel(
+                                set_cageid,
+                                virtual_nfds,
+                                set_ptr,
+                                &mut k_writefds,
+                                &mut write_map,
+                                &mut kernel_nfds,
+                            ) 
+                        } {
+                            Ok(_) => {}
+                            Err(_) => panic!("[default fd] too many fds in writefds"),
+                        }
+                        writefds_cageid = argcages[spec.index];
+                        args[2] = if set_ptr.is_null() { 0 } else { &mut k_writefds as *mut _ as u64 };
+                        argcages[2] = this_grateid;
+                    }
+
+                    3 => {
+                        exceptfds_ptr = set_ptr;
+                        match unsafe {
+                            translate_fdset_to_kernel(
+                                set_cageid,
+                                virtual_nfds,
+                                set_ptr,
+                                &mut k_exceptfds,
+                                &mut except_map,
+                                &mut kernel_nfds,
+                            )
+                        } {
+                            Ok(_) => {}
+                            Err(_) => panic!("[default fd] too many fds in exceptfds"),
+                        }
+                        exceptfds_cageid = argcages[spec.index];
+                        args[3] = if set_ptr.is_null() { 0 } else { &mut k_exceptfds as *mut _ as u64 };
+                        argcages[3] = this_grateid;
+                    }
+
+                    _ => {}
+                }
+
+                args[0] = kernel_nfds as u64;
+                argcages[0] = this_grateid;
+
+                println!("[fd translate] done");
             }
 
             FdArgKind::FLAG => {
@@ -392,6 +603,26 @@ fn fd_translation_handler_impl(
         };
     }
 
+    if should_pipe {
+        let ksv_1 = kernel_pipe_vector[0];
+        let ksv_2 = kernel_pipe_vector[1];
+        let vsv_1 =
+            fdtables::get_unused_virtual_fd(origin_pipe_cageid, FDKIND_KERNEL, ksv_1 as u64, should_cloexec, 0).unwrap();
+        let vsv_2 =
+            fdtables::get_unused_virtual_fd(origin_pipe_cageid, FDKIND_KERNEL, ksv_2 as u64, should_cloexec, 0).unwrap();
+            
+        let fds: [i32; 2] = [vsv_1 as i32, vsv_2 as i32];
+        
+        let _ = copy_data_between_cages(
+            this_grateid, origin_pipe_cageid,
+            fds.as_ptr() as u64, this_grateid,
+            origin_pipe_ptr, origin_pipe_cageid,
+            8, 0, // 2 x i32 = 8 bytes
+        );
+        
+        argcages[0] = origin_pipe_cageid;
+    }
+
     if should_socketpair {
         let ksv_1 = kernel_socket_vector[0];
         let ksv_2 = kernel_socket_vector[1];
@@ -399,15 +630,64 @@ fn fd_translation_handler_impl(
             fdtables::get_unused_virtual_fd(arg1cage, FDKIND_KERNEL, ksv_1 as u64, should_cloexec, 0).unwrap();
         let vsv_2 =
             fdtables::get_unused_virtual_fd(arg1cage, FDKIND_KERNEL, ksv_2 as u64, should_cloexec, 0).unwrap();
-        let virtual_socket_vector = origin_socket_vector_ptr as *mut SockPair;
-        unsafe {
-            (*virtual_socket_vector).sock1 = vsv_1 as i32;
-            (*virtual_socket_vector).sock2 = vsv_2 as i32;
-        }
+        
+        let fds: [i32; 2] = [vsv_1 as i32, vsv_2 as i32];
+        
+        let _ = copy_data_between_cages(
+            this_grateid, origin_socket_cageid,
+            fds.as_ptr() as u64, this_grateid,
+            origin_socket_vector_ptr, origin_socket_cageid,
+            8, 0, // 2 x i32 = 8 bytes
+        );
+        argcages[0] = origin_socket_cageid;
     }
 
     if should_poll {
         args[0] = pollfds_ptr as u64;
+    }
+
+    if should_select {
+        unsafe {
+            if let Err(errno) = unsafe {
+                translate_fdset_back_to_virtual(
+                    this_grateid,
+                    readfds_ptr,
+                    readfds_cageid,
+                    &k_readfds,
+                    &read_map,
+                )
+            } {
+                return errno;
+            }
+
+            if let Err(errno) = unsafe {
+                translate_fdset_back_to_virtual(
+                    this_grateid,
+                    writefds_ptr,
+                    writefds_cageid,
+                    &k_writefds,
+                    &write_map,
+                )
+            } {
+                return errno;
+            }
+
+            if let Err(errno) = unsafe {
+                translate_fdset_back_to_virtual(
+                    this_grateid,
+                    exceptfds_ptr,
+                    exceptfds_cageid,
+                    &k_exceptfds,
+                    &except_map,
+                )
+            } {
+                return errno;
+            }
+
+            argcages[1] = readfds_cageid;
+            argcages[2] = writefds_cageid;
+            argcages[3] = exceptfds_cageid;
+        }
     }
 
     ret
@@ -498,7 +778,9 @@ macro_rules! define_fd_creation_handler {
 }
 
 define_fd_handler!(fd_read_handler, SYS_READ, FD_ARG_1);
+define_fd_handler!(fd_preadv_handler, SYS_PREADV, FD_ARG_1);
 define_fd_handler!(fd_write_handler, SYS_WRITE, FD_ARG_1);
+define_fd_handler!(fd_pwritev_handler, SYS_PWRITEV, FD_ARG_1);
 define_fd_handler!(fd_close_handler, SYS_CLOSE, FD_ARG_1);
 define_fd_handler!(fd_lseek_handler, SYS_LSEEK, FD_ARG_1);
 define_fd_handler!(fd_ioctl_handler, SYS_IOCTL, FD_ARG_1);
@@ -507,6 +789,7 @@ define_fd_handler!(fd_fsync_handler, SYS_FSYNC, FD_ARG_1);
 define_fd_handler!(fd_fdatasync_handler, SYS_FDATASYNC, FD_ARG_1);
 define_fd_handler!(fd_ftruncate_handler, SYS_FTRUNCATE, FD_ARG_1);
 define_fd_handler!(fd_flock_handler, SYS_FLOCK, FD_ARG_1);
+define_fd_handler!(fd_fchmod_handler, SYS_FCHMOD, FD_ARG_1);
 define_fd_handler!(fd_fchdir_handler, SYS_FCHDIR, FD_ARG_1);
 define_fd_handler!(fd_getdents_handler, SYS_GETDENTS, FD_ARG_1);
 define_fd_handler!(fd_fstatfs_handler, SYS_FSTATFS, FD_ARG_1);
@@ -538,7 +821,7 @@ define_fd_handler!(fd_readlinkat_handler, SYS_READLINKAT, DIRFD_ARG_1);
 define_fd_handler!(fd_access_handler, SYS_ACCESS, DIRFD_ARG_1);
 
 define_fd_handler!(fd_open_handler, SYS_OPEN, CREATION_FLAG_2);
-define_fd_handler!(fd_openat_handler, SYS_OPENAT, CREATION_DIRFD_ARG_1_FLAG);
+define_fd_handler!(fd_openat_handler, SYS_OPENAT, CREATION_DIRFD_1_FLAG_3);
 define_fd_handler!(fd_dup_handler, SYS_DUP, CREATION_FD_1);
 define_fd_handler!(fd_dup2_handler, SYS_DUP2, OLD_FD_1_NEW_FD_2);
 define_fd_handler!(fd_dup3_handler, SYS_DUP3, OLD_FD_1_NEW_FD_2_FLAG);
@@ -551,11 +834,18 @@ define_fd_handler!(fd_socketpair_handler, SYS_SOCKETPAIR, SOCKPAIR);
 define_fd_handler!(fd_epoll_create_handler, SYS_EPOLL_CREATE, CREATION);
 define_fd_handler!(fd_epoll_create1_handler, SYS_EPOLL_CREATE1, CREATION_FLAG_1);
 
+define_fd_handler!(fd_pipe_handler, SYS_PIPE, PIPE_FD);
+define_fd_handler!(fd_pipe2_handler, SYS_PIPE2, PIPE_FD_FLAG);
+define_fd_handler!(fd_poll_handler, SYS_POLL, POLL_1);
+define_fd_handler!(fd_ppoll_handler, SYS_PPOLL, POLL_1);
 define_fd_handler!(fd_epoll_ctl_handler, SYS_EPOLL_CTL, EPOLL_1_FD_3);
+define_fd_handler!(fd_select_handler, SYS_SELECT, SELECT_FDS);
 
 pub const FD_HANDLER_TABLE: &[(u64, SyscallHandler)] = &[
     (SYS_READ, fd_read_handler as SyscallHandler),
+    (SYS_PREADV, fd_preadv_handler as SyscallHandler),
     (SYS_WRITE, fd_write_handler as SyscallHandler),
+    (SYS_PWRITEV, fd_pwritev_handler as SyscallHandler),
     (SYS_CLOSE, fd_close_handler as SyscallHandler),
     (SYS_LSEEK, fd_lseek_handler as SyscallHandler),
     (SYS_IOCTL, fd_ioctl_handler as SyscallHandler),
@@ -564,6 +854,7 @@ pub const FD_HANDLER_TABLE: &[(u64, SyscallHandler)] = &[
     (SYS_FDATASYNC, fd_fdatasync_handler as SyscallHandler),
     (SYS_FTRUNCATE, fd_ftruncate_handler as SyscallHandler),
     (SYS_FLOCK, fd_flock_handler as SyscallHandler),
+    (SYS_FCHMOD, fd_fchmod_handler as SyscallHandler),
     (SYS_FCHDIR, fd_fchdir_handler as SyscallHandler),
     (SYS_GETDENTS, fd_getdents_handler as SyscallHandler),
     (SYS_FSTATFS, fd_fstatfs_handler as SyscallHandler),
@@ -609,5 +900,10 @@ pub const FD_HANDLER_TABLE: &[(u64, SyscallHandler)] = &[
     (SYS_EPOLL_CREATE, fd_epoll_create_handler as SyscallHandler),
     (SYS_EPOLL_CREATE1, fd_epoll_create1_handler as SyscallHandler),
 
+    (SYS_PIPE, fd_pipe_handler as SyscallHandler),
+    (SYS_PIPE2, fd_pipe2_handler as SyscallHandler),
+    (SYS_POLL, fd_poll_handler as SyscallHandler),
+    (SYS_PPOLL, fd_ppoll_handler as SyscallHandler),
     (SYS_EPOLL_CTL, fd_epoll_ctl_handler as SyscallHandler),
+    (SYS_SELECT, fd_select_handler as SyscallHandler),
 ];
