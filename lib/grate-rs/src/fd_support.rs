@@ -835,12 +835,9 @@ pub const FD_HANDLER_TABLE: &[(u64, SyscallHandler)] = &[
     (SYS_GETPEERNAME, fd_getpeername_handler as SyscallHandler),
     (SYS_EPOLL_WAIT, fd_epoll_wait_handler as SyscallHandler),
     
-    (SYS_MKDIR, fd_mkdir_handler as SyscallHandler),
-    (SYS_MKNOD, fd_mknod_handler as SyscallHandler),
     (SYS_UNLINKAT, fd_unlinkat_handler as SyscallHandler),
     (SYS_SYMLINKAT, fd_symlinkat_handler as SyscallHandler),
     (SYS_READLINKAT, fd_readlinkat_handler as SyscallHandler),
-    (SYS_ACCESS, fd_access_handler as SyscallHandler),
 
     (SYS_OPEN, fd_open_handler as SyscallHandler),
     (SYS_OPENAT, fd_openat_handler as SyscallHandler),
