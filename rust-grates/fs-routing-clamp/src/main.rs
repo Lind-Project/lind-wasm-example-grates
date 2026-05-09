@@ -184,6 +184,11 @@ fn main() {
     helpers::register_clamped_cage(child_cage_id);
     fdtables::init_empty_cage(child_cage_id);
 
+    // Register stdin/out/err for the child cage.
+    for fd in 0..3u64 {
+        let _ = fdtables::get_specific_virtual_fd(child_cage_id, fd, 0, fd, false, 0);
+    }
+
     // Register lifecycle handlers on the child cage.
     handlers::register_lifecycle_handlers(child_cage_id);
 
