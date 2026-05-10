@@ -1196,6 +1196,91 @@ pub extern "C" fn fsync_handler(
 }
 
 // =====================================================================
+//  mmap (syscall 9)
+//
+//  arg1 = addr, arg2 = len, arg3 = prot, arg4 = flags,
+//  arg5 = fd, arg6 = offset.
+//
+//  Only RegMapped imfs files are handled here.  Anonymous mappings
+//  (fd == -1 or MAP_ANONYMOUS in flags) and mappings of non-RegMapped
+//  fds are forwarded straight to RawPOSIX — imfs has nothing useful
+//  to add for those.
+// =====================================================================
+
+pub extern "C" fn mmap_handler(
+    _cageid: u64,
+    arg1: u64, arg1cage: u64,    // addr
+    arg2: u64, _arg2cage: u64,   // len
+    arg3: u64, _arg3cage: u64,   // prot
+    arg4: u64, _arg4cage: u64,   // flags
+    arg5: u64, _arg5cage: u64,   // fd
+    arg6: u64, _arg6cage: u64,   // offset
+) -> i32 {
+    let cage_id = arg1cage;
+
+    let ret = imfs::with_imfs(|state| {
+        state.mmap(
+            cage_id,
+            arg1,
+            arg2 as usize,
+            arg3 as i32,
+            arg4 as i32,
+            arg5,
+            arg6,
+        )
+    });
+
+    // imfs::mmap returns -ENOSYS when the request isn't ours to
+    // handle (anonymous, or a non-RegMapped fd) — forward to
+    // RawPOSIX in that case so the cage sees normal mmap semantics.
+    if ret == -(grate_rs::constants::error::ENOSYS as i32) {
+        let thiscage = getcageid();
+        return match make_threei_call(
+            SYS_MMAP as u32,
+            0,
+            thiscage,
+            cage_id,
+            arg1, arg1cage,
+            arg2, _arg2cage,
+            arg3, _arg3cage,
+            arg4, _arg4cage,
+            arg5, _arg5cage,
+            arg6, _arg6cage,
+            0,
+        ) {
+            Ok(v) => v,
+            Err(grate_rs::GrateError::MakeSyscallError(n)) => n,
+            Err(_) => -(grate_rs::constants::error::ENOMEM as i32),
+        };
+    }
+
+    ret
+}
+
+// =====================================================================
+//  munmap (syscall 11)
+//
+//  arg1 = addr, arg2 = len.
+//
+//  Always forwards to RawPOSIX (so the cage's vmmap entry is torn
+//  down properly).  If the address corresponds to a live imfs
+//  RegMapped mapping, also decrements that node's mmap_refs counter
+//  so the region can be grown / freed later.
+// =====================================================================
+
+pub extern "C" fn munmap_handler(
+    _cageid: u64,
+    arg1: u64, arg1cage: u64,
+    arg2: u64, _arg2cage: u64,
+    _arg3: u64, _arg3cage: u64,
+    _arg4: u64, _arg4cage: u64,
+    _arg5: u64, _arg5cage: u64,
+    _arg6: u64, _arg6cage: u64,
+) -> i32 {
+    imfs::with_imfs(|state| state.munmap(arg1cage, arg1, arg2 as usize))
+}
+
+// =====================================================================
 //  fork (syscall 57)
 //
 //  Forward the fork, then clone the fdtables and offset state for the

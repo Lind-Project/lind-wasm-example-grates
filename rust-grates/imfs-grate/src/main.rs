@@ -96,6 +96,8 @@ fn main() {
         .register(SYS_STATFS, handlers::enosys_handler)
         .register(SYS_FSTATFS, handlers::enosys_handler)
         .register(SYS_SYNC_FILE_RANGE, handlers::enosys_handler)
+        .register(SYS_MMAP, handlers::mmap_handler)
+        .register(SYS_MUNMAP, handlers::munmap_handler)
         .preexec(|cageid: i32| {
             imfs::with_imfs(|s| {
                 s.cwd_info.insert(cageid as u64, "/".to_string());

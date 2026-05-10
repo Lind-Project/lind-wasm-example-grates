@@ -22,6 +22,11 @@ use grate_rs::constants::mman::{MAP_ANON, MAP_SHARED, PROT_READ, PROT_WRITE};
 use grate_rs::constants::{SYS_MMAP, SYS_MUNMAP};
 use grate_rs::{getcageid, make_threei_call};
 
+/// Linux `MAP_FIXED`.  Not (yet) re-exported from
+/// `grate_rs::constants::mman`; defined locally to keep the imfs
+/// mmap path self-contained.
+const MAP_FIXED: i32 = 0x10;
+
 /// fdtables fdkind for IMFS file descriptors.
 pub const IMFS_FDKIND: u32 = 1;
 
@@ -61,6 +66,15 @@ pub struct ImfsState {
 
     /// List of current working directories for each cage.
     pub cwd_info: HashMap<u64, String>,
+
+    /// Live cage-side mappings of RegMapped files.
+    ///
+    /// Keyed on `(cage_id, cage_vaddr)` because that's what `munmap`
+    /// receives.  Value is `(node_idx, len)` so we know which
+    /// `mmap_refs` to decrement and how much to forward to RawPOSIX
+    /// for the actual unmap.  Entries are inserted by the mmap
+    /// handler and removed by munmap; nothing else touches them.
+    pub mmap_tracking: HashMap<(u64, u64), (usize, usize)>,
 }
 
 /// Initialize the global IMFS. Called once at startup.
@@ -73,6 +87,7 @@ pub fn init() {
         root_idx: 0,
         fd_info: HashMap::new(),
         cwd_info: HashMap::new(),
+        mmap_tracking: HashMap::new(),
     };
 
     state.cwd_info.insert(0, "/".to_string());
@@ -124,7 +139,7 @@ impl ImfsState {
 
         match self.nodes[idx].node_type {
             NodeType::Dir => DT_DIR,
-            NodeType::Reg => DT_REG,
+            NodeType::Reg | NodeType::RegMapped => DT_REG,
             NodeType::Lnk => DT_LNK,
             _ => DT_UNKNOWN,
         }
@@ -585,8 +600,10 @@ impl ImfsState {
                 _ => {}
             }
 
-            if self.nodes[idx].node_type == NodeType::Reg
-                && (flags & O_TRUNC) != 0
+            if matches!(
+                self.nodes[idx].node_type,
+                NodeType::Reg | NodeType::RegMapped
+            ) && (flags & O_TRUNC) != 0
                 && (flags & O_ACCMODE) != O_RDONLY
             {
                 self.nodes[idx].total_size = 0;
@@ -1517,7 +1534,7 @@ impl ImfsState {
         };
 
         match self.nodes[node_idx].node_type {
-            NodeType::Reg => {}
+            NodeType::Reg | NodeType::RegMapped => {}
             NodeType::Dir => return -21, // EISDIR
             _ => return -22,             // EINVAL
         }
@@ -1544,7 +1561,7 @@ impl ImfsState {
         }
 
         match self.nodes[node_idx].node_type {
-            NodeType::Reg => {}
+            NodeType::Reg | NodeType::RegMapped => {}
             NodeType::Dir => return -21, // EISDIR
             _ => return -22,             // EINVAL
         }
@@ -1554,6 +1571,147 @@ impl ImfsState {
         self.update_ctime(node_idx);
 
         0
+    }
+
+    /// mmap: map a RegMapped imfs file into the calling cage's vmmap.
+    ///
+    /// imfs only handles mmap for `RegMapped` nodes; the host pages
+    /// allocated by `ensure_mapped_backing` are aliased into the
+    /// cage's address space via a follow-up `make_threei_call(SYS_MMAP)`
+    /// with `MAP_FIXED | MAP_ANONYMOUS | MAP_SHARED` at the imfs
+    /// region's host address.  Because the cage's mapping ends up
+    /// pointing at the same physical pages as the imfs grate's
+    /// region, MAP_SHARED semantics across cages are preserved by
+    /// the host kernel — no per-cage copy.
+    ///
+    /// Returns the address the cage should see (i.e. the host_addr,
+    /// which is a valid wasm pointer in the cage thanks to
+    /// MAP_FIXED), or a negative errno on failure.
+    pub fn mmap(
+        &mut self,
+        cage_id: u64,
+        addr: u64,
+        len: usize,
+        prot: i32,
+        flags: i32,
+        fd: u64,
+        offset: u64,
+    ) -> i32 {
+        // Refuse non-fd-backed mmaps here — anonymous mappings are
+        // RawPOSIX's job, not ours.  The fd-routing layer should
+        // already ensure those don't reach us, but be defensive.
+        const MAP_ANON_BIT: i32 = MAP_ANON;
+        if (flags & MAP_ANON_BIT) != 0 || fd == u64::MAX {
+            // Let caller (the handler) forward to RawPOSIX.
+            return -(grate_rs::constants::error::ENOSYS as i32);
+        }
+
+        // Look up the fd → node.
+        let entry = match fdtables::translate_virtual_fd(cage_id, fd) {
+            Ok(e) => e,
+            Err(_) => return -9, // EBADF
+        };
+        let node_idx = entry.underfd as usize;
+        if node_idx >= self.nodes.len() {
+            return -9;
+        }
+
+        // Only RegMapped is mappable from imfs.  Plain Reg uses the
+        // chunk-chain backing which is not contiguous and can't be
+        // aliased into a cage's vmmap.
+        match &self.nodes[node_idx].info {
+            NodeInfo::RegMapped { .. } => {}
+            _ => return -(grate_rs::constants::error::ENODEV as i32),
+        }
+
+        // Make sure the host region covers offset+len.
+        let end = (offset as usize).saturating_add(len);
+        if let Err(e) = self.ensure_mapped_backing(node_idx, end) {
+            return -(e);
+        }
+
+        // Re-read host_addr after the mutable helper.
+        let host_addr = match &self.nodes[node_idx].info {
+            NodeInfo::RegMapped { host_addr, .. } => *host_addr,
+            _ => return -22,
+        };
+        if host_addr == 0 {
+            return -(grate_rs::constants::error::ENOMEM as i32);
+        }
+
+        // Alias the host pages into the cage's vmmap via
+        // make_threei_call(SYS_MMAP) with MAP_FIXED at host_addr+off.
+        // We deliberately ignore the caller's `addr` hint — postgres
+        // and most callers pass NULL anyway, and MAP_FIXED with a
+        // host-resident address is what makes the cage's mapping
+        // share physical pages with the imfs region.
+        let target_addr = host_addr + offset;
+        let thiscage = getcageid();
+        let ret = make_threei_call(
+            SYS_MMAP as u32,
+            0,
+            thiscage,
+            cage_id,
+            target_addr, 0,
+            len as u64, 0,
+            prot as u64, 0,
+            (flags | MAP_FIXED) as u64, 0,
+            u64::MAX, 0,
+            0, 0,
+            0,
+        );
+        let mapped = match ret {
+            Ok(v) if v >= 0 => v as u32 as u64,
+            Ok(v) => return v,                 // propagate kernel -errno
+            Err(grate_rs::GrateError::MakeSyscallError(n)) => return n,
+            Err(_) => return -(grate_rs::constants::error::ENOMEM as i32),
+        };
+
+        // Bump refs and record the live mapping so munmap can find
+        // it.  Use the address RawPOSIX actually returned (== target_addr
+        // for MAP_FIXED, but defensive).
+        if let NodeInfo::RegMapped { mmap_refs, .. } = &mut self.nodes[node_idx].info {
+            *mmap_refs = mmap_refs.saturating_add(1);
+        }
+        self.mmap_tracking.insert((cage_id, mapped), (node_idx, len));
+
+        mapped as i32
+    }
+
+    /// munmap: drop a cage-side mapping previously created by
+    /// `mmap`.  Decrements `mmap_refs` on the underlying RegMapped
+    /// node and forwards the actual unmap to RawPOSIX.  For
+    /// addresses we don't track (kernel-fd mappings, etc.) the
+    /// caller forwards directly without consulting imfs.
+    pub fn munmap(&mut self, cage_id: u64, addr: u64, len: usize) -> i32 {
+        let tracked = self.mmap_tracking.remove(&(cage_id, addr));
+
+        // Always forward the unmap to RawPOSIX so the cage's vmmap
+        // entry is actually torn down, regardless of whether we were
+        // tracking it.
+        let thiscage = getcageid();
+        let ret = make_threei_call(
+            SYS_MUNMAP as u32,
+            0,
+            thiscage,
+            cage_id,
+            addr, 0,
+            len as u64, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0,
+        );
+
+        if let Some((node_idx, _)) = tracked {
+            if let NodeInfo::RegMapped { mmap_refs, .. } = &mut self.nodes[node_idx].info {
+                *mmap_refs = mmap_refs.saturating_sub(1);
+            }
+        }
+
+        match ret {
+            Ok(v) => v,
+            Err(grate_rs::GrateError::MakeSyscallError(n)) => n,
+            Err(_) => -22,
+        }
     }
 
     /// mkdir: create a directory.
