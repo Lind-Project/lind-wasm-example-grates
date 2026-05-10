@@ -662,6 +662,22 @@ impl ImfsState {
         }
 
         let count = buf.len().min(node.total_size - offset);
+
+        // Host-mapped fast path: bytes live contiguously at host_addr,
+        // so this is a single memcpy out of the mapping.  No chunk
+        // walk, no skip loop.
+        if let NodeInfo::RegMapped { host_addr, .. } = &node.info {
+            let src = (*host_addr as *const u8).wrapping_add(offset);
+            // SAFETY: offset+count is bounded by total_size, which is
+            // bounded by capacity (set by ensure_mapped_backing); the
+            // region is owned by this grate for the lifetime of the
+            // node.
+            unsafe {
+                core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), count);
+            }
+            return count;
+        }
+
         let head = match &node.info {
             NodeInfo::Reg { head, .. } => *head,
             _ => return 0,
@@ -704,6 +720,36 @@ impl ImfsState {
     fn write_to_node(&mut self, node_idx: usize, offset: usize, buf: &[u8]) -> usize {
         if buf.is_empty() {
             return 0;
+        }
+
+        // Host-mapped fast path: ensure the mapping covers offset+len,
+        // then memcpy directly.  Any hole between the existing
+        // total_size and offset is automatically zero — anonymous
+        // mappings start zeroed and we only ever grow, never reuse.
+        if matches!(self.nodes[node_idx].info, NodeInfo::RegMapped { .. }) {
+            let end = offset + buf.len();
+            if let Err(_e) = self.ensure_mapped_backing(node_idx, end) {
+                // Either EBUSY (cages still mapped, can't grow) or
+                // ENOMEM.  Caller layer translates `0` written into
+                // ENOSPC on short writes; that's the right shape for
+                // our callers today.
+                return 0;
+            }
+            // Re-borrow after the mutable helper call.
+            let host_addr = match &self.nodes[node_idx].info {
+                NodeInfo::RegMapped { host_addr, .. } => *host_addr,
+                _ => return 0,
+            };
+            let dst = (host_addr as *mut u8).wrapping_add(offset);
+            // SAFETY: end <= capacity (just ensured); region is owned
+            // by this grate.
+            unsafe {
+                core::ptr::copy_nonoverlapping(buf.as_ptr(), dst, buf.len());
+            }
+            if end > self.nodes[node_idx].total_size {
+                self.nodes[node_idx].total_size = end;
+            }
+            return buf.len();
         }
 
         let mut chunk_idx = match &self.nodes[node_idx].info {
@@ -778,6 +824,23 @@ impl ImfsState {
         let old_size = self.nodes[node_idx].total_size;
 
         if new_size == old_size {
+            return;
+        }
+
+        // Host-mapped path: grow → ensure_mapped_backing (which may
+        // fail with EBUSY if mappings are live; we swallow the error
+        // here and leave size unchanged, matching how the chunk path
+        // silently no-ops on alloc failure).  Shrink → just update
+        // total_size; the bytes past total_size are inaccessible via
+        // read_from_node and any cage mappings stay valid since we
+        // don't unmap the underlying region.
+        if matches!(self.nodes[node_idx].info, NodeInfo::RegMapped { .. }) {
+            if new_size > old_size {
+                if self.ensure_mapped_backing(node_idx, new_size).is_err() {
+                    return;
+                }
+            }
+            self.nodes[node_idx].total_size = new_size;
             return;
         }
 
