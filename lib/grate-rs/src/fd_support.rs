@@ -401,7 +401,6 @@ fn fd_translation_handler_impl(
             }
 
             FdArgKind::SELECTFD => {
-                
                 should_select = true;
 
                 let nfds = args[0] as i32;
@@ -417,7 +416,7 @@ fn fd_translation_handler_impl(
                 v_read = args[1];
                 v_write = args[2];
                 v_except = args[3];
-                // println!("enter select handler cageid={}, have_r={}, have_w={}, have_e={}", argcages[spec.index], have_r, have_w, have_e);
+                
                 if have_r {
                     let _ = copy_data_between_cages(
                         this_grateid, select_cageid,
