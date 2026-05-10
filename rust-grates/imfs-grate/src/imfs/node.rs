@@ -16,8 +16,13 @@ pub const _GET_DEV: u64 = 1;
 /// The type of a filesystem node.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum NodeType {
-    /// Regular file.
+    /// Regular file (chunk-chain storage).
     Reg,
+    /// Regular file with host-mmap'd contiguous backing — for files
+    /// that will be `mmap`'d into one or more cages.  Stat reports
+    /// this as a regular file (`S_IFREG`); the distinction is purely
+    /// about how imfs stores the bytes.
+    RegMapped,
     /// Directory.
     Dir,
     /// Symbolic link.
@@ -59,6 +64,36 @@ pub enum NodeInfo {
     Reg {
         head: Option<usize>,
         tail: Option<usize>,
+    },
+    /// Regular file backed by a single contiguous host page range.
+    ///
+    /// Distinct from `Reg`: the storage isn't a chunk chain in the
+    /// grate's arena, it's an actual host mmap'd region.  Created
+    /// when the file is expected to be mapped into a cage (e.g.
+    /// path-based config like `/pg_dynshmem/*`, or anything that
+    /// matches a "needs mmap" rule in the routing layer).
+    ///
+    /// The mapping is allocated by the imfs grate via
+    /// `SYS_MMAP(NULL, capacity, PROT_READ|PROT_WRITE,
+    ///           MAP_ANONYMOUS|MAP_SHARED, -1, 0)` so the backing is
+    /// real host kernel pages.  When a cage `mmap`s the file, the
+    /// grate routes the call back through
+    /// `SYS_MMAP(host_addr, len, prot,
+    ///           MAP_ANONYMOUS|MAP_SHARED|MAP_FIXED, -1, 0)` so the
+    /// cage's vmmap aliases those same host pages — meaning multiple
+    /// cages mapping the same file share writes (real MAP_SHARED
+    /// semantics, not a per-cage copy).
+    ///
+    /// `host_addr`: base of the host mapping (0 if not yet allocated).
+    /// `capacity`: size of the mapping in bytes; the file's logical
+    /// length (`Node::total_size`) is `<= capacity`.
+    /// `mmap_refs`: number of live cage mappings of this file.  While
+    /// > 0 the region is pinned (cannot be remapped to a different
+    /// host address).
+    RegMapped {
+        host_addr: u64,
+        capacity: usize,
+        mmap_refs: u32,
     },
     /// Directory: list of child entries.
     Dir { children: Vec<DirEntry> },
@@ -105,9 +140,9 @@ impl Node {
     /// Create a new node with the given name, type, and permissions.
     pub fn new(index: usize, name: &str, node_type: NodeType, mode: u32) -> Self {
         let mode_bits = match node_type {
-            NodeType::Reg => 0o100000 | (mode & 0o777), // S_IFREG
-            NodeType::Dir => 0o040000 | (mode & 0o777), // S_IFDIR
-            NodeType::Lnk => 0o120000 | (mode & 0o777), // S_IFLNK
+            NodeType::Reg | NodeType::RegMapped => 0o100000 | (mode & 0o777), // S_IFREG
+            NodeType::Dir => 0o040000 | (mode & 0o777),                       // S_IFDIR
+            NodeType::Lnk => 0o120000 | (mode & 0o777),                       // S_IFLNK
             _ => mode & 0o777,
         };
 
@@ -115,6 +150,15 @@ impl Node {
             NodeType::Reg => NodeInfo::Reg {
                 head: None,
                 tail: None,
+            },
+            // RegMapped starts with no host mapping; it's allocated
+            // lazily by `Filesystem::ensure_mapped_backing` on the
+            // first write or ftruncate so we don't pay an mmap
+            // syscall on opens for files that may never grow.
+            NodeType::RegMapped => NodeInfo::RegMapped {
+                host_addr: 0,
+                capacity: 0,
+                mmap_refs: 0,
             },
             NodeType::Dir => NodeInfo::Dir {
                 children: Vec::new(),
