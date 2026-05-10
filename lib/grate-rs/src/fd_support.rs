@@ -416,7 +416,7 @@ fn fd_translation_handler_impl(
                 v_read = args[1];
                 v_write = args[2];
                 v_except = args[3];
-
+                
                 if have_r {
                     let _ = copy_data_between_cages(
                         this_grateid, select_cageid,
@@ -472,9 +472,9 @@ fn fd_translation_handler_impl(
                 args[3] = e_ptr;
                 
                 let translated_cage = this_grateid | ARG_TRANSLATE_FLAG;
-                argcages[1] = translated_cage;
-                argcages[2] = translated_cage;
-                argcages[3] = translated_cage;
+                argcages[1] = if have_r { translated_cage } else { argcages[1] };
+                argcages[2] = if have_w { translated_cage } else { argcages[2] };
+                argcages[3] = if have_e { translated_cage } else { argcages[3] };
             }
 
             FdArgKind::FLAG => {
