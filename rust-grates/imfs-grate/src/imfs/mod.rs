@@ -332,8 +332,15 @@ impl ImfsState {
             0, 0,                                              // offset
             0,
         );
+        // mmap returns a wasm32 user-space address which can have bit
+        // 31 set (e.g. find_map_space hands out pages near the top of
+        // the 4GB vmmap on an empty cage).  Such returns look negative
+        // as i32 and grate-rs's make_threei_call collapses any
+        // negative i32 into Err(MakeSyscallError).  Real errnos are
+        // -1..=-255; treat anything more negative as a high user_addr.
         let new_host = match ret {
             Ok(addr) if addr >= 0 => addr as u32 as u64,
+            Err(grate_rs::GrateError::MakeSyscallError(n)) if n <= -256 => n as u32 as u64,
             _ => return Err(grate_rs::constants::error::ENOMEM),
         };
 
@@ -423,8 +430,11 @@ impl ImfsState {
             0, 0,
             0,
         );
+        // See ensure_mapped_backing for why we accept large negative
+        // i32 returns as valid wasm user-space addresses.
         let host_addr = match ret {
             Ok(addr) if addr >= 0 => addr as u32 as u64,
+            Err(grate_rs::GrateError::MakeSyscallError(n)) if n <= -256 => n as u32 as u64,
             _ => return Err(grate_rs::constants::error::ENOMEM),
         };
 
@@ -1836,12 +1846,14 @@ impl ImfsState {
             0,
         );
         let _ = flags; // user-supplied flags intentionally ignored above
-        // DEBUG markers so the cage-side mmap failure path is
-        // distinguishable from the promote/ensure failure paths.
+        // Same sign-bit-vs-errno disambiguation as
+        // ensure_mapped_backing: mmap returns user_addrs which can
+        // have bit 31 set.  Only values in (-256, 0) are real errnos.
         let mapped = match ret {
             Ok(v) if v >= 0 => v as u32 as u64,
-            Ok(v) => return v,                 // propagate kernel -errno (real)
-            Err(grate_rs::GrateError::MakeSyscallError(n)) => return n, // real errno
+            Ok(v) => return v,                                            // small positive / 0
+            Err(grate_rs::GrateError::MakeSyscallError(n)) if n <= -256 => n as u32 as u64,
+            Err(grate_rs::GrateError::MakeSyscallError(n)) => return n,   // real errno
             Err(_) => return -77, // EREMCHG marker — non-syscall threei error
         };
 
