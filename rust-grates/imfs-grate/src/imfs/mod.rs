@@ -904,6 +904,18 @@ impl ImfsState {
                 }
             };
 
+            // Write offset is past this whole chunk: mark it fully
+            // zero-used (alloc_chunk gave us zeroed bytes) and skip
+            // to the next chunk.  Needed when growing a file past
+            // multiple chunk boundaries from empty — e.g. ftruncate
+            // a fresh file to 4096 writes 1 byte at offset 4095.
+            if local_offset >= CHUNK_SIZE {
+                self.chunks[ci].used = CHUNK_SIZE;
+                local_offset -= CHUNK_SIZE;
+                chunk_idx = self.chunks[ci].next;
+                continue;
+            }
+
             let space = CHUNK_SIZE - local_offset;
             let to_copy = (buf.len() - written).min(space);
 
