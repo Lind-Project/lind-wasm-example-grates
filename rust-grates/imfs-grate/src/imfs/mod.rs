@@ -211,6 +211,17 @@ impl ImfsState {
 
     /// Mark a node slot as free and return it to the free list for reuse.
     fn reclaim_node(&mut self, idx: usize) {
+        // If this was a RegMapped node, release its host mapping
+        // before clobbering the variant — otherwise the SYS_MMAP'd
+        // pages leak.  free_mapped_backing is a no-op for any other
+        // variant.
+        if matches!(self.nodes[idx].info, NodeInfo::RegMapped { .. }) {
+            self.free_mapped_backing(idx);
+        }
+        // Plain Reg nodes' chunk chains should already have been
+        // reclaimed by the caller (truncate / unlink).  We don't
+        // walk the chain here; doing so could double-free.
+
         self.nodes[idx].node_type = NodeType::Free;
         self.nodes[idx].info = NodeInfo::Free;
         self.node_free_list.push(idx);
@@ -928,17 +939,39 @@ impl ImfsState {
             return;
         }
 
-        // Host-mapped path: grow → ensure_mapped_backing (which may
-        // fail with EBUSY if mappings are live; we swallow the error
-        // here and leave size unchanged, matching how the chunk path
-        // silently no-ops on alloc failure).  Shrink → just update
-        // total_size; the bytes past total_size are inaccessible via
-        // read_from_node and any cage mappings stay valid since we
-        // don't unmap the underlying region.
+        // Host-mapped path.
+        //
+        // Grow: ensure_mapped_backing extends the region (or fails
+        // with EBUSY if mappings are live; we swallow the error here
+        // and leave size unchanged, matching how the chunk path
+        // silently no-ops on alloc failure).
+        //
+        // Shrink: we deliberately don't unmap the tail — a cage
+        // could still have it mapped and we have no way to tear
+        // down its vmmap entries.  Instead, zero the bytes between
+        // the new EOF and the old EOF so a cage that reads past the
+        // new EOF via its mapping sees zeros rather than stale
+        // contents (closest we can get to Linux's behavior where
+        // post-shrink accesses past EOF SIGBUS — we degrade
+        // gracefully to zeros).
         if matches!(self.nodes[node_idx].info, NodeInfo::RegMapped { .. }) {
             if new_size > old_size {
                 if self.ensure_mapped_backing(node_idx, new_size).is_err() {
                     return;
+                }
+            } else if new_size < old_size {
+                let host_addr = match &self.nodes[node_idx].info {
+                    NodeInfo::RegMapped { host_addr, .. } => *host_addr,
+                    _ => 0,
+                };
+                if host_addr != 0 {
+                    let dst = (host_addr as *mut u8).wrapping_add(new_size);
+                    let zero_len = old_size - new_size;
+                    // SAFETY: [new_size, old_size) is inside the
+                    // mapping (old_size <= capacity).
+                    unsafe {
+                        core::ptr::write_bytes(dst, 0, zero_len);
+                    }
                 }
             }
             self.nodes[node_idx].total_size = new_size;
@@ -1806,6 +1839,39 @@ impl ImfsState {
             Err(grate_rs::GrateError::MakeSyscallError(n)) => n,
             Err(_) => -22,
         }
+    }
+
+    /// Drop all RegMapped mappings owned by `cage_id`.  Called from
+    /// the grate's teardown hook so a cage that exits without
+    /// explicit `munmap`s doesn't leave the underlying RegMapped
+    /// node's `mmap_refs` stuck at a positive value, which would
+    /// otherwise pin the host region and reject any future grow.
+    ///
+    /// We don't forward `SYS_MUNMAP` here — the cage is gone, its
+    /// vmmap entries have already been torn down by RawPOSIX as
+    /// part of cage exit.  We only need to update our own
+    /// bookkeeping.
+    pub fn cage_exit(&mut self, cage_id: u64) {
+        let to_drop: Vec<(u64, u64)> = self
+            .mmap_tracking
+            .keys()
+            .filter(|(cage, _addr)| *cage == cage_id)
+            .copied()
+            .collect();
+
+        for key in to_drop {
+            if let Some((node_idx, _len)) = self.mmap_tracking.remove(&key) {
+                if let NodeInfo::RegMapped { mmap_refs, .. } =
+                    &mut self.nodes[node_idx].info
+                {
+                    *mmap_refs = mmap_refs.saturating_sub(1);
+                }
+            }
+        }
+
+        // Clean up the per-cage cwd and any leftover fd offsets too.
+        self.cwd_info.remove(&cage_id);
+        self.fd_info.retain(|(c, _fd), _| *c != cage_id);
     }
 
     /// mkdir: create a directory.

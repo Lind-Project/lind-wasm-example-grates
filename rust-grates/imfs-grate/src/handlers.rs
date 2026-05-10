@@ -1281,6 +1281,84 @@ pub extern "C" fn munmap_handler(
 }
 
 // =====================================================================
+//  exit / exit_group (syscalls 60 / 231)
+//
+//  A cage exiting without explicit `munmap`s would otherwise leave
+//  its RegMapped mappings tracked, pinning the underlying node's
+//  mmap_refs counter and blocking future grows.  We hook the exit
+//  path to drop those references before forwarding to RawPOSIX.
+//
+//  We also drop the cage from fdtables and clean up its cwd / fd
+//  bookkeeping in imfs.
+// =====================================================================
+
+pub extern "C" fn exit_handler(
+    _cageid: u64,
+    arg1: u64, arg1cage: u64,
+    arg2: u64, arg2cage: u64,
+    arg3: u64, arg3cage: u64,
+    arg4: u64, arg4cage: u64,
+    arg5: u64, arg5cage: u64,
+    arg6: u64, arg6cage: u64,
+) -> i32 {
+    let cage_id = arg1cage;
+    imfs::with_imfs(|s| s.cage_exit(cage_id));
+    let _ = fdtables::remove_cage_from_fdtable(cage_id);
+
+    let thiscage = getcageid();
+    match make_threei_call(
+        SYS_EXIT as u32,
+        0,
+        thiscage,
+        cage_id,
+        arg1, arg1cage,
+        arg2, arg2cage,
+        arg3, arg3cage,
+        arg4, arg4cage,
+        arg5, arg5cage,
+        arg6, arg6cage,
+        0,
+    ) {
+        Ok(v) => v,
+        Err(grate_rs::GrateError::MakeSyscallError(n)) => n,
+        Err(_) => -1,
+    }
+}
+
+pub extern "C" fn exit_group_handler(
+    _cageid: u64,
+    arg1: u64, arg1cage: u64,
+    arg2: u64, arg2cage: u64,
+    arg3: u64, arg3cage: u64,
+    arg4: u64, arg4cage: u64,
+    arg5: u64, arg5cage: u64,
+    arg6: u64, arg6cage: u64,
+) -> i32 {
+    let cage_id = arg1cage;
+    imfs::with_imfs(|s| s.cage_exit(cage_id));
+    let _ = fdtables::remove_cage_from_fdtable(cage_id);
+
+    let thiscage = getcageid();
+    match make_threei_call(
+        SYS_EXIT_GROUP as u32,
+        0,
+        thiscage,
+        cage_id,
+        arg1, arg1cage,
+        arg2, arg2cage,
+        arg3, arg3cage,
+        arg4, arg4cage,
+        arg5, arg5cage,
+        arg6, arg6cage,
+        0,
+    ) {
+        Ok(v) => v,
+        Err(grate_rs::GrateError::MakeSyscallError(n)) => n,
+        Err(_) => -1,
+    }
+}
+
+// =====================================================================
 //  fork (syscall 57)
 //
 //  Forward the fork, then clone the fdtables and offset state for the
