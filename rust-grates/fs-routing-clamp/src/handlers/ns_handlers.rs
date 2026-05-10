@@ -1,6 +1,6 @@
 use crate::helpers;
 use grate_rs::{SyscallHandler, constants::*, copy_data_between_cages, getcageid, is_thread_clone};
-
+use grate_rs::constants::fs::{F_DUPFD, F_DUPFD_CLOEXEC};
 // =====================================================================
 //  PATH-BASED SYSCALL HANDLERS
 //
@@ -194,7 +194,6 @@ fd_route_handler!(ns_writev_handler, SYS_WRITEV);
 fd_route_handler!(ns_pwritev_handler, SYS_PWRITEV);
 fd_route_handler!(ns_lseek_handler, SYS_LSEEK);
 fd_route_handler!(ns_fstat_handler, SYS_FXSTAT);
-fd_route_handler!(ns_fcntl_handler, SYS_FCNTL);
 fd_route_handler!(ns_ftruncate_handler, SYS_FTRUNCATE);
 fd_route_handler!(ns_fchmod_handler, SYS_FCHMOD);
 fd_route_handler!(ns_fchdir_handler, SYS_FCHDIR);
@@ -298,6 +297,55 @@ pub extern "C" fn ns_close_handler(
 
     // Always remove the fd from our tracking.
     let _ = fdtables::close_virtualfd(arg1cage, arg1);
+
+    ret
+}
+
+pub extern "C" fn ns_fcntl_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    let perfdinfo = fdtables::translate_virtual_fd(arg1cage, arg1)
+        .map(|e| e.perfdinfo)
+        .unwrap_or(0);
+
+    let nr = match helpers::get_route(arg1cage, SYS_FCNTL) {
+        Some(alt) if perfdinfo != 0 => alt,
+        _ => SYS_FCNTL,
+    };
+
+    let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
+
+    if ret >= 0 {
+        let cmd = arg2;
+
+        if cmd == F_DUPFD as u64 || cmd == F_DUPFD_CLOEXEC as u64 {
+            let cloexec = cmd == F_DUPFD_CLOEXEC as u64;
+
+            let _ = fdtables::get_specific_virtual_fd(
+                arg1cage,
+                ret as u64,
+                0,
+                ret as u64,
+                cloexec,
+                perfdinfo,
+            );
+        }
+    }
 
     ret
 }
