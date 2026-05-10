@@ -368,6 +368,90 @@ impl ImfsState {
         Ok(())
     }
 
+    /// Promote a plain `Reg` node (chunk-chain storage) to a
+    /// `RegMapped` node (host-backed contiguous storage).  Called
+    /// lazily on the first `mmap()` that targets the file: chunked
+    /// storage isn't aliasable into a cage's vmmap, so we drain the
+    /// chunks into a fresh host mapping at that point.
+    ///
+    /// The node's `total_size` is preserved; the chunk chain is
+    /// reclaimed; `node_type` and `info` both flip to the mapped
+    /// variant.  Subsequent reads / writes hit the host-mapped fast
+    /// paths in `read_from_node` / `write_to_node`.
+    ///
+    /// Returns Ok(()) on success, or:
+    ///   - `EINVAL` if the node isn't `Reg`.
+    ///   - `ENOMEM` if the host mmap failed.
+    fn promote_to_mapped(&mut self, node_idx: usize) -> Result<(), i32> {
+        // Must currently be plain Reg.
+        let head = match &self.nodes[node_idx].info {
+            NodeInfo::Reg { head, .. } => *head,
+            NodeInfo::RegMapped { .. } => return Ok(()), // already promoted
+            _ => return Err(grate_rs::constants::error::EINVAL),
+        };
+
+        let size = self.nodes[node_idx].total_size;
+
+        // Allocate the host region.  Mirror the same shape as
+        // ensure_mapped_backing's allocator so the page-rounding and
+        // flags are consistent.
+        const PAGE_SIZE: usize = 4096;
+        let cap = ((size.max(1) + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+        let thiscage = getcageid();
+        let ret = make_threei_call(
+            SYS_MMAP as u32,
+            0,
+            thiscage,
+            thiscage,
+            0, 0,
+            cap as u64, 0,
+            (PROT_READ | PROT_WRITE) as u64, 0,
+            (MAP_ANON | MAP_SHARED) as u64, 0,
+            u64::MAX, 0,
+            0, 0,
+            0,
+        );
+        let host_addr = match ret {
+            Ok(addr) if addr >= 0 => addr as u32 as u64,
+            _ => return Err(grate_rs::constants::error::ENOMEM),
+        };
+
+        // Drain the chunk chain into the host mapping in file order.
+        let mut chunk_idx = head;
+        let mut dst_offset: usize = 0;
+        while let Some(ci) = chunk_idx {
+            let used = self.chunks[ci].used;
+            if used > 0 {
+                let dst = (host_addr as *mut u8).wrapping_add(dst_offset);
+                // SAFETY: dst_offset + used <= total_size <= cap.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        self.chunks[ci].data.as_ptr(),
+                        dst,
+                        used,
+                    );
+                }
+                dst_offset += used;
+            }
+            chunk_idx = self.chunks[ci].next;
+        }
+
+        // Reclaim the chunks now that their contents are in the host
+        // region.
+        self.reclaim_chunk_chain(head);
+
+        // Flip the variant + node_type.  Stat / dirent code already
+        // treats RegMapped as a regular file for external purposes.
+        self.nodes[node_idx].info = NodeInfo::RegMapped {
+            host_addr,
+            capacity: cap,
+            mmap_refs: 0,
+        };
+        self.nodes[node_idx].node_type = NodeType::RegMapped;
+
+        Ok(())
+    }
+
     /// Release the host mapping for a `RegMapped` node.  Called when
     /// the node is being reclaimed (final close after unlink) so the
     /// host pages don't leak.  Panics if any cage still has it
@@ -1616,9 +1700,19 @@ impl ImfsState {
             return -9;
         }
 
-        // Only RegMapped is mappable from imfs.  Plain Reg uses the
-        // chunk-chain backing which is not contiguous and can't be
-        // aliased into a cage's vmmap.
+        // Lazily promote a plain Reg to RegMapped on first mmap.
+        // Chunked storage isn't aliasable into a cage's vmmap, so
+        // we drain it into a fresh host-backed contiguous region
+        // here.  Files that never get mmap'd pay nothing for this.
+        if matches!(self.nodes[node_idx].info, NodeInfo::Reg { .. }) {
+            if let Err(e) = self.promote_to_mapped(node_idx) {
+                return -(e);
+            }
+        }
+
+        // After promotion (or if it was already RegMapped), the node
+        // must be RegMapped.  Anything else here is a programming
+        // error or a non-file node type.
         match &self.nodes[node_idx].info {
             NodeInfo::RegMapped { .. } => {}
             _ => return -(grate_rs::constants::error::ENODEV as i32),
