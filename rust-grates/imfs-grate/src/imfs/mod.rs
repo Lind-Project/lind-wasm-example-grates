@@ -1067,6 +1067,16 @@ impl ImfsState {
         return Ok((idx as usize, flags));
     }
 
+    pub fn insert_perfdinfo(&mut self, cageid: u64, fd: u64, flags: u64) {
+        self.fd_info.insert(
+            (cageid, fd),
+            Arc::new(Mutex::new(FDInfo {
+                flags: flags,
+                offset: 0,
+            })),
+        );
+    }
+
     // =====================================================================
     //  Public filesystem operations
     //
