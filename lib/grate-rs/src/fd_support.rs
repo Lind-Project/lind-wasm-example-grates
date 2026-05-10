@@ -471,8 +471,6 @@ fn fd_translation_handler_impl(
                 args[2] = w_ptr;
                 args[3] = e_ptr;
                 
-                // println!("select handler: after translating fds. args[1]={}, args[2]={}, args[3]={}", args[1], args[2], args[3]);
-
                 let translated_cage = this_grateid | ARG_TRANSLATE_FLAG;
                 argcages[1] = if have_r { translated_cage } else { argcages[1] };
                 argcages[2] = if have_w { translated_cage } else { argcages[2] };
