@@ -1209,14 +1209,18 @@ pub extern "C" fn fsync_handler(
 
 pub extern "C" fn mmap_handler(
     _cageid: u64,
-    arg1: u64, arg1cage: u64,    // addr
-    arg2: u64, _arg2cage: u64,   // len
-    arg3: u64, _arg3cage: u64,   // prot
-    arg4: u64, _arg4cage: u64,   // flags
-    arg5: u64, _arg5cage: u64,   // fd
-    arg6: u64, _arg6cage: u64,   // offset
+    arg1: u64, arg1cage: u64,    // addr (pointer — cage tag may be a transient grate)
+    arg2: u64, arg2cage: u64,    // len
+    arg3: u64, arg3cage: u64,    // prot
+    arg4: u64, arg4cage: u64,    // flags
+    arg5: u64, arg5cage: u64,    // fd (integer — reliable for cage_id)
+    arg6: u64, arg6cage: u64,    // offset
 ) -> i32 {
-    let cage_id = arg1cage;
+    // Use an integer-arg's cage tag, not arg1's: arg1 is a pointer
+    // (addr hint), so its cage tag may have been rewritten by a
+    // transient grate.  arg5 (fd) is an integer; its cage tag is
+    // the original caller.  See open_handler's note on this.
+    let cage_id = arg5cage;
 
     let ret = imfs::with_imfs(|state| {
         state.mmap(
@@ -1241,11 +1245,11 @@ pub extern "C" fn mmap_handler(
             thiscage,
             cage_id,
             arg1, arg1cage,
-            arg2, _arg2cage,
-            arg3, _arg3cage,
-            arg4, _arg4cage,
-            arg5, _arg5cage,
-            arg6, _arg6cage,
+            arg2, arg2cage,
+            arg3, arg3cage,
+            arg4, arg4cage,
+            arg5, arg5cage,
+            arg6, arg6cage,
             0,
         ) {
             Ok(v) => v,
@@ -1270,14 +1274,14 @@ pub extern "C" fn mmap_handler(
 
 pub extern "C" fn munmap_handler(
     _cageid: u64,
-    arg1: u64, arg1cage: u64,
-    arg2: u64, _arg2cage: u64,
+    arg1: u64, _arg1cage: u64,   // addr (pointer — cage tag unreliable)
+    arg2: u64, arg2cage: u64,    // len (integer — reliable)
     _arg3: u64, _arg3cage: u64,
     _arg4: u64, _arg4cage: u64,
     _arg5: u64, _arg5cage: u64,
     _arg6: u64, _arg6cage: u64,
 ) -> i32 {
-    imfs::with_imfs(|state| state.munmap(arg1cage, arg1, arg2 as usize))
+    imfs::with_imfs(|state| state.munmap(arg2cage, arg1, arg2 as usize))
 }
 
 // =====================================================================
