@@ -18,6 +18,9 @@ use grate_rs::ffi::stat;
 use node::*;
 
 use grate_rs::constants::fs::*;
+use grate_rs::constants::mman::{MAP_ANON, MAP_SHARED, PROT_READ, PROT_WRITE};
+use grate_rs::constants::{SYS_MMAP, SYS_MUNMAP};
+use grate_rs::{getcageid, make_threei_call};
 
 /// fdtables fdkind for IMFS file descriptors.
 pub const IMFS_FDKIND: u32 = 1;
@@ -225,6 +228,169 @@ impl ImfsState {
             let next = self.chunks[ci].next;
             self.reclaim_chunk(ci);
             chunk_idx = next;
+        }
+    }
+
+    // =====================================================================
+    //  RegMapped backing management
+    // =====================================================================
+    //
+    // RegMapped nodes hold their bytes in a host mmap'd page range
+    // (anonymous, shared) rather than the chunk arena.  This is what
+    // makes the file mappable by a cage: the same host pages can be
+    // aliased into the cage's vmmap via SYS_MMAP with MAP_FIXED, and
+    // every cage that maps the file ends up backed by the same pages
+    // — that's what gives MAP_SHARED its cross-cage semantics.
+    //
+    // The mapping is allocated lazily on first grow (write or
+    // ftruncate) so opens that never touch the file don't pay an
+    // mmap syscall.
+
+    /// Allocate the host mapping for a `RegMapped` node, or grow it
+    /// to at least `min_capacity` bytes.  No-op if the current
+    /// capacity already covers it.
+    ///
+    /// Returns Ok(()) on success, or:
+    ///   - `EINVAL` if the node isn't a RegMapped.
+    ///   - `EBUSY` if the mapping needs to grow but `mmap_refs > 0`
+    ///     — moving the region would invalidate live cage mappings.
+    ///   - `ENOMEM` if `mmap` failed.
+    ///
+    /// On grow, the existing region's contents are copied into the
+    /// new (larger) region and the old region is unmapped.
+    fn ensure_mapped_backing(&mut self, node_idx: usize, min_capacity: usize) -> Result<(), i32> {
+        let (current_host, current_cap, refs) = match &self.nodes[node_idx].info {
+            NodeInfo::RegMapped {
+                host_addr,
+                capacity,
+                mmap_refs,
+            } => (*host_addr, *capacity, *mmap_refs),
+            _ => return Err(grate_rs::constants::error::EINVAL),
+        };
+
+        if min_capacity <= current_cap {
+            return Ok(());
+        }
+        if refs > 0 {
+            // Cages still have this region mapped; growing would
+            // require moving it, which would silently invalidate
+            // those mappings.  Refuse instead.
+            return Err(grate_rs::constants::error::EBUSY);
+        }
+
+        // Round up to page size — host kernel mmap will round anyway,
+        // and tracking the rounded value lets us check capacity
+        // bounds against the actual mapped extent.
+        const PAGE_SIZE: usize = 4096;
+        let new_cap = ((min_capacity + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+
+        // Allocate the host mapping via threei → RawPOSIX.  NULL
+        // address hint, anonymous + shared so RawPOSIX gives us
+        // real host pages (page-cache shareable) rather than a
+        // private mapping — that's what makes the later cage-side
+        // MAP_FIXED alias the same physical pages.  `fd = -1` (sent
+        // as u64::MAX so the sign-extension survives the threei
+        // boundary), `offset = 0`.
+        let thiscage = getcageid();
+        let ret = make_threei_call(
+            SYS_MMAP as u32,
+            0,
+            thiscage,
+            thiscage,
+            0, 0,                                              // addr: NULL
+            new_cap as u64, 0,                                 // len
+            (PROT_READ | PROT_WRITE) as u64, 0,                // prot
+            (MAP_ANON | MAP_SHARED) as u64, 0,                 // flags
+            u64::MAX, 0,                                       // fd = -1
+            0, 0,                                              // offset
+            0,
+        );
+        let new_host = match ret {
+            Ok(addr) if addr >= 0 => addr as u32 as u64,
+            _ => return Err(grate_rs::constants::error::ENOMEM),
+        };
+
+        // Copy live bytes (up to the logical file size, not the old
+        // capacity) into the new region.  Anonymous mappings are
+        // zero-initialized so the tail past the live bytes is
+        // already zero — no fill needed.
+        let live_bytes = self.nodes[node_idx].total_size.min(current_cap);
+        if current_host != 0 && live_bytes > 0 {
+            // SAFETY: both regions are owned by this grate and non-
+            // overlapping; sizes are bounded by current_cap / new_cap.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    current_host as *const u8,
+                    new_host as *mut u8,
+                    live_bytes,
+                );
+            }
+        }
+
+        // Release the old region via threei.
+        if current_host != 0 && current_cap > 0 {
+            let _ = make_threei_call(
+                SYS_MUNMAP as u32,
+                0,
+                thiscage,
+                thiscage,
+                current_host, 0,
+                current_cap as u64, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+                0,
+            );
+        }
+
+        if let NodeInfo::RegMapped {
+            host_addr,
+            capacity,
+            ..
+        } = &mut self.nodes[node_idx].info
+        {
+            *host_addr = new_host;
+            *capacity = new_cap;
+        }
+        Ok(())
+    }
+
+    /// Release the host mapping for a `RegMapped` node.  Called when
+    /// the node is being reclaimed (final close after unlink) so the
+    /// host pages don't leak.  Panics if any cage still has it
+    /// mapped (`mmap_refs > 0`) — that's a refcount bug the caller
+    /// must fix; we deliberately don't silently leak.
+    fn free_mapped_backing(&mut self, node_idx: usize) {
+        let (host, cap) = match &mut self.nodes[node_idx].info {
+            NodeInfo::RegMapped {
+                host_addr,
+                capacity,
+                mmap_refs,
+            } => {
+                debug_assert_eq!(
+                    *mmap_refs, 0,
+                    "free_mapped_backing called with live mmap_refs={}",
+                    *mmap_refs
+                );
+                let h = *host_addr;
+                let c = *capacity;
+                *host_addr = 0;
+                *capacity = 0;
+                (h, c)
+            }
+            _ => return,
+        };
+        if host != 0 && cap > 0 {
+            // Release the host mapping via threei.
+            let thiscage = getcageid();
+            let _ = make_threei_call(
+                SYS_MUNMAP as u32,
+                0,
+                thiscage,
+                thiscage,
+                host, 0,
+                cap as u64, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+                0,
+            );
         }
     }
 
