@@ -1760,9 +1760,13 @@ impl ImfsState {
         // Chunked storage isn't aliasable into a cage's vmmap, so
         // we drain it into a fresh host-backed contiguous region
         // here.  Files that never get mmap'd pay nothing for this.
+        //
+        // DEBUG: tag the failure path with a unique non-clobbered
+        // errno (74 = EBADMSG) so the test output distinguishes a
+        // `promote_to_mapped` failure from later mmap failures.
         if matches!(self.nodes[node_idx].info, NodeInfo::Reg { .. }) {
-            if let Err(e) = self.promote_to_mapped(node_idx) {
-                return -(e);
+            if let Err(_e) = self.promote_to_mapped(node_idx) {
+                return -74; // EBADMSG marker — promote_to_mapped failed
             }
         }
 
@@ -1774,10 +1778,11 @@ impl ImfsState {
             _ => return -(grate_rs::constants::error::ENODEV as i32),
         }
 
-        // Make sure the host region covers offset+len.
+        // Make sure the host region covers offset+len.  DEBUG: use
+        // -75 (ENOTUNIQ) for ensure_mapped_backing failures.
         let end = (offset as usize).saturating_add(len);
-        if let Err(e) = self.ensure_mapped_backing(node_idx, end) {
-            return -(e);
+        if let Err(_e) = self.ensure_mapped_backing(node_idx, end) {
+            return -75; // ENOTUNIQ marker — ensure_mapped_backing failed
         }
 
         // Re-read host_addr after the mutable helper.
@@ -1786,7 +1791,7 @@ impl ImfsState {
             _ => return -22,
         };
         if host_addr == 0 {
-            return -(grate_rs::constants::error::ENOMEM as i32);
+            return -76; // EBADFD marker — host_addr is still 0 after promote
         }
 
         // Alias the host pages into the cage's vmmap via
@@ -1831,11 +1836,13 @@ impl ImfsState {
             0,
         );
         let _ = flags; // user-supplied flags intentionally ignored above
+        // DEBUG markers so the cage-side mmap failure path is
+        // distinguishable from the promote/ensure failure paths.
         let mapped = match ret {
             Ok(v) if v >= 0 => v as u32 as u64,
-            Ok(v) => return v,                 // propagate kernel -errno
-            Err(grate_rs::GrateError::MakeSyscallError(n)) => return n,
-            Err(_) => return -(grate_rs::constants::error::ENOMEM as i32),
+            Ok(v) => return v,                 // propagate kernel -errno (real)
+            Err(grate_rs::GrateError::MakeSyscallError(n)) => return n, // real errno
+            Err(_) => return -77, // EREMCHG marker — non-syscall threei error
         };
 
         // Bump refs and record the live mapping so munmap can find
