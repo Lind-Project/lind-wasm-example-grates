@@ -330,8 +330,6 @@ pub extern "C" fn ns_mmap_handler(
      */
     let is_anonymous = (arg4 & MAP_ANONYMOUS) != 0;
 
-    println!("ns_mmap_handler: is_anonymous={}, fd={}", is_anonymous, arg5);
-
     if !is_anonymous {
         let fd = arg5;
 
@@ -341,11 +339,9 @@ pub extern "C" fn ns_mmap_handler(
         {
             match helpers::get_route(arg1cage, SYS_MMAP) {
                 Some(alt) => {
-                    println!("ns_mmap_handler: fd {} is clamped, routing to alt {}.", fd, alt);
                     return helpers::do_syscall(arg1cage, alt, &args, &arg_cages);
                 }
                 None => {
-                    println!("ns_mmap_handler: fd {} is clamped but no alt route, invoking clamp syscall", fd);
                     return helpers::do_clamp_syscall(arg1cage, SYS_MMAP, &args, &arg_cages);
                 }
             }
