@@ -18,6 +18,7 @@ use grate_rs::ffi::stat;
 use node::*;
 
 use grate_rs::constants::fs::*;
+use grate_rs::constants::lind::GRATE_MEMORY_FLAG;
 use grate_rs::constants::mman::{MAP_ANON, MAP_SHARED, PROT_READ, PROT_WRITE};
 use grate_rs::constants::{SYS_MMAP, SYS_MUNMAP};
 use grate_rs::{getcageid, make_threei_call};
@@ -1795,6 +1796,16 @@ impl ImfsState {
         // host-resident address is what makes the cage's mapping
         // share physical pages with the imfs region.
         //
+        // `target_addr` is a wasm32 offset in OUR (the grate's) linear
+        // memory — what RawPOSIX gave us back from the first SYS_MMAP.
+        // For the cage-side mmap we need RawPOSIX to mmap at the
+        // matching *host* page, not at that offset interpreted against
+        // the calling cage's base.  Setting `GRATE_MEMORY_FLAG` on
+        // arg1cage tells glibc's `make_threei_call` (which grate-rs
+        // links against) to do `__lind_base + target_addr` before
+        // handing the syscall off — turning it into a real host
+        // pointer that lives inside our wasm memory.
+        //
         // The flags we send to RawPOSIX are NOT the caller's flags:
         // we always issue `MAP_ANON | MAP_SHARED | MAP_FIXED` with
         // `fd = -1`.  The caller's flags described a file-backed
@@ -1802,7 +1813,7 @@ impl ImfsState {
         // `mmap(fd=-1, !MAP_ANON)` returns EINVAL.  We've already
         // taken on the file-backing role here in imfs; from
         // RawPOSIX's perspective this is an anonymous shared
-        // mapping at a specific address.
+        // mapping at a specific host address.
         let target_addr = host_addr + offset;
         let thiscage = getcageid();
         let cage_flags = MAP_ANON | MAP_SHARED | MAP_FIXED;
@@ -1811,7 +1822,7 @@ impl ImfsState {
             0,
             thiscage,
             cage_id,
-            target_addr, 0,
+            target_addr, thiscage | GRATE_MEMORY_FLAG,
             len as u64, 0,
             prot as u64, 0,
             cage_flags as u64, 0,
