@@ -1794,8 +1794,18 @@ impl ImfsState {
         // and most callers pass NULL anyway, and MAP_FIXED with a
         // host-resident address is what makes the cage's mapping
         // share physical pages with the imfs region.
+        //
+        // The flags we send to RawPOSIX are NOT the caller's flags:
+        // we always issue `MAP_ANON | MAP_SHARED | MAP_FIXED` with
+        // `fd = -1`.  The caller's flags described a file-backed
+        // mapping (no MAP_ANON, fd = imfs fd), but RawPOSIX → libc
+        // `mmap(fd=-1, !MAP_ANON)` returns EINVAL.  We've already
+        // taken on the file-backing role here in imfs; from
+        // RawPOSIX's perspective this is an anonymous shared
+        // mapping at a specific address.
         let target_addr = host_addr + offset;
         let thiscage = getcageid();
+        let cage_flags = MAP_ANON | MAP_SHARED | MAP_FIXED;
         let ret = make_threei_call(
             SYS_MMAP as u32,
             0,
@@ -1804,11 +1814,12 @@ impl ImfsState {
             target_addr, 0,
             len as u64, 0,
             prot as u64, 0,
-            (flags | MAP_FIXED) as u64, 0,
+            cage_flags as u64, 0,
             u64::MAX, 0,
             0, 0,
             0,
         );
+        let _ = flags; // user-supplied flags intentionally ignored above
         let mapped = match ret {
             Ok(v) if v >= 0 => v as u32 as u64,
             Ok(v) => return v,                 // propagate kernel -errno
