@@ -338,12 +338,8 @@ pub extern "C" fn ns_mmap_handler(
             .unwrap_or(false)
         {
             let ret = match helpers::get_route(arg1cage, SYS_MMAP) {
-                Some(alt) => {
-                    return helpers::do_syscall(arg1cage, alt, &args, &arg_cages);
-                }
-                None => {
-                    return helpers::do_clamp_syscall(arg1cage, SYS_MMAP, &args, &arg_cages);
-                }
+                Some(alt) => helpers::do_syscall(arg1cage, alt, &args, &arg_cages),
+                None => helpers::do_clamp_syscall(arg1cage, SYS_MMAP, &args, &arg_cages),
             };
             if ret >= 0 {
                 helpers::record_clamped_mmap(arg1cage, ret as u64, arg2);
