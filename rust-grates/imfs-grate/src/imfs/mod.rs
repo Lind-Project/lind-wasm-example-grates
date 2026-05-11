@@ -1089,6 +1089,24 @@ impl ImfsState {
             }
         }
 
+        // Also inherit mmap_tracking entries.  Linux fork copies the
+        // parent's mappings into the child at the same uaddrs, and for
+        // MAP_ANON | MAP_SHARED (which is what imfs::mmap forwards) the
+        // kernel pages are shared between parent and child.  Carrying
+        // the tracking entry over means a later `imfs::mmap()` call in
+        // the child can recognize the inherited mapping and hand back
+        // the same uaddr instead of forwarding a fresh anonymous mmap
+        // that would land on a non-shared region.
+        let inherited: Vec<((u64, u64), (usize, usize))> = self
+            .mmap_tracking
+            .iter()
+            .filter(|((c, _), _)| *c == parent_cage)
+            .map(|(k, v)| (*k, *v))
+            .collect();
+        for ((_, uaddr), value) in inherited {
+            self.mmap_tracking.insert((child_cage, uaddr), value);
+        }
+
         if let Some(cwd) = self.cwd_info.get(&parent_cage).cloned() {
             self.cwd_info.insert(child_cage, cwd);
         }
@@ -1738,6 +1756,23 @@ impl ImfsState {
         let node_idx = entry.underfd as usize;
         if node_idx >= self.nodes.len() {
             return -9; // EBADF
+        }
+
+        // If this cage already has an mmap tracked for this node (e.g.
+        // inherited from a fork parent), hand back the same uaddr.  The
+        // cage's vmmap already holds the MAP_ANON | MAP_SHARED region
+        // there, and Linux fork makes those pages shared with whichever
+        // ancestor / sibling already wrote into them — so the caller's
+        // memcpy lands on the same kernel pages everyone else sees.
+        // This is the postgres-DSM "worker attaches to existing segment
+        // by name" pattern; without it each child would get a fresh
+        // anonymous region with no real sharing.
+        if let Some((&(_, uaddr), _)) = self
+            .mmap_tracking
+            .iter()
+            .find(|((c, _), (n, _))| *c == cage_id && *n == node_idx)
+        {
+            return uaddr as i32;
         }
 
         // Forward to RawPOSIX as MAP_ANON | MAP_SHARED (no MAP_FIXED,
