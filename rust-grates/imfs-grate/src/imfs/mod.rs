@@ -1758,26 +1758,6 @@ impl ImfsState {
             return -9; // EBADF
         }
 
-        // If this cage already has an mmap tracked for this node (e.g.
-        // inherited from a fork parent), hand back the same uaddr.  The
-        // cage's vmmap already holds the MAP_ANON | MAP_SHARED region
-        // there, and Linux fork makes those pages shared with whichever
-        // ancestor / sibling already wrote into them — so the caller's
-        // memcpy lands on the same kernel pages everyone else sees.
-        // This is the postgres-DSM "worker attaches to existing segment
-        // by name" pattern; without it each child would get a fresh
-        // anonymous region with no real sharing.
-        let inherited = self.mmap_tracking.iter().find_map(|(&(c, u), &(n, _))| {
-            if c == cage_id && n == node_idx {
-                Some(u)
-            } else {
-                None
-            }
-        });
-        if let Some(uaddr) = inherited {
-            return uaddr as i32;
-        }
-
         // Forward to RawPOSIX as MAP_ANON | MAP_SHARED (no MAP_FIXED,
         // no GRATE_MEMORY_FLAG).  The runtime picks a free uaddr in
         // the calling cage's vmmap — this avoids the previous
