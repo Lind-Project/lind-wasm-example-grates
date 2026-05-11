@@ -697,6 +697,7 @@ pub fn get_ns_handler(syscall_nr: u64) -> Option<SyscallHandler> {
         SYS_FSTATFS => Some(ns_fstatfs_handler),
         SYS_SYNC_FILE_RANGE => Some(ns_sync_file_range_handler),
         SYS_MMAP => Some(ns_mmap_handler),
+        SYS_MUNMAP => Some(ns_munmap_handler),
 
         // FD-based with fd-tracking side effects
         SYS_DUP => Some(ns_dup_handler),

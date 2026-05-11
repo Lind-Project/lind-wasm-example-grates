@@ -1,6 +1,6 @@
 use grate_rs::{
     SyscallHandler, constants::*, copy_data_between_cages, getcageid, is_thread_clone,
-    register_handler, register_default_fd_handlers_except,
+    register_handler,
 };
 
 use fdtables;
@@ -8,8 +8,6 @@ use fdtables;
 use crate::handlers::get_ns_handler;
 use crate::helpers::{self, FS_CALLS};
 use crate::log;
-
-use std::collections::HashSet;
 
 // =====================================================================
 //  1. LIFECYCLE HANDLERS
@@ -99,7 +97,7 @@ pub fn register_target_handlers(target_cage: u64) -> i32 {
             // ... Add to routing table.
             let _ = helpers::set_route(target_cage, fs_syscall, alt_nr);
         }
-        
+
         // The visible handler on the target cage always points at ns-grate.
         match register_handler(target_cage, fs_syscall, ns_cage, ns_handler.unwrap()) {
             Ok(_) => {}
@@ -107,18 +105,6 @@ pub fn register_target_handlers(target_cage: u64) -> i32 {
                 log!("failed to register ns handler: {:?}", e);
                 return -1;
             }
-        }
-    }
-
-    match register_default_fd_handlers_except(
-        target_cage,
-        ns_cage,
-        Some(FS_CALLS.into_iter().collect::<HashSet<u64>>()),
-    ) {
-        Ok(_) => {}
-        Err(e) => {
-            log!("failed to register default fd handlers: {:?}", e);
-            return -1;
         }
     }
 
