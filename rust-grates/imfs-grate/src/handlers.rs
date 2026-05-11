@@ -1274,17 +1274,13 @@ pub extern "C" fn mmap_handler(
 
 pub extern "C" fn munmap_handler(
     _cageid: u64,
-    arg1: u64, arg1cage: u64,    // addr (pointer — cage tag unreliable)
+    arg1: u64, _arg1cage: u64,   // addr (pointer — cage tag unreliable)
     arg2: u64, arg2cage: u64,    // len (integer — reliable)
     _arg3: u64, _arg3cage: u64,
     _arg4: u64, _arg4cage: u64,
     _arg5: u64, _arg5cage: u64,
     _arg6: u64, _arg6cage: u64,
 ) -> i32 {
-    eprintln!(
-        "[TRACE munmap_handler] arg1=0x{:x} arg1cage=0x{:x} arg2={} arg2cage={}",
-        arg1, arg1cage, arg2, arg2cage
-    );
     imfs::with_imfs(|state| state.munmap(arg2cage, arg1, arg2 as usize))
 }
 
