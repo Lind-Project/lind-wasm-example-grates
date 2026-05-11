@@ -8,7 +8,7 @@
 
 use grate_rs::constants::*;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use grate_rs::{GrateError, copy_data_between_cages, make_threei_call};
@@ -16,7 +16,7 @@ use grate_rs::{GrateError, copy_data_between_cages, make_threei_call};
 // These are all the calls that the fs-namespace grate cares about. All of the
 // following calls from the target must be routed through the grate regardless
 // of whether the clamp interposed on them.
-pub const FS_CALLS: [u64; 45] = [
+pub const FS_CALLS: [u64; 46] = [
     SYS_OPEN,
     SYS_OPENAT,
     SYS_XSTAT,
@@ -58,6 +58,7 @@ pub const FS_CALLS: [u64; 45] = [
     SYS_FDATASYNC,
     SYS_FSTATFS,
     SYS_SYNC_FILE_RANGE,
+    SYS_MMAP,
     // FD-based with fd-tracking side effects
     SYS_DUP,
     SYS_DUP2,
@@ -454,5 +455,100 @@ pub fn do_clamp_syscall(callingcage: u64, nr: u64, args: &[u64; 6], arg_cages: &
         Ok(ret) => ret,
         Err(GrateError::MakeSyscallError(ret)) => ret,
         _ => -1,
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ClampedMmapRange {
+    start: u64,
+    end: u64,
+}
+
+static CLAMPED_MMAPS: OnceLock<Mutex<HashMap<u64, Vec<ClampedMmapRange>>>> = OnceLock::new();
+
+fn clamped_mmaps() -> &'static Mutex<HashMap<u64, Vec<ClampedMmapRange>>> {
+    CLAMPED_MMAPS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn record_clamped_mmap(cageid: u64, addr: u64, len: u64) {
+    if len == 0 {
+        return;
+    }
+
+    let Some(end) = addr.checked_add(len) else {
+        return;
+    };
+
+    let mut maps = clamped_mmaps().lock().unwrap();
+    maps.entry(cageid)
+        .or_default()
+        .push(ClampedMmapRange { start: addr, end });
+}
+
+pub fn is_clamped_mmap(cageid: u64, addr: u64, len: u64) -> bool {
+    if len == 0 {
+        return false;
+    }
+
+    let Some(end) = addr.checked_add(len) else {
+        return false;
+    };
+
+    let maps = clamped_mmaps().lock().unwrap();
+
+    maps.get(&cageid)
+        .map(|ranges| {
+            ranges
+                .iter()
+                .any(|r| addr < r.end && end > r.start)
+        })
+        .unwrap_or(false)
+}
+
+pub fn remove_clamped_mmap(cageid: u64, addr: u64, len: u64) {
+    if len == 0 {
+        return;
+    }
+
+    let Some(end) = addr.checked_add(len) else {
+        return;
+    };
+
+    let mut maps = clamped_mmaps().lock().unwrap();
+
+    let Some(ranges) = maps.get_mut(&cageid) else {
+        return;
+    };
+
+    let mut new_ranges = Vec::with_capacity(ranges.len());
+
+    for r in ranges.drain(..) {
+        // No overlap.
+        if end <= r.start || addr >= r.end {
+            new_ranges.push(r);
+            continue;
+        }
+
+        // Left remainder.
+        if addr > r.start {
+            new_ranges.push(ClampedMmapRange {
+                start: r.start,
+                end: addr,
+            });
+        }
+
+        // Right remainder.
+        if end < r.end {
+            new_ranges.push(ClampedMmapRange {
+                start: end,
+                end: r.end,
+            });
+        }
+    }
+
+    *ranges = new_ranges;
+
+    if ranges.is_empty() {
+        maps.remove(&cageid);
     }
 }
