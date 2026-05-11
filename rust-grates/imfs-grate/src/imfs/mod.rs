@@ -1977,10 +1977,34 @@ impl ImfsState {
             "[TRACE imfs::munmap] cage={} addr=0x{:x} len={}",
             cage_id, addr, len
         );
-        let tracked = self.mmap_tracking.remove(&(cage_id, addr));
+
+        // The cage's mmap return value is a wasm uaddr (what we stored
+        // in mmap_tracking).  By the time munmap reaches us, the
+        // runtime has translated the pointer arg from that uaddr to
+        // the corresponding host sysaddr, so a direct lookup by
+        // (cage, addr) misses.  Fall back to iterating the cage's
+        // entries and matching by len.  For our use (each cage has at
+        // most one live mapping per node) (cage, len) is unique
+        // enough.
+        let mut tracked = self.mmap_tracking.remove(&(cage_id, addr));
+        if tracked.is_none() {
+            let candidate = self
+                .mmap_tracking
+                .iter()
+                .find(|((c, _), (_, l))| *c == cage_id && *l == len)
+                .map(|(k, _)| *k);
+            eprintln!(
+                "[TRACE imfs::munmap]   direct lookup missed, fallback candidate={:?}",
+                candidate
+            );
+            if let Some(k) = candidate {
+                tracked = self.mmap_tracking.remove(&k);
+            }
+        }
         eprintln!(
-            "[TRACE imfs::munmap]   tracked entry removed: {:?}",
-            tracked
+            "[TRACE imfs::munmap]   tracked entry removed: {:?} table_size={}",
+            tracked,
+            self.mmap_tracking.len()
         );
 
         // If we owned this mapping AND it was the last live mapping
