@@ -790,6 +790,10 @@ impl ImfsState {
         // bytes (chunks are stale until munmap syncs them back).  Pull
         // through copy_data_between_cages from the mapping owner.
         if let Some((owner_cage, owner_uaddr)) = self.find_active_mapping(node_idx) {
+            eprintln!(
+                "[TRACE imfs::read_from_node] node={} routing via mapping owner_cage={} owner_uaddr=0x{:x} offset={} count={}",
+                node_idx, owner_cage, owner_uaddr, offset, count
+            );
             let thiscage = getcageid();
             let _ = copy_data_between_cages(
                 thiscage, thiscage,
@@ -850,6 +854,10 @@ impl ImfsState {
         // immediately (POSIX requires fd writes to be visible to
         // MAP_SHARED readers).  Chunks stay stale until munmap.
         if let Some((owner_cage, owner_uaddr)) = self.find_active_mapping(node_idx) {
+            eprintln!(
+                "[TRACE imfs::write_to_node] node={} routing via mapping owner_cage={} owner_uaddr=0x{:x} offset={} len={}",
+                node_idx, owner_cage, owner_uaddr, offset, buf.len()
+            );
             let end = offset + buf.len();
             let thiscage = getcageid();
             let _ = copy_data_between_cages(
@@ -1083,6 +1091,7 @@ impl ImfsState {
 
     /// fork: shares the FDInfo information to the child cage.
     pub fn fork(&mut self, parent_cage: u64, child_cage: u64) {
+        eprintln!("[TRACE imfs::fork] parent={} child={}", parent_cage, child_cage);
         for ((cage_id, fd), underfd_arc) in self.fd_info.clone().iter() {
             if *cage_id == parent_cage {
                 self.fd_info.insert((child_cage, *fd), underfd_arc.clone());
@@ -1103,7 +1112,16 @@ impl ImfsState {
             .filter(|((c, _), _)| *c == parent_cage)
             .map(|(k, v)| (*k, *v))
             .collect();
+        eprintln!(
+            "[TRACE imfs::fork]   mmap_tracking_total={} inherited_from_parent={}",
+            self.mmap_tracking.len(),
+            inherited.len()
+        );
         for ((_, uaddr), value) in inherited {
+            eprintln!(
+                "[TRACE imfs::fork]   copy (parent={},uaddr=0x{:x}) -> (child={},uaddr=0x{:x}) node={} len={}",
+                parent_cage, uaddr, child_cage, uaddr, value.0, value.1
+            );
             self.mmap_tracking.insert((child_cage, uaddr), value);
         }
 
@@ -1219,7 +1237,12 @@ impl ImfsState {
     /// open: create or open a file. Returns the fd allocated by fdtables.
     pub fn open(&mut self, cage_id: u64, path: &str, flags: i32, mode: u32) -> i32 {
         let norm_path = self.normalize_path_for_cage(cage_id, path);
-        self.open_resolved_path(cage_id, &norm_path, flags, mode)
+        let r = self.open_resolved_path(cage_id, &norm_path, flags, mode);
+        eprintln!(
+            "[TRACE imfs::open] cage={} path={:?} norm={:?} flags=0x{:x} mode=0o{:o} -> ret={}",
+            cage_id, path, norm_path, flags, mode, r
+        );
+        r
     }
 
     pub fn openat(&mut self, cage_id: u64, dirfd: i32, path: &str, flags: i32, mode: u32) -> i32 {
@@ -1256,10 +1279,17 @@ impl ImfsState {
 
     /// read: read from a file at the current offset.
     pub fn read(&mut self, cage_id: u64, fd: u64, buf: &mut [u8]) -> i32 {
+        eprintln!(
+            "[TRACE imfs::read] cage={} fd={} buflen={}",
+            cage_id, fd, buf.len()
+        );
         // Look up fd in fdtables — get node index and flags.
         let (node_idx, flags) = match self.get_node_and_flags(cage_id, fd) {
             Ok((n, f)) => (n, f),
-            Err(e) => return e,
+            Err(e) => {
+                eprintln!("[TRACE imfs::read]   get_node_and_flags err={}", e);
+                return e;
+            }
         };
 
         // Return EBADF for reads on non regular files.
@@ -1316,9 +1346,16 @@ impl ImfsState {
 
     /// write: write to a file at the current offset.
     pub fn write(&mut self, cage_id: u64, fd: u64, buf: &[u8]) -> i32 {
+        eprintln!(
+            "[TRACE imfs::write] cage={} fd={} buflen={}",
+            cage_id, fd, buf.len()
+        );
         let (node_idx, flags) = match self.get_node_and_flags(cage_id, fd) {
             Ok((n, f)) => (n, f),
-            Err(e) => return e,
+            Err(e) => {
+                eprintln!("[TRACE imfs::write]   get_node_and_flags err={}", e);
+                return e;
+            }
         };
 
         // Return EBADF for writes on non regular files.
@@ -1740,9 +1777,14 @@ impl ImfsState {
         fd: u64,
         offset: u64,
     ) -> i32 {
+        eprintln!(
+            "[TRACE imfs::mmap] ENTER cage={} fd={} len={} prot=0x{:x} flags=0x{:x} offset={}",
+            cage_id, fd, len, prot, flags, offset
+        );
         // Anonymous mappings aren't ours — bounce so the handler
         // forwards SYS_MMAP through unchanged.
         if (flags & MAP_ANON) != 0 || fd == u64::MAX {
+            eprintln!("[TRACE imfs::mmap]   anonymous or fd=-1 -> bounce ENOSYS");
             return -(grate_rs::constants::error::ENOSYS as i32);
         }
 
@@ -1751,22 +1793,55 @@ impl ImfsState {
         // to the next layer.
         let entry = match fdtables::translate_virtual_fd(cage_id, fd) {
             Ok(e) if e.fdkind == IMFS_FDKIND => e,
-            _ => return -(grate_rs::constants::error::ENOSYS as i32),
+            other => {
+                eprintln!(
+                    "[TRACE imfs::mmap]   fd={} not imfs ({:?}) -> bounce ENOSYS",
+                    fd, other
+                );
+                return -(grate_rs::constants::error::ENOSYS as i32);
+            }
         };
         let node_idx = entry.underfd as usize;
+        eprintln!(
+            "[TRACE imfs::mmap]   cage={} fd={} -> node_idx={}",
+            cage_id, fd, node_idx
+        );
         if node_idx >= self.nodes.len() {
+            eprintln!("[TRACE imfs::mmap]   node_idx out of bounds -> EBADF");
             return -9; // EBADF
+        }
+
+        // If this cage already has an mmap tracked for this node (e.g.
+        // inherited from a fork parent), hand back the same uaddr.
+        let inherited = self.mmap_tracking.iter().find_map(|(&(c, u), &(n, _))| {
+            if c == cage_id && n == node_idx {
+                Some(u)
+            } else {
+                None
+            }
+        });
+        eprintln!(
+            "[TRACE imfs::mmap]   short-circuit check: mmap_tracking_size={} inherited={:?}",
+            self.mmap_tracking.len(),
+            inherited.map(|u| format!("0x{:x}", u))
+        );
+        if let Some(uaddr) = inherited {
+            eprintln!(
+                "[TRACE imfs::mmap]   SHORT-CIRCUIT FIRE cage={} node={} -> return uaddr=0x{:x}",
+                cage_id, node_idx, uaddr
+            );
+            return uaddr as i32;
         }
 
         // Forward to RawPOSIX as MAP_ANON | MAP_SHARED (no MAP_FIXED,
         // no GRATE_MEMORY_FLAG).  The runtime picks a free uaddr in
-        // the calling cage's vmmap — this avoids the previous
-        // approach's bug of clobbering arbitrary cage state by
-        // forcing a host-pointer-derived uaddr.  fd=-1 because we're
-        // not file-backing through RawPOSIX; we'll seed the contents
-        // ourselves below.
+        // the calling cage's vmmap.
         let thiscage = getcageid();
         let cage_flags = MAP_ANON | MAP_SHARED;
+        eprintln!(
+            "[TRACE imfs::mmap]   forwarding SYS_MMAP self={} target={} addr=NULL len={} prot=0x{:x} flags=0x{:x} fd=-1",
+            thiscage, cage_id, len, prot, cage_flags
+        );
         let ret = make_threei_call(
             SYS_MMAP as u32, 0,
             thiscage, cage_id,
@@ -1778,39 +1853,56 @@ impl ImfsState {
             0, 0,                                       // offset = 0
             0,
         );
+        eprintln!("[TRACE imfs::mmap]   SYS_MMAP ret={:?}", ret);
         // mmap returns wasm uaddrs which can have bit 31 set.  Real
         // errnos live in (-256, 0); anything more negative is a
         // valid high uaddr that grate-rs collapsed into Err.
         let mapped = match ret {
             Ok(v) if v >= 0 => v as u32 as u64,
-            Ok(v) => return v,
+            Ok(v) => {
+                eprintln!("[TRACE imfs::mmap]   ret Ok({}) negative -> return as errno", v);
+                return v;
+            }
             Err(grate_rs::GrateError::MakeSyscallError(n)) if n <= -256 => n as u32 as u64,
-            Err(grate_rs::GrateError::MakeSyscallError(n)) => return n,
-            Err(_) => return -(grate_rs::constants::error::ENOMEM as i32),
+            Err(grate_rs::GrateError::MakeSyscallError(n)) => {
+                eprintln!("[TRACE imfs::mmap]   Err MakeSyscallError({}) (errno range) -> return", n);
+                return n;
+            }
+            Err(_) => {
+                eprintln!("[TRACE imfs::mmap]   Err other -> ENOMEM");
+                return -(grate_rs::constants::error::ENOMEM as i32);
+            }
         };
+        eprintln!("[TRACE imfs::mmap]   mapped uaddr=0x{:x}", mapped);
 
         // Seed the new region with the file's current bytes (chunks).
-        // Copies up to min(file_size - offset, len) bytes from chunks
-        // into the cage's freshly-mapped pages.  Pages past EOF stay
-        // zero (anonymous mappings start zeroed).
         let total_size = self.nodes[node_idx].total_size;
         let copy_len = total_size
             .saturating_sub(offset as usize)
             .min(len);
+        eprintln!(
+            "[TRACE imfs::mmap]   seed: total_size={} offset={} len={} copy_len={}",
+            total_size, offset, len, copy_len
+        );
         if copy_len > 0 {
             let mut tmp = vec![0u8; copy_len];
             let _ = self.read_chunks_unmapped(node_idx, offset as usize, &mut tmp);
-            let _ = copy_data_between_cages(
+            let r = copy_data_between_cages(
                 thiscage, cage_id,
                 tmp.as_ptr() as u64, thiscage,
                 mapped, cage_id,
                 copy_len as u64,
                 0,
             );
+            eprintln!("[TRACE imfs::mmap]   seed copy_data_between_cages ret={:?}", r);
         }
 
         // Record the mapping.  Routes future fd I/O through it.
         self.mmap_tracking.insert((cage_id, mapped), (node_idx, len));
+        eprintln!(
+            "[TRACE imfs::mmap]   INSERT (cage={},uaddr=0x{:x}) -> (node={},len={}). table_size={}",
+            cage_id, mapped, node_idx, len, self.mmap_tracking.len()
+        );
 
         mapped as i32
     }
@@ -1881,7 +1973,15 @@ impl ImfsState {
     /// so future fd reads (after no mapping remains) see the latest
     /// bytes.  For untracked addresses we just forward to RawPOSIX.
     pub fn munmap(&mut self, cage_id: u64, addr: u64, len: usize) -> i32 {
+        eprintln!(
+            "[TRACE imfs::munmap] cage={} addr=0x{:x} len={}",
+            cage_id, addr, len
+        );
         let tracked = self.mmap_tracking.remove(&(cage_id, addr));
+        eprintln!(
+            "[TRACE imfs::munmap]   tracked entry removed: {:?}",
+            tracked
+        );
 
         // If we owned this mapping AND it was the last live mapping
         // for the node, copy its bytes back into chunks so the file's
@@ -1973,16 +2073,28 @@ impl ImfsState {
     /// part of cage exit.  We only need to update our own
     /// bookkeeping.
     pub fn cage_exit(&mut self, cage_id: u64) {
-        // Drop any tracking entries this cage owned.  We deliberately
-        // don't try to sync the cage's mapping back to chunks here:
-        // by the time exit_handler fires, the cage may have already
-        // torn down its address space, so a copy_data_between_cages
-        // read from those uaddrs would be invalid (and the runtime
-        // would log a noisy "range invalid" for our best-effort
-        // attempt).  Any cage that wants its mapping bytes to survive
-        // must explicitly munmap — which we do sync.
+        eprintln!("[TRACE imfs::cage_exit] cage={}", cage_id);
+        // Drop any tracking entries this cage owned.
+        let before = self.mmap_tracking.len();
+        let removed: Vec<((u64, u64), (usize, usize))> = self
+            .mmap_tracking
+            .iter()
+            .filter(|((c, _), _)| *c == cage_id)
+            .map(|(k, v)| (*k, *v))
+            .collect();
+        for ((c, u), (n, l)) in &removed {
+            eprintln!(
+                "[TRACE imfs::cage_exit]   drop entry (cage={},uaddr=0x{:x}) -> (node={},len={})",
+                c, u, n, l
+            );
+        }
         self.mmap_tracking
             .retain(|(cage, _addr), _| *cage != cage_id);
+        eprintln!(
+            "[TRACE imfs::cage_exit]   mmap_tracking {} -> {}",
+            before,
+            self.mmap_tracking.len()
+        );
 
         // Clean up the per-cage cwd and any leftover fd offsets too.
         self.cwd_info.remove(&cage_id);
