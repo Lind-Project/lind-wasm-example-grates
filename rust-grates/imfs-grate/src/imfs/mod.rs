@@ -1747,23 +1747,25 @@ impl ImfsState {
         fd: u64,
         offset: u64,
     ) -> i32 {
-        // Refuse non-fd-backed mmaps here — anonymous mappings are
-        // RawPOSIX's job, not ours.  The fd-routing layer should
-        // already ensure those don't reach us, but be defensive.
+        // Anonymous mappings are RawPOSIX's job, not ours: bounce
+        // back to the handler so it forwards SYS_MMAP through to the
+        // next layer unchanged.
         const MAP_ANON_BIT: i32 = MAP_ANON;
         if (flags & MAP_ANON_BIT) != 0 || fd == u64::MAX {
-            // Let caller (the handler) forward to RawPOSIX.
             return -(grate_rs::constants::error::ENOSYS as i32);
         }
 
-        // Look up the fd → node.
+        // Look up the fd.  If we don't own it (no fdtable entry, or
+        // it's a kernel/IPC fd routed through imfs), pass through —
+        // the alias flow only makes sense for imfs-backed files.
         let entry = match fdtables::translate_virtual_fd(cage_id, fd) {
-            Ok(e) => e,
-            Err(_) => return -9, // EBADF
+            Ok(e) if e.fdkind == IMFS_FDKIND => e,
+            Ok(_) => return -(grate_rs::constants::error::ENOSYS as i32),
+            Err(_) => return -(grate_rs::constants::error::ENOSYS as i32),
         };
         let node_idx = entry.underfd as usize;
         if node_idx >= self.nodes.len() {
-            return -9;
+            return -9; // EBADF — we owned the fd but the node is gone
         }
 
         // Lazily promote a plain Reg to RegMapped on first mmap.
