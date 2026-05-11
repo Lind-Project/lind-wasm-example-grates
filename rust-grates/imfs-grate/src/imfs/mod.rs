@@ -1955,31 +1955,16 @@ impl ImfsState {
     /// part of cage exit.  We only need to update our own
     /// bookkeeping.
     pub fn cage_exit(&mut self, cage_id: u64) {
-        let to_drop: Vec<((u64, u64), (usize, usize))> = self
-            .mmap_tracking
-            .iter()
-            .filter(|((cage, _addr), _)| *cage == cage_id)
-            .map(|(k, v)| (*k, *v))
-            .collect();
-
-        for ((cage, addr), (node_idx, len)) in to_drop {
-            self.mmap_tracking.remove(&(cage, addr));
-            // If this was the last live mapping for the node, sync
-            // its bytes back to chunks before they're orphaned.  The
-            // cage's vmmap entry is gone by the time we get here, so
-            // we can't read it after this point.
-            //
-            // Note: cage_exit fires *after* RawPOSIX has torn down
-            // the cage's address space, so the source bytes we'd
-            // try to read here may already be invalid.  Best-effort
-            // — if copy_data_between_cages fails the chunks just
-            // stay at their pre-mmap state, which is the right
-            // failure mode for now.
-            let still_mapped = self.find_active_mapping(node_idx).is_some();
-            if !still_mapped {
-                self.sync_mapping_to_chunks(node_idx, cage, addr, len);
-            }
-        }
+        // Drop any tracking entries this cage owned.  We deliberately
+        // don't try to sync the cage's mapping back to chunks here:
+        // by the time exit_handler fires, the cage may have already
+        // torn down its address space, so a copy_data_between_cages
+        // read from those uaddrs would be invalid (and the runtime
+        // would log a noisy "range invalid" for our best-effort
+        // attempt).  Any cage that wants its mapping bytes to survive
+        // must explicitly munmap — which we do sync.
+        self.mmap_tracking
+            .retain(|(cage, _addr), _| *cage != cage_id);
 
         // Clean up the per-cage cwd and any leftover fd offsets too.
         self.cwd_info.remove(&cage_id);
