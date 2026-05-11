@@ -286,41 +286,22 @@ impl ImfsState {
     /// On grow, the existing region's contents are copied into the
     /// new (larger) region and the old region is unmapped.
     fn ensure_mapped_backing(&mut self, node_idx: usize, min_capacity: usize) -> Result<(), i32> {
-        use std::io::Write;
-        eprintln!(
-            "[imfs|ensure_backing] >> node={} min_cap={:#x}",
-            node_idx, min_capacity
-        );
-        let _ = std::io::stderr().flush();
         let (current_host, current_cap, refs) = match &self.nodes[node_idx].info {
             NodeInfo::RegMapped {
                 host_addr,
                 capacity,
                 mmap_refs,
             } => (*host_addr, *capacity, *mmap_refs),
-            _ => {
-                eprintln!("[imfs|ensure_backing] !! node not RegMapped");
-                let _ = std::io::stderr().flush();
-                return Err(grate_rs::constants::error::EINVAL);
-            }
+            _ => return Err(grate_rs::constants::error::EINVAL),
         };
-        eprintln!(
-            "[imfs|ensure_backing]    current_host={:#x} current_cap={:#x} refs={}",
-            current_host, current_cap, refs
-        );
-        let _ = std::io::stderr().flush();
 
         if min_capacity <= current_cap {
-            eprintln!("[imfs|ensure_backing] << already covered");
-            let _ = std::io::stderr().flush();
             return Ok(());
         }
         if refs > 0 {
             // Cages still have this region mapped; growing would
             // require moving it, which would silently invalidate
             // those mappings.  Refuse instead.
-            eprintln!("[imfs|ensure_backing] !! EBUSY refs={}", refs);
-            let _ = std::io::stderr().flush();
             return Err(grate_rs::constants::error::EBUSY);
         }
 
@@ -360,20 +341,8 @@ impl ImfsState {
         let new_host = match ret {
             Ok(addr) if addr >= 0 => addr as u32 as u64,
             Err(grate_rs::GrateError::MakeSyscallError(n)) if n <= -256 => n as u32 as u64,
-            other => {
-                eprintln!(
-                    "[imfs|ensure_backing] !! SYS_MMAP failed ret={:?}",
-                    other
-                );
-                let _ = std::io::stderr().flush();
-                return Err(grate_rs::constants::error::ENOMEM);
-            }
+            _ => return Err(grate_rs::constants::error::ENOMEM),
         };
-        eprintln!(
-            "[imfs|ensure_backing]    SYS_MMAP got host_addr={:#x}",
-            new_host
-        );
-        let _ = std::io::stderr().flush();
 
         // Copy live bytes (up to the logical file size, not the old
         // capacity) into the new region.  Anonymous mappings are
@@ -415,11 +384,6 @@ impl ImfsState {
             *host_addr = new_host;
             *capacity = new_cap;
         }
-        eprintln!(
-            "[imfs|ensure_backing] << node={} host={:#x} cap={:#x}",
-            node_idx, new_host, new_cap
-        );
-        let _ = std::io::stderr().flush();
         Ok(())
     }
 
@@ -438,25 +402,11 @@ impl ImfsState {
     ///   - `EINVAL` if the node isn't `Reg`.
     ///   - `ENOMEM` if the host mmap failed.
     fn promote_to_mapped(&mut self, node_idx: usize) -> Result<(), i32> {
-        use std::io::Write;
-        eprintln!(
-            "[imfs|promote] >> node={} size={}",
-            node_idx, self.nodes[node_idx].total_size
-        );
-        let _ = std::io::stderr().flush();
         // Must currently be plain Reg.
         let head = match &self.nodes[node_idx].info {
             NodeInfo::Reg { head, .. } => *head,
-            NodeInfo::RegMapped { .. } => {
-                eprintln!("[imfs|promote] << already RegMapped");
-                let _ = std::io::stderr().flush();
-                return Ok(());
-            }
-            _ => {
-                eprintln!("[imfs|promote] !! node not Reg");
-                let _ = std::io::stderr().flush();
-                return Err(grate_rs::constants::error::EINVAL);
-            }
+            NodeInfo::RegMapped { .. } => return Ok(()), // already promoted
+            _ => return Err(grate_rs::constants::error::EINVAL),
         };
 
         let size = self.nodes[node_idx].total_size;
@@ -467,8 +417,6 @@ impl ImfsState {
         const PAGE_SIZE: usize = 4096;
         let cap = ((size.max(1) + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
         let thiscage = getcageid();
-        eprintln!("[imfs|promote]    SYS_MMAP cap={:#x} target=grate({})", cap, thiscage);
-        let _ = std::io::stderr().flush();
         let ret = make_threei_call(
             SYS_MMAP as u32,
             0,
@@ -487,14 +435,8 @@ impl ImfsState {
         let host_addr = match ret {
             Ok(addr) if addr >= 0 => addr as u32 as u64,
             Err(grate_rs::GrateError::MakeSyscallError(n)) if n <= -256 => n as u32 as u64,
-            other => {
-                eprintln!("[imfs|promote] !! SYS_MMAP failed ret={:?}", other);
-                let _ = std::io::stderr().flush();
-                return Err(grate_rs::constants::error::ENOMEM);
-            }
+            _ => return Err(grate_rs::constants::error::ENOMEM),
         };
-        eprintln!("[imfs|promote]    host_addr={:#x}", host_addr);
-        let _ = std::io::stderr().flush();
 
         // Drain the chunk chain into the host mapping in file order.
         let mut chunk_idx = head;
@@ -529,11 +471,6 @@ impl ImfsState {
         };
         self.nodes[node_idx].node_type = NodeType::RegMapped;
 
-        eprintln!(
-            "[imfs|promote] << node={} host={:#x} cap={:#x}",
-            node_idx, host_addr, cap
-        );
-        let _ = std::io::stderr().flush();
         Ok(())
     }
 
@@ -1810,19 +1747,11 @@ impl ImfsState {
         fd: u64,
         offset: u64,
     ) -> i32 {
-        use std::io::Write;
-        eprintln!(
-            "[imfs::mmap] >> cage={} addr={:#x} len={:#x} prot={:#x} flags={:#x} fd={} off={:#x}",
-            cage_id, addr, len, prot, flags, fd as i32, offset
-        );
-        let _ = std::io::stderr().flush();
         // Anonymous mappings are RawPOSIX's job, not ours: bounce
         // back to the handler so it forwards SYS_MMAP through to the
         // next layer unchanged.
         const MAP_ANON_BIT: i32 = MAP_ANON;
         if (flags & MAP_ANON_BIT) != 0 || fd == u64::MAX {
-            eprintln!("[imfs::mmap] << ENOSYS (anonymous)");
-            let _ = std::io::stderr().flush();
             return -(grate_rs::constants::error::ENOSYS as i32);
         }
 
@@ -1831,29 +1760,11 @@ impl ImfsState {
         // the alias flow only makes sense for imfs-backed files.
         let entry = match fdtables::translate_virtual_fd(cage_id, fd) {
             Ok(e) if e.fdkind == IMFS_FDKIND => e,
-            Ok(e) => {
-                eprintln!(
-                    "[imfs::mmap] << ENOSYS (fd is not imfs, fdkind={})",
-                    e.fdkind
-                );
-                let _ = std::io::stderr().flush();
-                return -(grate_rs::constants::error::ENOSYS as i32);
-            }
-            Err(_) => {
-                eprintln!("[imfs::mmap] << ENOSYS (fd not in fdtable)");
-                let _ = std::io::stderr().flush();
-                return -(grate_rs::constants::error::ENOSYS as i32);
-            }
+            Ok(_) => return -(grate_rs::constants::error::ENOSYS as i32),
+            Err(_) => return -(grate_rs::constants::error::ENOSYS as i32),
         };
         let node_idx = entry.underfd as usize;
-        eprintln!(
-            "[imfs::mmap]    fd={} → node_idx={}",
-            fd, node_idx
-        );
-        let _ = std::io::stderr().flush();
         if node_idx >= self.nodes.len() {
-            eprintln!("[imfs::mmap] << EBADF node out of range");
-            let _ = std::io::stderr().flush();
             return -9; // EBADF — we owned the fd but the node is gone
         }
 
@@ -1923,11 +1834,6 @@ impl ImfsState {
         let target_addr = host_addr + offset;
         let thiscage = getcageid();
         let cage_flags = MAP_ANON | MAP_SHARED | MAP_FIXED;
-        eprintln!(
-            "[imfs::mmap]    cage-side SYS_MMAP target_addr={:#x} (host) flags={:#x} target_cage={}",
-            target_addr, cage_flags, cage_id
-        );
-        let _ = std::io::stderr().flush();
         let ret = make_threei_call(
             SYS_MMAP as u32,
             0,
@@ -1942,35 +1848,16 @@ impl ImfsState {
             0,
         );
         let _ = flags; // user-supplied flags intentionally ignored above
-        eprintln!("[imfs::mmap]    cage-side SYS_MMAP ret={:?}", ret);
-        let _ = std::io::stderr().flush();
         // Same sign-bit-vs-errno disambiguation as
         // ensure_mapped_backing: mmap returns user_addrs which can
         // have bit 31 set.  Only values in (-256, 0) are real errnos.
         let mapped = match ret {
             Ok(v) if v >= 0 => v as u32 as u64,
-            Ok(v) => {
-                eprintln!("[imfs::mmap] << small-positive ret={}", v);
-                let _ = std::io::stderr().flush();
-                return v;
-            }
+            Ok(v) => return v,                                            // small positive / 0
             Err(grate_rs::GrateError::MakeSyscallError(n)) if n <= -256 => n as u32 as u64,
-            Err(grate_rs::GrateError::MakeSyscallError(n)) => {
-                eprintln!("[imfs::mmap] << real errno={}", n);
-                let _ = std::io::stderr().flush();
-                return n;
-            }
-            Err(_) => {
-                eprintln!("[imfs::mmap] << EREMCHG (non-syscall threei error)");
-                let _ = std::io::stderr().flush();
-                return -77;
-            }
+            Err(grate_rs::GrateError::MakeSyscallError(n)) => return n,   // real errno
+            Err(_) => return -77, // EREMCHG marker — non-syscall threei error
         };
-        eprintln!(
-            "[imfs::mmap]    mapped uaddr={:#x} (in cage {})",
-            mapped, cage_id
-        );
-        let _ = std::io::stderr().flush();
 
         // Bump refs and record the live mapping so munmap can find
         // it.  Use the address RawPOSIX actually returned (== target_addr
@@ -1980,8 +1867,6 @@ impl ImfsState {
         }
         self.mmap_tracking.insert((cage_id, mapped), (node_idx, len));
 
-        eprintln!("[imfs::mmap] << mapped={:#x}", mapped);
-        let _ = std::io::stderr().flush();
         mapped as i32
     }
 

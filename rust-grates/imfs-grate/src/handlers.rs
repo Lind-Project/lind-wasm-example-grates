@@ -277,23 +277,15 @@ pub extern "C" fn read_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    use std::io::Write;
     let cage_id = arg1cage;
     let fd = arg1;
     let count = arg3 as usize;
     let this_cage = getcageid();
-    eprintln!(
-        "[imfs|read] >> cage={} fd={} buf={:#x} bufcage={:#x} count={}",
-        cage_id, fd, arg2, arg2cage, count
-    );
-    let _ = std::io::stderr().flush();
 
     // Allocate a local buffer, read into it, then copy to cage.
     let mut buf = vec![0u8; count];
 
     let ret = imfs::with_imfs(|state| state.read(cage_id, fd, &mut buf));
-    eprintln!("[imfs|read]    state.read ret={}", ret);
-    let _ = std::io::stderr().flush();
 
     // Copy result to the cage's buffer (if buf ptr is non-null and read succeeded).
     if ret > 0 && arg2 != 0 {
@@ -307,12 +299,8 @@ pub extern "C" fn read_handler(
             count as u64,
             0, // copytype=0 means raw memcpy
         );
-        eprintln!("[imfs|read]    copy_data_between_cages done");
-        let _ = std::io::stderr().flush();
     }
 
-    eprintln!("[imfs|read] << ret={}", ret);
-    let _ = std::io::stderr().flush();
     ret
 }
 
@@ -339,16 +327,10 @@ pub extern "C" fn write_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    use std::io::Write;
     let cage_id = arg1cage;
     let fd = arg1;
     let count = arg3 as usize;
     let this_cage = getcageid();
-    eprintln!(
-        "[imfs|write] >> cage={} fd={} buf={:#x} bufcage={:#x} count={}",
-        cage_id, fd, arg2, arg2cage, count
-    );
-    let _ = std::io::stderr().flush();
 
     // Copy the write data from the cage's buffer into a local buffer.
     let mut buf = vec![0u8; count];
@@ -363,24 +345,17 @@ pub extern "C" fn write_handler(
         count as u64,
         0,
     );
-    eprintln!("[imfs|write]    copy_data_between_cages done");
-    let _ = std::io::stderr().flush();
 
     // Special case: fd 0/1/2 (stdin/stdout/stderr) pass through to real write.
     if fd < 3 {
-        eprintln!("[imfs|write]    stdio passthrough fd={} count={}", fd, count);
-        let _ = std::io::stderr().flush();
         // Write directly to the real fd.
-        let ret = unsafe { libc::write(fd as i32, buf.as_ptr() as *const _, count) };
-        eprintln!("[imfs|write] << stdio ret={}", ret);
-        let _ = std::io::stderr().flush();
-        return ret as i32;
+        unsafe {
+            let ret = libc::write(fd as i32, buf.as_ptr() as *const _, count);
+            return ret as i32;
+        }
     }
 
-    let ret = imfs::with_imfs(|state| state.write(cage_id, fd, &buf));
-    eprintln!("[imfs|write] << ret={}", ret);
-    let _ = std::io::stderr().flush();
-    ret
+    imfs::with_imfs(|state| state.write(cage_id, fd, &buf))
 }
 
 // =====================================================================
@@ -405,19 +380,10 @@ pub extern "C" fn lseek_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    use std::io::Write;
     let offset = arg2 as i64;
     let whence = arg3 as i32;
-    eprintln!(
-        "[imfs|lseek] >> cage={} fd={} offset={} whence={}",
-        arg1cage, arg1, offset, whence
-    );
-    let _ = std::io::stderr().flush();
 
-    let ret = imfs::with_imfs(|state| state.lseek(arg1cage, arg1, offset, whence));
-    eprintln!("[imfs|lseek] << ret={}", ret);
-    let _ = std::io::stderr().flush();
-    ret
+    imfs::with_imfs(|state| state.lseek(arg1cage, arg1, offset, whence))
 }
 
 // =====================================================================
@@ -1250,17 +1216,11 @@ pub extern "C" fn mmap_handler(
     arg5: u64, arg5cage: u64,    // fd (integer — reliable for cage_id)
     arg6: u64, arg6cage: u64,    // offset
 ) -> i32 {
-    use std::io::Write;
     // Use an integer-arg's cage tag, not arg1's: arg1 is a pointer
     // (addr hint), so its cage tag may have been rewritten by a
     // transient grate.  arg5 (fd) is an integer; its cage tag is
     // the original caller.  See open_handler's note on this.
     let cage_id = arg5cage;
-    eprintln!(
-        "[imfs|mmap] >> cage={} addr={:#x} (acage={:#x}) len={:#x} prot={:#x} flags={:#x} fd={} off={:#x}",
-        cage_id, arg1, arg1cage, arg2, arg3, arg4, arg5 as i32, arg6
-    );
-    let _ = std::io::stderr().flush();
 
     let ret = imfs::with_imfs(|state| {
         state.mmap(
@@ -1273,17 +1233,13 @@ pub extern "C" fn mmap_handler(
             arg6,
         )
     });
-    eprintln!("[imfs|mmap]    state.mmap ret={:#x}", ret as u32);
-    let _ = std::io::stderr().flush();
 
     // imfs::mmap returns -ENOSYS when the request isn't ours to
     // handle (anonymous, or a non-RegMapped fd) — forward to
     // RawPOSIX in that case so the cage sees normal mmap semantics.
     if ret == -(grate_rs::constants::error::ENOSYS as i32) {
         let thiscage = getcageid();
-        eprintln!("[imfs|mmap]    forwarding to RawPOSIX target={}", cage_id);
-        let _ = std::io::stderr().flush();
-        let fwd = match make_threei_call(
+        return match make_threei_call(
             SYS_MMAP as u32,
             0,
             thiscage,
@@ -1300,13 +1256,8 @@ pub extern "C" fn mmap_handler(
             Err(grate_rs::GrateError::MakeSyscallError(n)) => n,
             Err(_) => -(grate_rs::constants::error::ENOMEM as i32),
         };
-        eprintln!("[imfs|mmap] << forward ret={:#x}", fwd as u32);
-        let _ = std::io::stderr().flush();
-        return fwd;
     }
 
-    eprintln!("[imfs|mmap] << ret={:#x}", ret as u32);
-    let _ = std::io::stderr().flush();
     ret
 }
 
@@ -1330,16 +1281,7 @@ pub extern "C" fn munmap_handler(
     _arg5: u64, _arg5cage: u64,
     _arg6: u64, _arg6cage: u64,
 ) -> i32 {
-    use std::io::Write;
-    eprintln!(
-        "[imfs|munmap] >> cage={} addr={:#x} len={:#x}",
-        arg2cage, arg1, arg2
-    );
-    let _ = std::io::stderr().flush();
-    let ret = imfs::with_imfs(|state| state.munmap(arg2cage, arg1, arg2 as usize));
-    eprintln!("[imfs|munmap] << ret={}", ret);
-    let _ = std::io::stderr().flush();
-    ret
+    imfs::with_imfs(|state| state.munmap(arg2cage, arg1, arg2 as usize))
 }
 
 // =====================================================================
@@ -1363,15 +1305,12 @@ pub extern "C" fn exit_handler(
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
 ) -> i32 {
-    use std::io::Write;
     let cage_id = arg1cage;
-    eprintln!("[imfs|exit] >> cage={} status={}", cage_id, arg1 as i32);
-    let _ = std::io::stderr().flush();
     imfs::with_imfs(|s| s.cage_exit(cage_id));
     let _ = fdtables::remove_cage_from_fdtable(cage_id);
 
     let thiscage = getcageid();
-    let ret = match make_threei_call(
+    match make_threei_call(
         SYS_EXIT as u32,
         0,
         thiscage,
@@ -1387,10 +1326,7 @@ pub extern "C" fn exit_handler(
         Ok(v) => v,
         Err(grate_rs::GrateError::MakeSyscallError(n)) => n,
         Err(_) => -1,
-    };
-    eprintln!("[imfs|exit] << ret={}", ret);
-    let _ = std::io::stderr().flush();
-    ret
+    }
 }
 
 pub extern "C" fn exit_group_handler(
@@ -1402,15 +1338,12 @@ pub extern "C" fn exit_group_handler(
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
 ) -> i32 {
-    use std::io::Write;
     let cage_id = arg1cage;
-    eprintln!("[imfs|exit_group] >> cage={} status={}", cage_id, arg1 as i32);
-    let _ = std::io::stderr().flush();
     imfs::with_imfs(|s| s.cage_exit(cage_id));
     let _ = fdtables::remove_cage_from_fdtable(cage_id);
 
     let thiscage = getcageid();
-    let ret = match make_threei_call(
+    match make_threei_call(
         SYS_EXIT_GROUP as u32,
         0,
         thiscage,
@@ -1426,10 +1359,7 @@ pub extern "C" fn exit_group_handler(
         Ok(v) => v,
         Err(grate_rs::GrateError::MakeSyscallError(n)) => n,
         Err(_) => -1,
-    };
-    eprintln!("[imfs|exit_group] << ret={}", ret);
-    let _ = std::io::stderr().flush();
-    ret
+    }
 }
 
 // =====================================================================
@@ -1454,13 +1384,7 @@ pub extern "C" fn fork_handler(
     arg6: u64,
     arg6cage: u64,
 ) -> i32 {
-    use std::io::Write;
     let this_cage = getcageid();
-    eprintln!(
-        "[imfs|fork] >> caller={} cageid={} clone_args={:#x} (acage={:#x})",
-        arg1cage, cageid, arg1, arg1cage
-    );
-    let _ = std::io::stderr().flush();
 
     // Forward the fork to the runtime.
     let ret = match make_threei_call(
@@ -1483,33 +1407,20 @@ pub extern "C" fn fork_handler(
         0,
     ) {
         Ok(r) => r,
-        Err(_) => {
-            eprintln!("[imfs|fork] !! SYS_CLONE returned Err");
-            let _ = std::io::stderr().flush();
-            return -1;
-        }
+        Err(_) => return -1,
     };
-    eprintln!("[imfs|fork]    SYS_CLONE child={}", ret);
-    let _ = std::io::stderr().flush();
 
     let child_cage_id = ret as u64;
 
     if !is_thread_clone(arg1, arg1cage) {
-        eprintln!("[imfs|fork]    copying fdtable+state to child={}", child_cage_id);
-        let _ = std::io::stderr().flush();
         // Clone the fdtables for the child — inherits all open fds.
         let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
 
         imfs::with_imfs(|state| {
             state.fork(arg1cage, child_cage_id);
         });
-    } else {
-        eprintln!("[imfs|fork]    thread clone, skipping fdtable copy");
-        let _ = std::io::stderr().flush();
     }
 
-    eprintln!("[imfs|fork] << ret={}", child_cage_id);
-    let _ = std::io::stderr().flush();
     child_cage_id as i32
 }
 
