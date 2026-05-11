@@ -1767,11 +1767,14 @@ impl ImfsState {
         // This is the postgres-DSM "worker attaches to existing segment
         // by name" pattern; without it each child would get a fresh
         // anonymous region with no real sharing.
-        if let Some((&(_, uaddr), _)) = self
-            .mmap_tracking
-            .iter()
-            .find(|((c, _), (n, _))| *c == cage_id && *n == node_idx)
-        {
+        let inherited = self.mmap_tracking.iter().find_map(|(&(c, u), &(n, _))| {
+            if c == cage_id && n == node_idx {
+                Some(u)
+            } else {
+                None
+            }
+        });
+        if let Some(uaddr) = inherited {
             return uaddr as i32;
         }
 
