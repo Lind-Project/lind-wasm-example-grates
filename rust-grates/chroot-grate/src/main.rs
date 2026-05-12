@@ -1381,7 +1381,7 @@ extern "C" fn chdir_handler(
     let cwd = get_cage_cwd(cageid);
     let new_cwd = normalize_path(&path, &cwd);
 
-    match check_dir(new_cwd.clone()) {
+    match check_dir(chroot_path(&new_cwd, cageid)) {
         false => return -20, // ENOTDIR
         true => {
             // Update the cwd of cage in our hashmap.
@@ -1560,6 +1560,8 @@ fn main() {
 
     log!("Initial cwd: {}", initial_cwd);
 
+    let initial_cwd_for_child = initial_cwd.clone();
+
     let builder = GrateBuilder::new()
         // Process management
         .register(SYS_CLONE, fork_handler)
@@ -1611,6 +1613,13 @@ fn main() {
         .register(SYS_GETSOCKNAME, getsockname_handler)
         .register(SYS_GETPEERNAME, getpeername_handler)
         .register(SYS_RECVFROM, recvfrom_handler)
+        .preexec(move |child_cage| {
+            let child_cage = child_cage as u64;
+            set_cage_cwd(child_cage, initial_cwd_for_child.clone());
+            if let Some(ref mut cages) = *CAGE_DIR_FDS.lock().unwrap() {
+                cages.entry(child_cage).or_insert_with(HashMap::new);
+            }
+        })
         .teardown(|result| {
             log!("Result: {:#?}", result);
         });
