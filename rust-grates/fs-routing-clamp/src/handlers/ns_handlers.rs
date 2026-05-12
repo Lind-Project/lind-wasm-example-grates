@@ -575,8 +575,6 @@ pub extern "C" fn ns_dup2_handler(
         let _ = fdtables::get_specific_virtual_fd(arg1cage, arg2, 0, ret as u64, false, perfdinfo);
     }
 
-    println!("dup2 handler: arg1(fd)={}, arg2(target fd)={}, perfdinfo={}, ret={}", arg1, arg2, perfdinfo, ret);
-
     ret
 }
 
