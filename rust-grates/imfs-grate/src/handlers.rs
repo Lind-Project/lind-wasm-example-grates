@@ -764,6 +764,93 @@ pub extern "C" fn fstat_handler(
     ret
 }
 
+pub extern "C" fn statfs_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    if arg2 == 0 {
+        return -14; // EFAULT
+    }
+
+    let pathname = match copy_path_from_cage(arg1, arg1cage) {
+        Some(p) => p,
+        None => return -14,
+    };
+
+    let mut statbuf = imfs::FsData::default();
+    let ret = imfs::with_imfs(|state| state.statfs(arg2cage, &pathname, &mut statbuf));
+
+    if ret < 0 {
+        return ret;
+    }
+
+    let this_cage = getcageid();
+    let _ = copy_data_between_cages(
+        this_cage,
+        arg2cage,
+        &statbuf as *const imfs::FsData as u64,
+        this_cage,
+        arg2,
+        arg2cage,
+        std::mem::size_of::<imfs::FsData>() as u64,
+        0,
+    );
+
+    ret
+}
+
+pub extern "C" fn fstatfs_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    if arg2 == 0 {
+        return -14; // EFAULT
+    }
+
+    let mut statbuf = imfs::FsData::default();
+    let ret = imfs::with_imfs(|state| state.fstatfs(arg1cage, arg1, &mut statbuf));
+
+    if ret < 0 {
+        return ret;
+    }
+
+    let this_cage = getcageid();
+    let _ = copy_data_between_cages(
+        this_cage,
+        arg2cage,
+        &statbuf as *const imfs::FsData as u64,
+        this_cage,
+        arg2,
+        arg2cage,
+        std::mem::size_of::<imfs::FsData>() as u64,
+        0,
+    );
+
+    ret
+}
+
 // =====================================================================
 //  unlink (syscall 87)
 //
@@ -892,7 +979,13 @@ fn renameat_impl(
     };
 
     imfs::with_imfs(|state| {
-        state.renameat(cage_id, olddirfd as i32, &oldpath, newdirfd as i32, &newpath)
+        state.renameat(
+            cage_id,
+            olddirfd as i32,
+            &oldpath,
+            newdirfd as i32,
+            &newpath,
+        )
     })
 }
 
