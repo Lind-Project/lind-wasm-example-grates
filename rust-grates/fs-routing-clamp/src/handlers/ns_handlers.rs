@@ -41,7 +41,7 @@ macro_rules! define_path_handler {
             };
 
             let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
-            let path = helpers::resolve_path_from_cage(arg2cage, arg1, arg1cage).unwrap_or_default();
+            let path = helpers::read_path_from_cage(arg1, arg1cage).unwrap_or_default();
             // println!(
             //     "[ns_handlers|{}] arg1 (path)={} routed to={} ret={}",
             //     stringify!($name),
@@ -133,8 +133,16 @@ pub extern "C" fn ns_chdir_handler(
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
 
     if ret == 0 {
-        helpers::set_cage_cwd(arg2cage, resolved_path);
+        helpers::set_cage_cwd(arg2cage, resolved_path.clone());
     }
+
+    // println!(
+    //     "[ns_handlers|chdir] arg1 (path)={} resolved_path={} routed to={} ret={}",
+    //     pathstr,
+    //     resolved_path,
+    //     if nr == SYS_CHDIR { "kernel" } else { "clamped grate" },
+    //     ret,
+    // );
 
     ret
 }
@@ -173,6 +181,11 @@ macro_rules! fd_route_handler {
             let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
                 Ok(entry) => entry,
                 Err(_) => {
+                    // println!(
+                    //     "[ns_handlers|{}] arg1(fd)={} is not a valid virtual fd, returning EBADF",
+                    //     stringify!($name),
+                    //     arg1,
+                    // );
                     return -(EBADF as i32);
                 }
             };
@@ -200,18 +213,6 @@ macro_rules! fd_route_handler {
             }
 
             let ret = helpers::do_syscall(arg1cage, $sysno, &args, &arg_cages);
-            // if $sysno == SYS_FXSTAT && arg1 == 256 {
-            //     println!(
-            //         "[ns_handlers|{}] grateid={}, argcageid={}, arg1(fd)={}, underfd={}, clamped={}, ret={}",
-            //         stringify!($name),
-            //         cageid,
-            //         arg1cage,
-            //         arg1,
-            //         old_fd_entry.underfd,
-            //         if perfdinfo { "clamped grate" } else { "kernel" },
-            //         ret,
-            //     );
-            // } else {
             // println!(
             //     "[ns_handlers|{}] arg1(fd)={}, clamped={}, ret={}",
             //     stringify!($name),
@@ -225,7 +226,7 @@ macro_rules! fd_route_handler {
     };
 }
 
-fd_route_handler!(ns_openat_handler, SYS_OPENAT);
+// fd_route_handler!(ns_openat_handler, SYS_OPENAT);
 fd_route_handler!(ns_getdents_handler, SYS_GETDENTS);
 fd_route_handler!(ns_read_handler, SYS_READ);
 fd_route_handler!(ns_write_handler, SYS_WRITE);
@@ -237,7 +238,7 @@ fd_route_handler!(ns_writev_handler, SYS_WRITEV);
 fd_route_handler!(ns_pwritev_handler, SYS_PWRITEV);
 fd_route_handler!(ns_lseek_handler, SYS_LSEEK);
 fd_route_handler!(ns_fstat_handler, SYS_FXSTAT);
-fd_route_handler!(ns_fstatat_handler, SYS_NEWFSTATAT);
+// fd_route_handler!(ns_fstatat_handler, SYS_NEWFSTATAT);
 fd_route_handler!(ns_ftruncate_handler, SYS_FTRUNCATE);
 fd_route_handler!(ns_fchmod_handler, SYS_FCHMOD);
 fd_route_handler!(ns_fchdir_handler, SYS_FCHDIR);
@@ -301,7 +302,7 @@ pub extern "C" fn ns_open_handler(
             clamped, // perfdinfo: 1=clamped, 0=not
         ) {
             Ok(vfd) => {
-                let path = helpers::resolve_path_from_cage(arg2cage, arg1, arg1cage).unwrap_or_default();
+                let path = helpers::read_path_from_cage(arg1, arg1cage).unwrap_or_default();
                 // println!(
                 //     "[ns_handlers|open] path={}, grateid={}, argcageid={}, underfd={}, vfd={} clamped={}",
                 //     path,
@@ -535,6 +536,256 @@ pub extern "C" fn ns_fcntl_handler(
     ret
 }
 
+// potential bug: may escape the path isolation. can be handled by checking in the individual namespace grates
+pub extern "C" fn ns_fstatat_handler(
+    cageid: u64,
+    arg1: u64,      // dirfd
+    arg1cage: u64,
+    arg2: u64,      // pathname
+    arg2cage: u64,
+    arg3: u64,      // statbuf
+    arg3cage: u64,
+    arg4: u64,      // flags
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    const AT_FDCWD_I64: i64 = -100;
+
+    let is_at_fdcwd = (arg1 as i64) == AT_FDCWD_I64;
+
+    let path = helpers::read_path_from_cage(arg2, arg2cage).unwrap_or_default();
+
+    let mut underfd = arg1;
+    let mut dirfd_clamped = false;
+
+    /*
+     * If dirfd is not AT_FDCWD, translate virtual dirfd -> underlying kernel fd.
+     */
+    if !is_at_fdcwd {
+        let fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
+            Ok(entry) => entry,
+            Err(_) => {
+                // println!(
+                //     "[ns_handlers|fstatat] dirfd={} path={} invalid virtual fd, ret=EBADF",
+                //     arg1, path,
+                // );
+                return -(EBADF as i32);
+            }
+        };
+
+        underfd = fd_entry.underfd;
+        dirfd_clamped = fd_entry.perfdinfo != 0;
+        args[0] = underfd;
+    }
+
+    /*
+     * Routing decision:
+     *
+     * - empty path: usually AT_EMPTY_PATH; route by dirfd only.
+     * - absolute path: dirfd is ignored, route by absolute path prefix.
+     * - AT_FDCWD + relative path: resolve relative to caller cage cwd.
+     * - real dirfd + relative path: route by dirfd's clamped status.
+     */
+    let should_clamp = if path.is_empty() {
+        dirfd_clamped
+    } else if path.starts_with('/') {
+        let resolved = helpers::normalize_path(&path);
+        helpers::path_matches_prefix(&resolved)
+    } else if is_at_fdcwd {
+        helpers::resolve_path_from_cage(arg2cage, arg2, arg2cage)
+            .map(|resolved| helpers::path_matches_prefix(&resolved))
+            .unwrap_or(false)
+    } else {
+        dirfd_clamped
+    };
+
+    let printpath = helpers::resolve_path_from_cage(arg2cage, arg2, arg2cage).unwrap_or_else(|| "<unresolvable>".to_string());
+    // println!(
+    //     "[ns_handlers|fstatat] dirfd={}, underfd={}, path={}, resolved={}, is_at_fdcwd={}, dirfd_clamped={}, should_clamp={}",
+    //     arg1,
+    //     underfd,
+    //     path,
+    //     printpath,
+    //     is_at_fdcwd,
+    //     dirfd_clamped,
+    //     should_clamp,
+    // );
+
+    let ret = if should_clamp {
+        match helpers::get_route(arg1cage, SYS_NEWFSTATAT) {
+            Some(alt) => helpers::do_syscall(arg1cage, alt, &args, &arg_cages),
+            None => helpers::do_clamp_syscall(arg1cage, SYS_NEWFSTATAT, &args, &arg_cages),
+        }
+    } else {
+        helpers::do_syscall(arg1cage, SYS_NEWFSTATAT, &args, &arg_cages)
+    };
+
+    // let resolved_for_log = if path.is_empty() {
+    //     "<empty>".to_string()
+    // } else if path.starts_with('/') {
+    //     helpers::normalize_path(&path)
+    // } else if is_at_fdcwd {
+    //     helpers::resolve_path_from_cage(arg1cage, arg2, arg2cage)
+    //         .unwrap_or_else(|| "<resolve-failed>".to_string())
+    // } else {
+    //     format!("<relative-to-dirfd:{}>/{}", arg1, path)
+    // };
+
+    // println!(
+    //     "[ns_handlers|fstatat] dirfd={}, underfd={}, path={}, resolved={}, flags={}, grateid={}, argcageid={}, routed to={}, ret={}",
+    //     arg1,
+    //     underfd,
+    //     path,
+    //     resolved_for_log,
+    //     arg4,
+    //     cageid,
+    //     arg1cage,
+    //     if should_clamp { "clamped grate" } else { "kernel" },
+    //     ret,
+    // );
+
+    ret
+}
+
+pub extern "C" fn ns_openat_handler(
+    cageid: u64,
+    arg1: u64,      // dirfd
+    arg1cage: u64,
+    arg2: u64,      // pathname
+    arg2cage: u64,
+    arg3: u64,      // flags
+    arg3cage: u64,
+    arg4: u64,      // mode
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    // Linux AT_FDCWD = -100.
+    let is_at_fdcwd = (arg1 as i64) == -100;
+
+    let path = helpers::read_path_from_cage(arg2, arg2cage).unwrap_or_default();
+
+    let mut dirfd_clamped = false;
+    let mut underfd = arg1;
+
+    /*
+     * If dirfd is not AT_FDCWD, translate virtual fd -> kernel fd.
+     */
+    if !is_at_fdcwd {
+        let fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
+            Ok(entry) => entry,
+            Err(_) => {
+                // println!(
+                //     "[ns_handlers|openat] dirfd={} path={} invalid virtual fd, ret=EBADF",
+                //     arg1, path,
+                // );
+                return -(EBADF as i32);
+            }
+        };
+
+        underfd = fd_entry.underfd;
+        dirfd_clamped = fd_entry.perfdinfo != 0;
+        args[0] = underfd;
+    }
+
+    /*
+     * Routing decision:
+     *
+     * 1. If dirfd is clamped, relative openat should route to the clamped grate.
+     * 2. If path is absolute or dirfd is AT_FDCWD, resolve by cage cwd and check prefix.
+     * 3. Otherwise, if dirfd is not clamped and path is relative, pass through kernel.
+     */
+    let path_matches = if !path.is_empty() {
+        if path.starts_with("/") || is_at_fdcwd {
+            helpers::resolve_path_from_cage(arg2cage, arg2, arg1cage)
+                .map(|p| helpers::path_matches_prefix(&p))
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let should_clamp = dirfd_clamped || path_matches;
+
+    let nr = match helpers::get_route(arg1cage, SYS_OPENAT) {
+        Some(alt) if should_clamp => alt,
+        _ => SYS_OPENAT,
+    };
+
+    let ret = if should_clamp && nr == SYS_OPENAT {
+        helpers::do_clamp_syscall(arg1cage, SYS_OPENAT, &args, &arg_cages)
+    } else {
+        helpers::do_syscall(arg1cage, nr, &args, &arg_cages)
+    };
+
+    /*
+     * On success, record returned kernel fd as a virtual fd.
+     * perfdinfo=1 means fd belongs to clamped namespace/grate.
+     */
+    if ret >= 0 {
+        let clamped = if should_clamp { 1u64 } else { 0u64 };
+
+        match fdtables::get_unused_virtual_fd(
+            arg1cage,
+            0,          // fdkind
+            ret as u64, // underfd
+            false,      // should_cloexec; openat O_CLOEXEC handling not tracked here
+            clamped,    // perfdinfo
+        ) {
+            Ok(vfd) => {
+                // println!(
+                //     "[ns_handlers|openat] dirfd={}, underfd={}, path={}, flags={}, mode={}, grateid={}, argcageid={}, returned_underfd={}, vfd={}, routed to={}",
+                //     arg1,
+                //     underfd,
+                //     path,
+                //     arg3,
+                //     arg4,
+                //     cageid,
+                //     arg1cage,
+                //     ret,
+                //     vfd,
+                //     if should_clamp { "clamped grate" } else { "kernel" },
+                // );
+                return vfd as i32;
+            }
+            Err(_) => {
+                // Avoid leaking the kernel fd if we cannot allocate a virtual fd.
+                let close_args = [ret as u64, 0, 0, 0, 0, 0];
+                let close_cages = [arg1cage, arg1cage, arg1cage, arg1cage, arg1cage, arg1cage];
+                let _ = helpers::do_syscall(arg1cage, SYS_CLOSE, &close_args, &close_cages);
+
+                return -(EMFILE as i32);
+            }
+        }
+    }
+
+    // println!(
+    //     "[ns_handlers|openat] dirfd={}, underfd={}, path={}, flags={}, mode={}, routed to={}, ret={}",
+    //     arg1,
+    //     underfd,
+    //     path,
+    //     arg3,
+    //     arg4,
+    //     if should_clamp { "clamped grate" } else { "kernel" },
+    //     ret,
+    // );
+
+    ret
+}
+
 /// dup (syscall 32): duplicate a file descriptor.
 ///
 /// Routes based on fdtables, then copies the perfdinfo to the new fd.
@@ -757,6 +1008,10 @@ pub extern "C" fn ns_getcwd_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
+    // println!(
+    //     "[ns_handlers|getcwd] arg1cage={}",
+    //     arg1cage
+    // );
     let ns_cage = getcageid();
 
     let cwd = helpers::get_cage_cwd(arg2cage);
