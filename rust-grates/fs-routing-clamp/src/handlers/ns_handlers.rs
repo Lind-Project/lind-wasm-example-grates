@@ -39,7 +39,14 @@ macro_rules! define_path_handler {
                 None => $sysno,
             };
 
-            helpers::do_syscall(arg1cage, nr, &args, &arg_cages)
+            let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
+            // if $sysno == SYS_CHMOD {
+            //     let path = helpers::resolve_path_from_cage(arg2cage, arg1, arg1cage).unwrap();
+            //     println!("chmod {} {:o} -> {}", path, arg3, ret);
+            // }
+            let path = helpers::resolve_path_from_cage(arg2cage, arg1, arg1cage).unwrap_or_default();
+            println!("ns_{}: arg1 (path ptr) = {}, arg1cage = {}, ret = {}", stringify!($name), path, arg1cage, ret);
+            ret
         }
     };
 }
@@ -83,6 +90,8 @@ pub extern "C" fn ns_chdir_handler(
 ) -> i32 {
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    // println!("ns_chdir_handler: arg1 (path ptr) = {}, arg1cage = {}", arg1, arg1cage);
 
     let ns_cage = getcageid();
     let mut buf = vec![0u8; 4096];
@@ -178,7 +187,10 @@ macro_rules! fd_route_handler {
                 };
             }
 
-            helpers::do_syscall(arg1cage, $sysno, &args, &arg_cages)
+            let ret= helpers::do_syscall(arg1cage, $sysno, &args, &arg_cages);
+            let alt = helpers::get_route(arg1cage, $sysno).unwrap_or($sysno);
+            println!("ns_{}: arg1 (fd) = {}, ret = {}, alt = {}", stringify!($name), arg1, ret, alt);
+            ret
         }
     };
 }
@@ -195,6 +207,7 @@ fd_route_handler!(ns_writev_handler, SYS_WRITEV);
 fd_route_handler!(ns_pwritev_handler, SYS_PWRITEV);
 fd_route_handler!(ns_lseek_handler, SYS_LSEEK);
 fd_route_handler!(ns_fstat_handler, SYS_FXSTAT);
+fd_route_handler!(ns_fstatat_handler, SYS_NEWFSTATAT);
 fd_route_handler!(ns_ftruncate_handler, SYS_FTRUNCATE);
 fd_route_handler!(ns_fchmod_handler, SYS_FCHMOD);
 fd_route_handler!(ns_fchdir_handler, SYS_FCHDIR);
@@ -259,6 +272,7 @@ pub extern "C" fn ns_open_handler(
         );
     }
 
+    // println!("ns_open_handler: arg1 (path ptr) = {}, arg1cage = {}, ret = {}", arg1, arg1cage, ret);
     ret
 }
 
@@ -299,6 +313,7 @@ pub extern "C" fn ns_close_handler(
     // Always remove the fd from our tracking.
     let _ = fdtables::close_virtualfd(arg1cage, arg1);
 
+    println!("ns_close_handler: arg1 (fd) = {}, arg1cage = {}, ret = {}", arg1, arg1cage, ret);
     ret
 }
 
@@ -437,6 +452,8 @@ pub extern "C" fn ns_fcntl_handler(
             );
         }
     }
+
+    // println!("ns_fcntl_handler: arg1 (fd) = {}, arg1cage = {}, cmd = {}, ret = {}", arg1, arg1cage, arg2, ret);
 
     ret
 }
@@ -623,6 +640,7 @@ pub extern "C" fn ns_getcwd_handler(
     _arg6cage: u64,
 ) -> i32 {
     let ns_cage = getcageid();
+    // println!("ns_getcwd_handler: arg1 (buf ptr) = {}, arg1cage = {}, arg2cage = {}", arg1, arg1cage, arg2cage);
 
     let cwd = helpers::get_cage_cwd(arg2cage);
 
@@ -688,6 +706,7 @@ pub fn get_ns_handler(syscall_nr: u64) -> Option<SyscallHandler> {
         SYS_PWRITEV => Some(ns_pwritev_handler),
         SYS_LSEEK => Some(ns_lseek_handler),
         SYS_FXSTAT => Some(ns_fstat_handler),
+        SYS_NEWFSTATAT => Some(ns_fstatat_handler),
         SYS_FCNTL => Some(ns_fcntl_handler),
         SYS_FTRUNCATE => Some(ns_ftruncate_handler),
         SYS_FCHMOD => Some(ns_fchmod_handler),
