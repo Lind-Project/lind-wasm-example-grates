@@ -12,6 +12,7 @@
  * Each test prints PASS/FAIL. Exit code 0 if all tests pass, 1 otherwise.
  */
 #include <sys/stat.h>
+#include <sys/statfs.h>
 #include <sys/wait.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -439,6 +440,30 @@ static void test_at_metadata_syscalls(void) {
 	CHECK("rmdir removes empty *at test dir", rmdir("/atdir") == 0);
 }
 
+static void test_statfs(void) {
+	printf("\n[test_statfs]\n");
+
+	struct statfs sfs;
+	int ret = statfs("/", &sfs);
+	CHECK("statfs root succeeds", ret == 0);
+	CHECK("statfs reports block size", ret == 0 && sfs.f_bsize > 0);
+	CHECK("statfs reports blocks", ret == 0 && sfs.f_blocks > 0);
+	CHECK("statfs reports name length", ret == 0 && sfs.f_namelen > 0);
+
+	int fd = open("/test_statfs_file", O_CREAT | O_RDWR, 0644);
+	CHECK("create /test_statfs_file", fd >= 0);
+	if (fd >= 0) {
+		memset(&sfs, 0, sizeof(sfs));
+		ret = fstatfs(fd, &sfs);
+		CHECK("fstatfs file succeeds", ret == 0);
+		CHECK("fstatfs reports block size", ret == 0 && sfs.f_bsize > 0);
+		close(fd);
+	}
+
+	ret = statfs("/missing_statfs_path", &sfs);
+	CHECK("statfs nonexistent path fails", ret != 0);
+}
+
 /*  Main  */
 
 int main(void) {
@@ -459,6 +484,7 @@ int main(void) {
 	test_link_rw();
 	test_at_metadata_syscalls();
 	test_lseek();
+	test_statfs();
 
 	printf("\n=== results: %d/%d passed ===\n", tests_passed, tests_run);
 	return (tests_passed == tests_run) ? 0 : 1;

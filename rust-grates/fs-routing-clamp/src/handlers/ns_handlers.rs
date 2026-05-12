@@ -42,13 +42,6 @@ macro_rules! define_path_handler {
 
             let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
             let path = helpers::read_path_from_cage(arg1, arg1cage).unwrap_or_default();
-            // println!(
-            //     "[ns_handlers|{}] arg1 (path)={} routed to={} ret={}",
-            //     stringify!($name),
-            //     path,
-            //     if nr == $sysno { "kernel" } else { "clamped grate" },
-            //     ret,
-            // );
             ret
         }
     };
@@ -135,15 +128,6 @@ pub extern "C" fn ns_chdir_handler(
     if ret == 0 {
         helpers::set_cage_cwd(arg2cage, resolved_path.clone());
     }
-
-    // println!(
-    //     "[ns_handlers|chdir] arg1 (path)={} resolved_path={} routed to={} ret={}",
-    //     pathstr,
-    //     resolved_path,
-    //     if nr == SYS_CHDIR { "kernel" } else { "clamped grate" },
-    //     ret,
-    // );
-
     ret
 }
 
@@ -181,11 +165,6 @@ macro_rules! fd_route_handler {
             let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
                 Ok(entry) => entry,
                 Err(_) => {
-                    // println!(
-                    //     "[ns_handlers|{}] arg1(fd)={} is not a valid virtual fd, returning EBADF",
-                    //     stringify!($name),
-                    //     arg1,
-                    // );
                     return -(EBADF as i32);
                 }
             };
@@ -193,11 +172,9 @@ macro_rules! fd_route_handler {
             let perfdinfo = old_fd_entry.perfdinfo != 0;
 
             args[0] = old_fd_entry.underfd; // replace virtual fd with underfd for the syscall
-            // if $sysno == SYS_FXSTAT && arg1 == 256 {
-            //     println!("[ns_fstat] args[0]={}", args[0]);
-            // }
+            
             if perfdinfo {
-                // arg_cages[0] = cageid;
+                
                 // Clamped path.
                 match helpers::get_route(arg1cage, $sysno) {
                     // Clamp entry grate has a handler for this call, invoke that.
@@ -213,13 +190,6 @@ macro_rules! fd_route_handler {
             }
 
             let ret = helpers::do_syscall(arg1cage, $sysno, &args, &arg_cages);
-            // println!(
-            //     "[ns_handlers|{}] arg1(fd)={}, clamped={}, ret={}",
-            //     stringify!($name),
-            //     arg1,
-            //     if perfdinfo { "clamped grate" } else { "kernel" },
-            //     ret,
-            // );
             
             ret
         }
@@ -302,16 +272,6 @@ pub extern "C" fn ns_open_handler(
             clamped, // perfdinfo: 1=clamped, 0=not
         ) {
             Ok(vfd) => {
-                let path = helpers::read_path_from_cage(arg1, arg1cage).unwrap_or_default();
-                // println!(
-                //     "[ns_handlers|open] path={}, grateid={}, argcageid={}, underfd={}, vfd={} clamped={}",
-                //     path,
-                //     cageid,
-                //     arg1cage,
-                //     ret,
-                //     vfd,
-                //     if clamped != 0 { "clamped grate" } else { "kernel" },
-                // );
                 return vfd as i32;
             }
             Err(_) => return -(EMFILE as i32),
@@ -366,13 +326,6 @@ pub extern "C" fn ns_close_handler(
         let _ = fdtables::close_virtualfd(arg1cage, arg1);
     }
 
-    // println!(
-    //     "[ns_handlers|close] arg1(fd)={}, underfd={}, clamped={}, ret={}",
-    //     arg1,
-    //     old_fd_entry.underfd,
-    //     if is_clamped { "clamped grate" } else { "kernel" },
-    //     ret,
-    // );
     ret
 }
 
@@ -531,15 +484,6 @@ pub extern "C" fn ns_fcntl_handler(
                 arg1,
             ) {
                 Ok(vfd) => {
-                    // println!(
-                    //     "[ns_handlers|fcntl] old_fd={}, new_fd={}, cmd={}, clamped={}, cloexec={}, ret={}",
-                    //     arg1,
-                    //     vfd,
-                    //     if cmd == F_DUPFD as u64 { "F_DUPFD" } else { "F_DUPFD_CLOEXEC" },
-                    //     if perfdinfo != 0 { "clamped grate" } else { "kernel" },
-                    //     cloexec,
-                    //     ret,
-                    // );
                     return vfd as i32;
                 }
                 Err(_) => return -(EMFILE as i32),
@@ -585,10 +529,6 @@ pub extern "C" fn ns_fstatat_handler(
         let fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
             Ok(entry) => entry,
             Err(_) => {
-                // println!(
-                //     "[ns_handlers|fstatat] dirfd={} path={} invalid virtual fd, ret=EBADF",
-                //     arg1, path,
-                // );
                 return -(EBADF as i32);
             }
         };
@@ -619,18 +559,6 @@ pub extern "C" fn ns_fstatat_handler(
         dirfd_clamped
     };
 
-    let printpath = helpers::resolve_path_from_cage(arg2cage, arg2, arg2cage).unwrap_or_else(|| "<unresolvable>".to_string());
-    // println!(
-    //     "[ns_handlers|fstatat] dirfd={}, underfd={}, path={}, resolved={}, is_at_fdcwd={}, dirfd_clamped={}, should_clamp={}",
-    //     arg1,
-    //     underfd,
-    //     path,
-    //     printpath,
-    //     is_at_fdcwd,
-    //     dirfd_clamped,
-    //     should_clamp,
-    // );
-
     let ret = if should_clamp {
         match helpers::get_route(arg1cage, SYS_NEWFSTATAT) {
             Some(alt) => helpers::do_syscall(arg1cage, alt, &args, &arg_cages),
@@ -639,30 +567,6 @@ pub extern "C" fn ns_fstatat_handler(
     } else {
         helpers::do_syscall(arg1cage, SYS_NEWFSTATAT, &args, &arg_cages)
     };
-
-    // let resolved_for_log = if path.is_empty() {
-    //     "<empty>".to_string()
-    // } else if path.starts_with('/') {
-    //     helpers::normalize_path(&path)
-    // } else if is_at_fdcwd {
-    //     helpers::resolve_path_from_cage(arg1cage, arg2, arg2cage)
-    //         .unwrap_or_else(|| "<resolve-failed>".to_string())
-    // } else {
-    //     format!("<relative-to-dirfd:{}>/{}", arg1, path)
-    // };
-
-    // println!(
-    //     "[ns_handlers|fstatat] dirfd={}, underfd={}, path={}, resolved={}, flags={}, grateid={}, argcageid={}, routed to={}, ret={}",
-    //     arg1,
-    //     underfd,
-    //     path,
-    //     resolved_for_log,
-    //     arg4,
-    //     cageid,
-    //     arg1cage,
-    //     if should_clamp { "clamped grate" } else { "kernel" },
-    //     ret,
-    // );
 
     ret
 }
@@ -700,10 +604,6 @@ pub extern "C" fn ns_openat_handler(
         let fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
             Ok(entry) => entry,
             Err(_) => {
-                // println!(
-                //     "[ns_handlers|openat] dirfd={} path={} invalid virtual fd, ret=EBADF",
-                //     arg1, path,
-                // );
                 return -(EBADF as i32);
             }
         };
@@ -760,19 +660,6 @@ pub extern "C" fn ns_openat_handler(
             clamped,    // perfdinfo
         ) {
             Ok(vfd) => {
-                // println!(
-                //     "[ns_handlers|openat] dirfd={}, underfd={}, path={}, flags={}, mode={}, grateid={}, argcageid={}, returned_underfd={}, vfd={}, routed to={}",
-                //     arg1,
-                //     underfd,
-                //     path,
-                //     arg3,
-                //     arg4,
-                //     cageid,
-                //     arg1cage,
-                //     ret,
-                //     vfd,
-                //     if should_clamp { "clamped grate" } else { "kernel" },
-                // );
                 return vfd as i32;
             }
             Err(_) => {
@@ -785,18 +672,6 @@ pub extern "C" fn ns_openat_handler(
             }
         }
     }
-
-    // println!(
-    //     "[ns_handlers|openat] dirfd={}, underfd={}, path={}, flags={}, mode={}, routed to={}, ret={}",
-    //     arg1,
-    //     underfd,
-    //     path,
-    //     arg3,
-    //     arg4,
-    //     if should_clamp { "clamped grate" } else { "kernel" },
-    //     ret,
-    // );
-
     ret
 }
 
@@ -846,12 +721,6 @@ pub extern "C" fn ns_dup_handler(
             arg1cage, 0, ret as u64, false, perfdinfo,
         ) {
             Ok(vfd) => {
-                // println!(
-                //     "[ns_handlers|dup] old_fd={}, new_fd={}, clamped={}",
-                //     arg1,
-                //     vfd,
-                //     if perfdinfo != 0 { "clamped grate" } else { "kernel" },
-                // );
                 return vfd as i32;
             }
             Err(_) => return -(EMFILE as i32),
@@ -906,13 +775,6 @@ pub extern "C" fn ns_dup2_handler(
         let _ = fdtables::get_specific_virtual_fd(arg1cage, arg2, 0, ret as u64, false, perfdinfo);
     }
 
-    // println!(
-    //     "[ns_handlers|dup2] old_fd={}, new_fd={}, clamped={}, ret={}",
-    //     arg1,
-    //     arg2,
-    //     if perfdinfo != 0 { "clamped grate" } else { "kernel" },
-    //     ret,
-    // );
     ret
 }
 
@@ -1022,10 +884,6 @@ pub extern "C" fn ns_getcwd_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    // println!(
-    //     "[ns_handlers|getcwd] arg1cage={}",
-    //     arg1cage
-    // );
     let ns_cage = getcageid();
 
     let cwd = helpers::get_cage_cwd(arg2cage);

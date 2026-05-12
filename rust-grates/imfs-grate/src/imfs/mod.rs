@@ -39,8 +39,30 @@ pub struct FDInfo {
     offset: i64,
 }
 
+/// Lind-compatible statfs data layout.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct FsData {
+    pub f_type: u64,
+    pub f_bsize: u64,
+    pub f_blocks: u64,
+    pub f_bfree: u64,
+    pub f_bavail: u64,
+    pub f_files: u64,
+    pub f_ffiles: u64,
+    pub f_fsid: u64,
+    pub f_namelen: u64,
+    pub f_frsize: u64,
+    pub f_spare: [u8; 32],
+}
+
 const DIRENT64_FIXED_SIZE: usize = 8 + 8 + 2 + 1;
 const IMFS_BLOCK_SIZE: i32 = 512;
+const LIND_AT_FDCWD: i32 = -100;
+const IMFS_STATFS_MAGIC: u64 = 0x494d_4653; // "IMFS"
+const IMFS_STATFS_BLOCK_SIZE: u64 = 4096;
+const IMFS_STATFS_TOTAL_BLOCKS: u64 = 1024 * 1024;
+const IMFS_STATFS_NAME_MAX: u64 = 254;
 
 /// The complete IMFS state.
 pub struct ImfsState {
@@ -349,7 +371,7 @@ impl ImfsState {
             return Ok(self.normalize_path_for_cage(cage_id, path));
         }
 
-        if dirfd == libc::AT_FDCWD {
+        if dirfd == LIND_AT_FDCWD {
             return Ok(self.normalize_path_for_cage(cage_id, path));
         }
 
@@ -392,6 +414,28 @@ impl ImfsState {
             st_atim: node.atime.as_stat_pair(),
             st_mtim: node.mtime.as_stat_pair(),
             st_ctim: node.ctime.as_stat_pair(),
+        };
+    }
+
+    fn fill_statfs(&self, statbuf: &mut FsData) {
+        let used_bytes: u64 = self.nodes.iter().map(|node| node.total_size as u64).sum();
+        let used_blocks = used_bytes.div_ceil(IMFS_STATFS_BLOCK_SIZE);
+        let free_blocks = IMFS_STATFS_TOTAL_BLOCKS.saturating_sub(used_blocks);
+        let free_nodes =
+            (MAX_NODES.saturating_sub(self.nodes.len()) + self.node_free_list.len()) as u64;
+
+        *statbuf = FsData {
+            f_type: IMFS_STATFS_MAGIC,
+            f_bsize: IMFS_STATFS_BLOCK_SIZE,
+            f_blocks: IMFS_STATFS_TOTAL_BLOCKS,
+            f_bfree: free_blocks,
+            f_bavail: free_blocks,
+            f_files: MAX_NODES as u64,
+            f_ffiles: free_nodes,
+            f_fsid: 0,
+            f_namelen: IMFS_STATFS_NAME_MAX,
+            f_frsize: IMFS_STATFS_BLOCK_SIZE,
+            f_spare: [0; 32],
         };
     }
 
@@ -793,6 +837,17 @@ impl ImfsState {
         self.stat_resolved_path(&norm_path, statbuf)
     }
 
+    pub fn statfs(&mut self, cage_id: u64, path: &str, statbuf: &mut FsData) -> i32 {
+        let norm_path = self.normalize_path_for_cage(cage_id, path);
+        match self.resolve_path(&norm_path, true) {
+            Ok(_) => {
+                self.fill_statfs(statbuf);
+                0
+            }
+            Err(e) => e,
+        }
+    }
+
     pub fn statat(&mut self, cage_id: u64, dirfd: i32, path: &str, statbuf: &mut stat) -> i32 {
         let norm_path = match self.normalize_path_at(cage_id, dirfd, path) {
             Ok(path) => path,
@@ -821,6 +876,15 @@ impl ImfsState {
 
         self.fill_stat(node_idx, statbuf);
 
+        0
+    }
+
+    pub fn fstatfs(&mut self, cage_id: u64, fd: u64, statbuf: &mut FsData) -> i32 {
+        if let Err(e) = self.get_node_and_flags(cage_id, fd) {
+            return e;
+        }
+
+        self.fill_statfs(statbuf);
         0
     }
 
