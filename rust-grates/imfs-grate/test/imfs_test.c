@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 /* imfs_test.c — Test binary for the Rust IMFS grate.
  *
  * This is a cage binary that exercises the IMFS through standard POSIX
@@ -10,6 +12,7 @@
  * Each test prints PASS/FAIL. Exit code 0 if all tests pass, 1 otherwise.
  */
 #include <sys/stat.h>
+#include <sys/statfs.h>
 #include <sys/wait.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -377,6 +380,90 @@ static void test_link_rw(void) {
 	unlink("file2");
 }
 
+static void test_at_metadata_syscalls(void) {
+	printf("\n[test_at_metadata_syscalls]\n");
+
+	int ret = mkdir("/atdir", 0755);
+	CHECK("mkdir /atdir for *at tests", ret == 0);
+
+	int dirfd = open("/atdir", O_RDONLY | O_DIRECTORY);
+	CHECK("open /atdir as dirfd", dirfd >= 0);
+	if (dirfd < 0)
+		return;
+
+	int fd = openat(dirfd, "file", O_CREAT | O_RDWR, 0644);
+	CHECK("openat creates file relative to dirfd", fd >= 0);
+	if (fd >= 0) {
+		CHECK("write openat file", write(fd, "atdata", 6) == 6);
+		close(fd);
+	}
+
+	CHECK("faccessat sees relative file",
+	      faccessat(dirfd, "file", F_OK, 0) == 0);
+
+	struct stat st;
+	memset(&st, 0, sizeof(st));
+	CHECK("fstatat sees relative file",
+	      fstatat(dirfd, "file", &st, 0) == 0);
+	CHECK("fstatat reports regular file", S_ISREG(st.st_mode));
+
+	CHECK("fchmodat updates mode",
+	      fchmodat(dirfd, "file", 0600, 0) == 0);
+	memset(&st, 0, sizeof(st));
+	CHECK("fstatat after fchmodat",
+	      fstatat(dirfd, "file", &st, 0) == 0);
+	CHECK("mode after fchmodat is 0600", (st.st_mode & 0777) == 0600);
+
+	CHECK("chown existing path succeeds",
+	      chown("/atdir/file", getuid(), getgid()) == 0);
+	CHECK("lchown existing path succeeds",
+	      lchown("/atdir/file", getuid(), getgid()) == 0);
+	CHECK("fchownat existing path succeeds",
+	      fchownat(dirfd, "file", getuid(), getgid(), 0) == 0);
+
+	CHECK("utimensat relative path succeeds",
+	      utimensat(dirfd, "file", NULL, 0) == 0);
+
+	CHECK("renameat relative path succeeds",
+	      renameat(dirfd, "file", dirfd, "file2") == 0);
+	CHECK("old name gone after renameat",
+	      faccessat(dirfd, "file", F_OK, 0) != 0);
+	CHECK("new name exists after renameat",
+	      faccessat(dirfd, "file2", F_OK, 0) == 0);
+
+	CHECK("unlinkat removes relative file",
+	      unlinkat(dirfd, "file2", 0) == 0);
+	CHECK("file gone after unlinkat",
+	      faccessat(dirfd, "file2", F_OK, 0) != 0);
+
+	close(dirfd);
+	CHECK("rmdir removes empty *at test dir", rmdir("/atdir") == 0);
+}
+
+static void test_statfs(void) {
+	printf("\n[test_statfs]\n");
+
+	struct statfs sfs;
+	int ret = statfs("/", &sfs);
+	CHECK("statfs root succeeds", ret == 0);
+	CHECK("statfs reports block size", ret == 0 && sfs.f_bsize > 0);
+	CHECK("statfs reports blocks", ret == 0 && sfs.f_blocks > 0);
+	CHECK("statfs reports name length", ret == 0 && sfs.f_namelen > 0);
+
+	int fd = open("/test_statfs_file", O_CREAT | O_RDWR, 0644);
+	CHECK("create /test_statfs_file", fd >= 0);
+	if (fd >= 0) {
+		memset(&sfs, 0, sizeof(sfs));
+		ret = fstatfs(fd, &sfs);
+		CHECK("fstatfs file succeeds", ret == 0);
+		CHECK("fstatfs reports block size", ret == 0 && sfs.f_bsize > 0);
+		close(fd);
+	}
+
+	ret = statfs("/missing_statfs_path", &sfs);
+	CHECK("statfs nonexistent path fails", ret != 0);
+}
+
 /*  Main  */
 
 int main(void) {
@@ -395,7 +482,9 @@ int main(void) {
 	test_fork();
 	test_wrong_write();
 	test_link_rw();
+	test_at_metadata_syscalls();
 	test_lseek();
+	test_statfs();
 
 	printf("\n=== results: %d/%d passed ===\n", tests_passed, tests_run);
 	return (tests_passed == tests_run) ? 0 : 1;

@@ -39,8 +39,30 @@ pub struct FDInfo {
     offset: i64,
 }
 
+/// Lind-compatible statfs data layout.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct FsData {
+    pub f_type: u64,
+    pub f_bsize: u64,
+    pub f_blocks: u64,
+    pub f_bfree: u64,
+    pub f_bavail: u64,
+    pub f_files: u64,
+    pub f_ffiles: u64,
+    pub f_fsid: u64,
+    pub f_namelen: u64,
+    pub f_frsize: u64,
+    pub f_spare: [u8; 32],
+}
+
 const DIRENT64_FIXED_SIZE: usize = 8 + 8 + 2 + 1;
 const IMFS_BLOCK_SIZE: i32 = 512;
+const LIND_AT_FDCWD: i32 = -100;
+const IMFS_STATFS_MAGIC: u64 = 0x494d_4653; // "IMFS"
+const IMFS_STATFS_BLOCK_SIZE: u64 = 4096;
+const IMFS_STATFS_TOTAL_BLOCKS: u64 = 1024 * 1024;
+const IMFS_STATFS_NAME_MAX: u64 = 254;
 
 /// The complete IMFS state.
 pub struct ImfsState {
@@ -349,7 +371,7 @@ impl ImfsState {
             return Ok(self.normalize_path_for_cage(cage_id, path));
         }
 
-        if dirfd == libc::AT_FDCWD {
+        if dirfd == LIND_AT_FDCWD {
             return Ok(self.normalize_path_for_cage(cage_id, path));
         }
 
@@ -392,6 +414,28 @@ impl ImfsState {
             st_atim: node.atime.as_stat_pair(),
             st_mtim: node.mtime.as_stat_pair(),
             st_ctim: node.ctime.as_stat_pair(),
+        };
+    }
+
+    fn fill_statfs(&self, statbuf: &mut FsData) {
+        let used_bytes: u64 = self.nodes.iter().map(|node| node.total_size as u64).sum();
+        let used_blocks = used_bytes.div_ceil(IMFS_STATFS_BLOCK_SIZE);
+        let free_blocks = IMFS_STATFS_TOTAL_BLOCKS.saturating_sub(used_blocks);
+        let free_nodes =
+            (MAX_NODES.saturating_sub(self.nodes.len()) + self.node_free_list.len()) as u64;
+
+        *statbuf = FsData {
+            f_type: IMFS_STATFS_MAGIC,
+            f_bsize: IMFS_STATFS_BLOCK_SIZE,
+            f_blocks: IMFS_STATFS_TOTAL_BLOCKS,
+            f_bfree: free_blocks,
+            f_bavail: free_blocks,
+            f_files: MAX_NODES as u64,
+            f_ffiles: free_nodes,
+            f_fsid: 0,
+            f_namelen: IMFS_STATFS_NAME_MAX,
+            f_frsize: IMFS_STATFS_BLOCK_SIZE,
+            f_spare: [0; 32],
         };
     }
 
@@ -752,6 +796,18 @@ impl ImfsState {
 
     pub fn access(&mut self, cage_id: u64, path: &str, mode: i32) -> i32 {
         let norm_path = self.normalize_path_for_cage(cage_id, path);
+        self.access_resolved_path(&norm_path, mode)
+    }
+
+    pub fn accessat(&mut self, cage_id: u64, dirfd: i32, path: &str, mode: i32) -> i32 {
+        let norm_path = match self.normalize_path_at(cage_id, dirfd, path) {
+            Ok(path) => path,
+            Err(e) => return e,
+        };
+        self.access_resolved_path(&norm_path, mode)
+    }
+
+    fn access_resolved_path(&mut self, norm_path: &str, mode: i32) -> i32 {
         let node_idx = match self.resolve_path(&norm_path, true) {
             Ok(idx) => idx,
             Err(e) => return e,
@@ -778,7 +834,29 @@ impl ImfsState {
     /// xstat
     pub fn stat(&mut self, cage_id: u64, path: &str, statbuf: &mut stat) -> i32 {
         let norm_path = self.normalize_path_for_cage(cage_id, path);
+        self.stat_resolved_path(&norm_path, statbuf)
+    }
 
+    pub fn statfs(&mut self, cage_id: u64, path: &str, statbuf: &mut FsData) -> i32 {
+        let norm_path = self.normalize_path_for_cage(cage_id, path);
+        match self.resolve_path(&norm_path, true) {
+            Ok(_) => {
+                self.fill_statfs(statbuf);
+                0
+            }
+            Err(e) => e,
+        }
+    }
+
+    pub fn statat(&mut self, cage_id: u64, dirfd: i32, path: &str, statbuf: &mut stat) -> i32 {
+        let norm_path = match self.normalize_path_at(cage_id, dirfd, path) {
+            Ok(path) => path,
+            Err(e) => return e,
+        };
+        self.stat_resolved_path(&norm_path, statbuf)
+    }
+
+    fn stat_resolved_path(&mut self, norm_path: &str, statbuf: &mut stat) -> i32 {
         let node_idx = match self.resolve_path(&norm_path, true) {
             Ok(idx) => idx,
             Err(e) => return e,
@@ -801,9 +879,22 @@ impl ImfsState {
         0
     }
 
+    pub fn fstatfs(&mut self, cage_id: u64, fd: u64, statbuf: &mut FsData) -> i32 {
+        if let Err(e) = self.get_node_and_flags(cage_id, fd) {
+            return e;
+        }
+
+        self.fill_statfs(statbuf);
+        0
+    }
+
     /// rmdir: remove an empty directory.
     pub fn rmdir(&mut self, cage_id: u64, path: &str) -> i32 {
         let norm_path = self.normalize_path_for_cage(cage_id, path);
+        self.rmdir_resolved_path(&norm_path)
+    }
+
+    fn rmdir_resolved_path(&mut self, norm_path: &str) -> i32 {
         let node_idx = match self.resolve_path(&norm_path, true) {
             Ok(idx) => idx,
             Err(e) => return e,
@@ -1104,6 +1195,28 @@ impl ImfsState {
     /// unlink: remove a non-directory path entry.
     pub fn unlink(&mut self, cage_id: u64, path: &str) -> i32 {
         let norm_path = self.normalize_path_for_cage(cage_id, path);
+        self.unlink_resolved_path(&norm_path)
+    }
+
+    pub fn unlinkat(&mut self, cage_id: u64, dirfd: i32, path: &str, flags: i32) -> i32 {
+        let supported_flags = libc::AT_REMOVEDIR;
+        if flags & !supported_flags != 0 {
+            return -22; // EINVAL
+        }
+
+        let norm_path = match self.normalize_path_at(cage_id, dirfd, path) {
+            Ok(path) => path,
+            Err(e) => return e,
+        };
+
+        if flags & libc::AT_REMOVEDIR != 0 {
+            self.rmdir_resolved_path(&norm_path)
+        } else {
+            self.unlink_resolved_path(&norm_path)
+        }
+    }
+
+    fn unlink_resolved_path(&mut self, norm_path: &str) -> i32 {
         if norm_path == "/" {
             return -1; // EPERM
         }
@@ -1193,6 +1306,30 @@ impl ImfsState {
 
     pub fn rename(&mut self, cage_id: u64, oldpath: &str, newpath: &str) -> i32 {
         let norm_oldpath = self.normalize_path_for_cage(cage_id, oldpath);
+        let norm_newpath = self.normalize_path_for_cage(cage_id, newpath);
+        self.rename_resolved_paths(&norm_oldpath, &norm_newpath)
+    }
+
+    pub fn renameat(
+        &mut self,
+        cage_id: u64,
+        olddirfd: i32,
+        oldpath: &str,
+        newdirfd: i32,
+        newpath: &str,
+    ) -> i32 {
+        let norm_oldpath = match self.normalize_path_at(cage_id, olddirfd, oldpath) {
+            Ok(path) => path,
+            Err(e) => return e,
+        };
+        let norm_newpath = match self.normalize_path_at(cage_id, newdirfd, newpath) {
+            Ok(path) => path,
+            Err(e) => return e,
+        };
+        self.rename_resolved_paths(&norm_oldpath, &norm_newpath)
+    }
+
+    fn rename_resolved_paths(&mut self, norm_oldpath: &str, norm_newpath: &str) -> i32 {
         if norm_oldpath == "/" {
             return -1; // EPERM
         }
@@ -1210,7 +1347,6 @@ impl ImfsState {
             return -1; // EPERM
         }
 
-        let norm_newpath = self.normalize_path_for_cage(cage_id, newpath);
         if norm_newpath == "/" {
             return -1; // EPERM
         }
@@ -1229,7 +1365,7 @@ impl ImfsState {
         }
 
         if self.nodes[old_idx].node_type == NodeType::Dir
-            && norm_newpath.starts_with(&(norm_oldpath.clone() + "/"))
+            && norm_newpath.starts_with(&format!("{}/", norm_oldpath.trim_end_matches('/')))
         {
             return -22; // EINVAL
         }
@@ -1275,6 +1411,18 @@ impl ImfsState {
     /// chmod: update only permission bits and preserve the file type bits.
     pub fn chmod(&mut self, cage_id: u64, path: &str, mode: u32) -> i32 {
         let norm_path = self.normalize_path_for_cage(cage_id, path);
+        self.chmod_resolved_path(&norm_path, mode)
+    }
+
+    pub fn chmodat(&mut self, cage_id: u64, dirfd: i32, path: &str, mode: u32) -> i32 {
+        let norm_path = match self.normalize_path_at(cage_id, dirfd, path) {
+            Ok(path) => path,
+            Err(e) => return e,
+        };
+        self.chmod_resolved_path(&norm_path, mode)
+    }
+
+    fn chmod_resolved_path(&mut self, norm_path: &str, mode: u32) -> i32 {
         let node_idx = match self.resolve_path(&norm_path, true) {
             Ok(idx) => idx,
             Err(e) => return e,
@@ -1283,6 +1431,55 @@ impl ImfsState {
         self.nodes[node_idx].mode = (self.nodes[node_idx].mode & !0o777) | (mode & 0o777);
         self.update_ctime(node_idx);
 
+        0
+    }
+
+    pub fn chown(&mut self, cage_id: u64, path: &str) -> i32 {
+        let norm_path = self.normalize_path_for_cage(cage_id, path);
+        match self.resolve_path(&norm_path, true) {
+            Ok(_) => 0,
+            Err(e) => e,
+        }
+    }
+
+    pub fn chownat(&mut self, cage_id: u64, dirfd: i32, path: &str) -> i32 {
+        let norm_path = match self.normalize_path_at(cage_id, dirfd, path) {
+            Ok(path) => path,
+            Err(e) => return e,
+        };
+        match self.resolve_path(&norm_path, true) {
+            Ok(_) => 0,
+            Err(e) => e,
+        }
+    }
+
+    pub fn utimensat(&mut self, cage_id: u64, dirfd: i32, path: Option<&str>) -> i32 {
+        let node_idx = match path {
+            Some(path) => {
+                let norm_path = match self.normalize_path_at(cage_id, dirfd, path) {
+                    Ok(path) => path,
+                    Err(e) => return e,
+                };
+                match self.resolve_path(&norm_path, true) {
+                    Ok(idx) => idx,
+                    Err(e) => return e,
+                }
+            }
+            None => {
+                let Ok(entry) = fdtables::translate_virtual_fd(cage_id, dirfd as u64) else {
+                    return -9;
+                };
+                entry.underfd as usize
+            }
+        };
+
+        if node_idx >= self.nodes.len() {
+            return -9;
+        }
+
+        self.update_atime(node_idx);
+        self.update_mtime(node_idx);
+        self.update_ctime(node_idx);
         0
     }
 
