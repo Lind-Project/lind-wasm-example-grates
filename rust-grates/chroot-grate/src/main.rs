@@ -1,17 +1,21 @@
 //! `chroot-grate-rs`
 
-use grate_rs::constants::fs::S_IFDIR;
+use grate_rs::constants::fs::{F_DUPFD, F_DUPFD_CLOEXEC, S_IFDIR};
 use grate_rs::constants::lind::GRATE_MEMORY_FLAG;
 use grate_rs::constants::{
     SYS_ACCEPT, SYS_ACCESS, SYS_BIND, SYS_CHDIR, SYS_CHMOD, SYS_CHOWN, SYS_CHROOT, SYS_CLONE,
-    SYS_CONNECT, SYS_EXECVE, SYS_FACCESSAT, SYS_FCHDIR, SYS_FCHMODAT, SYS_FCHOWNAT, SYS_GETCWD,
-    SYS_GETPEERNAME, SYS_GETSOCKNAME, SYS_LCHOWN, SYS_LINK, SYS_LISTXATTR, SYS_MKDIR,
-    SYS_NEWFSTATAT, SYS_OPEN, SYS_READLINK, SYS_READLINKAT, SYS_RECVFROM, SYS_RENAME, SYS_RENAMEAT,
-    SYS_RENAMEAT2, SYS_RMDIR, SYS_SENDTO, SYS_SETXATTR, SYS_STATFS, SYS_STATX, SYS_SYMLINK,
-    SYS_SYMLINKAT, SYS_TRUNCATE, SYS_UNLINK, SYS_UNLINKAT, SYS_UTIMENSAT, SYS_XSTAT,
+    SYS_CLOSE, SYS_CONNECT, SYS_DUP, SYS_DUP2, SYS_DUP3, SYS_EXECVE, SYS_FACCESSAT, SYS_FCHDIR,
+    SYS_FCHMODAT, SYS_FCHOWNAT, SYS_FCNTL, SYS_GETCWD, SYS_GETPEERNAME, SYS_GETSOCKNAME,
+    SYS_LCHOWN, SYS_LINK, SYS_LISTXATTR, SYS_MKDIR, SYS_NEWFSTATAT, SYS_OPEN, SYS_OPENAT,
+    SYS_READLINK, SYS_READLINKAT, SYS_RECVFROM, SYS_RENAME, SYS_RENAMEAT, SYS_RENAMEAT2, SYS_RMDIR,
+    SYS_SENDTO, SYS_SETXATTR, SYS_STATFS, SYS_STATX, SYS_SYMLINK, SYS_SYMLINKAT, SYS_TRUNCATE,
+    SYS_UNLINK, SYS_UNLINKAT, SYS_UTIMENSAT, SYS_XSTAT,
 };
 use grate_rs::ffi::stat;
-use grate_rs::{GrateBuilder, GrateError, copy_data_between_cages, getcageid, make_threei_call};
+use grate_rs::{
+    GrateBuilder, GrateError, copy_data_between_cages, copy_handler_table_to_cage, getcageid,
+    is_thread_clone, make_threei_call,
+};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::ffi::c_char;
@@ -33,6 +37,9 @@ pub static CHROOT_DIR: Mutex<String> = Mutex::new(String::new());
 
 /// Per-cage virtual current working directory (cwd) tracking.
 pub static CAGE_CWDS: Mutex<Option<HashMap<u64, String>>> = Mutex::new(None);
+
+/// Per-cage directory fd tracking used to implement virtual `fchdir`.
+pub static CAGE_DIR_FDS: Mutex<Option<HashMap<u64, HashMap<u64, String>>>> = Mutex::new(None);
 
 /// Check if a directory exists.
 fn check_dir(dir: String) -> bool {
@@ -56,6 +63,7 @@ pub fn init_state(chroot_dir: String) {
         true => {
             *CHROOT_DIR.lock().unwrap() = chroot_dir;
             *CAGE_CWDS.lock().unwrap() = Some(HashMap::new());
+            *CAGE_DIR_FDS.lock().unwrap() = Some(HashMap::new());
         }
     };
 }
@@ -241,13 +249,76 @@ fn rewrite_symlink_target(cageid: u64, target_ptr: u64, target_cage: u64) -> Res
     CString::new(rewritten).map_err(|_| -(libc::EINVAL as i32))
 }
 
+fn fd_dir_path(cageid: u64, fd: u64) -> Option<String> {
+    CAGE_DIR_FDS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|m| m.get(&cageid))
+        .and_then(|fds| fds.get(&fd).cloned())
+}
+
+fn set_fd_dir_path(cageid: u64, fd: u64, path: String) {
+    if let Some(ref mut cages) = *CAGE_DIR_FDS.lock().unwrap() {
+        cages
+            .entry(cageid)
+            .or_insert_with(HashMap::new)
+            .insert(fd, path);
+    }
+}
+
+fn clear_fd_dir_path(cageid: u64, fd: u64) {
+    if let Some(ref mut cages) = *CAGE_DIR_FDS.lock().unwrap() {
+        if let Some(fds) = cages.get_mut(&cageid) {
+            fds.remove(&fd);
+        }
+    }
+}
+
+fn copy_fd_dir_path(cageid: u64, oldfd: u64, newfd: u64) {
+    match fd_dir_path(cageid, oldfd) {
+        Some(path) => set_fd_dir_path(cageid, newfd, path),
+        None => clear_fd_dir_path(cageid, newfd),
+    }
+}
+
+fn register_dir_fd_if_directory(cageid: u64, fd: u64, virtual_path: String) {
+    let host_path = chroot_path(&virtual_path, cageid);
+    if check_dir(host_path) {
+        set_fd_dir_path(cageid, fd, virtual_path);
+    } else {
+        clear_fd_dir_path(cageid, fd);
+    }
+}
+
+fn register_child_fd_paths(parent_cageid: u64, child_cageid: u64) {
+    let parent_fds = CAGE_DIR_FDS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|m| m.get(&parent_cageid).cloned());
+
+    if let (Some(parent_fds), Some(ref mut cages)) =
+        (parent_fds, CAGE_DIR_FDS.lock().unwrap().as_mut())
+    {
+        cages.insert(child_cageid, parent_fds);
+    }
+}
+
+fn resolve_virtual_at_path(cageid: u64, dirfd: u64, path: &str) -> Option<String> {
+    if path.starts_with('/') || dirfd as i64 == AT_FDCWD {
+        Some(normalize_path(path, &get_cage_cwd(cageid)))
+    } else {
+        fd_dir_path(cageid, dirfd).map(|dir| normalize_path(path, &dir))
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Macro-generated handler declarations
 // -----------------------------------------------------------------------------
 
 // "Path input" syscalls: read the path argument(s), chroot them, and dispatch
 // the real syscall with rewritten pointers.
-input_path_handler!(open_handler, SYS_OPEN, 0);
 // input_path_handler!(execve_handler, SYS_EXECVE, 0);
 input_path_handler!(stat_handler, SYS_XSTAT, 0);
 input_path_handler!(access_handler, SYS_ACCESS, 0);
@@ -278,6 +349,262 @@ socket_untranslate_handler!(accept_handler, SYS_ACCEPT, 1, 2);
 socket_untranslate_handler!(getsockname_handler, SYS_GETSOCKNAME, 1, 2);
 socket_untranslate_handler!(getpeername_handler, SYS_GETPEERNAME, 1, 2);
 socket_untranslate_handler!(recvfrom_handler, SYS_RECVFROM, 4, 5);
+
+// -----------------------------------------------------------------------------
+// FD tracking handlers
+// -----------------------------------------------------------------------------
+
+extern "C" fn open_handler(
+    cageid: u64,
+    path_ptr: u64,
+    path_cage: u64,
+    flags: u64,
+    flags_cage: u64,
+    mode: u64,
+    mode_cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let thiscage = getcageid();
+    let path = match read_path_from_cage(path_ptr, path_cage) {
+        Some(p) => p,
+        None => return -(libc::EFAULT as i32),
+    };
+    let virtual_path = normalize_path(&path, &get_cage_cwd(cageid));
+    let c_path = match CString::new(chroot_path(&path, cageid)) {
+        Ok(p) => p,
+        Err(_) => return -(libc::EINVAL as i32),
+    };
+
+    let ret = make_syscall_from_grate(
+        SYS_OPEN as u32,
+        path_cage,
+        [c_path.as_ptr() as u64, flags, mode, arg4, arg5, arg6],
+        [
+            thiscage | GRATE_MEMORY_FLAG,
+            flags_cage,
+            mode_cage,
+            arg4cage,
+            arg5cage,
+            arg6cage,
+        ],
+    );
+
+    if ret >= 0 {
+        register_dir_fd_if_directory(cageid, ret as u64, virtual_path);
+    }
+
+    ret
+}
+
+extern "C" fn openat_handler(
+    cageid: u64,
+    dirfd: u64,
+    dirfd_cage: u64,
+    path_ptr: u64,
+    path_cage: u64,
+    flags: u64,
+    flags_cage: u64,
+    mode: u64,
+    mode_cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let thiscage = getcageid();
+    let path = match read_path_from_cage(path_ptr, path_cage) {
+        Some(p) => p,
+        None => return -(libc::EFAULT as i32),
+    };
+    let virtual_path = resolve_virtual_at_path(cageid, dirfd, &path);
+    let (rewritten_dirfd, c_path) = match rewrite_at_path(cageid, dirfd, path_ptr, path_cage) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    let ret = make_syscall_from_grate(
+        SYS_OPENAT as u32,
+        dirfd_cage,
+        [
+            rewritten_dirfd,
+            c_path.as_ptr() as u64,
+            flags,
+            mode,
+            arg5,
+            arg6,
+        ],
+        [
+            dirfd_cage,
+            thiscage | GRATE_MEMORY_FLAG,
+            flags_cage,
+            mode_cage,
+            arg5cage,
+            arg6cage,
+        ],
+    );
+
+    if ret >= 0 {
+        if let Some(virtual_path) = virtual_path {
+            register_dir_fd_if_directory(cageid, ret as u64, virtual_path);
+        }
+    }
+
+    ret
+}
+
+extern "C" fn close_handler(
+    cageid: u64,
+    fd: u64,
+    fd_cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let ret = make_syscall_from_grate(
+        SYS_CLOSE as u32,
+        fd_cage,
+        [fd, arg2, arg3, arg4, arg5, arg6],
+        [fd_cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
+    );
+
+    if ret >= 0 {
+        clear_fd_dir_path(cageid, fd);
+    }
+
+    ret
+}
+
+extern "C" fn dup_handler(
+    cageid: u64,
+    oldfd: u64,
+    oldfd_cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let ret = make_syscall_from_grate(
+        SYS_DUP as u32,
+        oldfd_cage,
+        [oldfd, arg2, arg3, arg4, arg5, arg6],
+        [oldfd_cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
+    );
+
+    if ret >= 0 {
+        copy_fd_dir_path(cageid, oldfd, ret as u64);
+    }
+
+    ret
+}
+
+extern "C" fn dup2_handler(
+    cageid: u64,
+    oldfd: u64,
+    oldfd_cage: u64,
+    newfd: u64,
+    newfd_cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let ret = make_syscall_from_grate(
+        SYS_DUP2 as u32,
+        oldfd_cage,
+        [oldfd, newfd, arg3, arg4, arg5, arg6],
+        [
+            oldfd_cage, newfd_cage, arg3cage, arg4cage, arg5cage, arg6cage,
+        ],
+    );
+
+    if ret >= 0 {
+        copy_fd_dir_path(cageid, oldfd, newfd);
+    }
+
+    ret
+}
+
+extern "C" fn dup3_handler(
+    cageid: u64,
+    oldfd: u64,
+    oldfd_cage: u64,
+    newfd: u64,
+    newfd_cage: u64,
+    flags: u64,
+    flags_cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let ret = make_syscall_from_grate(
+        SYS_DUP3 as u32,
+        oldfd_cage,
+        [oldfd, newfd, flags, arg4, arg5, arg6],
+        [
+            oldfd_cage, newfd_cage, flags_cage, arg4cage, arg5cage, arg6cage,
+        ],
+    );
+
+    if ret >= 0 {
+        copy_fd_dir_path(cageid, oldfd, newfd);
+    }
+
+    ret
+}
+
+extern "C" fn fcntl_handler(
+    cageid: u64,
+    fd: u64,
+    fd_cage: u64,
+    cmd: u64,
+    cmd_cage: u64,
+    arg: u64,
+    arg_cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let ret = make_syscall_from_grate(
+        SYS_FCNTL as u32,
+        fd_cage,
+        [fd, cmd, arg, arg4, arg5, arg6],
+        [fd_cage, cmd_cage, arg_cage, arg4cage, arg5cage, arg6cage],
+    );
+
+    if ret >= 0 && (cmd as i32 == F_DUPFD || cmd as i32 == F_DUPFD_CLOEXEC) {
+        copy_fd_dir_path(cageid, fd, ret as u64);
+    }
+
+    ret
+}
 
 // -----------------------------------------------------------------------------
 // Path-output handlers
@@ -958,7 +1285,12 @@ extern "C" fn fork_handler(
         Err(_) => return -1,
     };
 
-    register_cage(cageid, ret as u64);
+    if ret > 0 && !is_thread_clone(arg1, arg1cage) {
+        let child_cageid = ret as u64;
+        register_cage(cageid, child_cageid);
+        register_child_fd_paths(cageid, child_cageid);
+        let _ = copy_handler_table_to_cage(getcageid(), child_cageid);
+    }
 
     ret
 }
@@ -1059,25 +1391,39 @@ extern "C" fn chdir_handler(
     }
 }
 
-/// `fchdir(2)` handler.
-///
-/// Currently unimplemented: implementing it portably requires fd->path tracking.
 extern "C" fn fchdir_handler(
-    _cageid: u64,
-    _fd: u64,
-    _fd_cage: u64,
+    cageid: u64,
+    fd: u64,
+    fd_cage: u64,
     _arg2: u64,
-    _arg2cage: u64,
-    _arg3: u64,
-    _arg3cage: u64,
-    _arg4: u64,
-    _arg4cage: u64,
-    _arg5: u64,
-    _arg5cage: u64,
-    _arg6: u64,
-    _arg6cage: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
 ) -> i32 {
-    -38 // ENOSYS
+    if let Some(path) = fd_dir_path(cageid, fd) {
+        set_cage_cwd(cageid, path);
+        return 0;
+    }
+
+    const F_GETFL_CMD: u64 = 3;
+    let ret = make_syscall_from_grate(
+        SYS_FCNTL as u32,
+        fd_cage,
+        [fd, F_GETFL_CMD, arg3, arg4, arg5, arg6],
+        [fd_cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
+    );
+
+    if ret < 0 {
+        ret
+    } else {
+        -(libc::ENOTDIR as i32)
+    }
 }
 
 /// `getcwd(2)` handler returning the cage's virtual cwd.
@@ -1219,6 +1565,12 @@ fn main() {
         .register(SYS_CLONE, fork_handler)
         // Filesystem syscalls
         .register(SYS_OPEN, open_handler)
+        .register(SYS_OPENAT, openat_handler)
+        .register(SYS_CLOSE, close_handler)
+        .register(SYS_DUP, dup_handler)
+        .register(SYS_DUP2, dup2_handler)
+        .register(SYS_DUP3, dup3_handler)
+        .register(SYS_FCNTL, fcntl_handler)
         .register(SYS_EXECVE, execve_handler)
         .register(SYS_XSTAT, stat_handler)
         .register(SYS_NEWFSTATAT, fstatat_handler)

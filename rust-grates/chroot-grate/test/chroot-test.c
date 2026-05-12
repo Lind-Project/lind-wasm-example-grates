@@ -60,6 +60,11 @@ int main(int argc, char *argv[]) {
     char absmissing[80];
     char at1[64];
     char at2[64];
+    char fd_dir_name[64];
+    char fd_file[64];
+    char fd_dup_file[64];
+    char fd_fcntl_file[64];
+    char fd_child_file[64];
 
     snprintf(dir, sizeof(dir), "sub-%s", seed);
     snprintf(a, sizeof(a), "a.txt-%s", seed);
@@ -72,6 +77,11 @@ int main(int argc, char *argv[]) {
     snprintf(absmissing, sizeof(absmissing), "/missing-abs-%s", seed);
     snprintf(at1, sizeof(at1), "at1.txt-%s", seed);
     snprintf(at2, sizeof(at2), "at2.txt-%s", seed);
+    snprintf(fd_dir_name, sizeof(fd_dir_name), "fd-dir-%s", seed);
+    snprintf(fd_file, sizeof(fd_file), "from-fchdir-%s", seed);
+    snprintf(fd_dup_file, sizeof(fd_dup_file), "from-dup-fchdir-%s", seed);
+    snprintf(fd_fcntl_file, sizeof(fd_fcntl_file), "from-fcntl-fchdir-%s", seed);
+    snprintf(fd_child_file, sizeof(fd_child_file), "from-fork-fchdir-%s", seed);
 
     // ---- mkdir ----
     CHECK("mkdir: create subdirectory", mkdir(dir, 0755) == 0 || errno == EEXIST);
@@ -155,6 +165,83 @@ int main(int argc, char *argv[]) {
 
         close(dfd);
     }
+
+    // ---- fchdir / fd inheritance ----
+    CHECK("mkdir: create fchdir target directory", mkdir(fd_dir_name, 0755) == 0 || errno == EEXIST);
+    int saved_cwd = open(".", O_RDONLY);
+    int dir_for_fchdir = open(fd_dir_name, O_RDONLY);
+    CHECK("open: save current directory fd", saved_cwd >= 0);
+    CHECK("open: open fchdir target directory", dir_for_fchdir >= 0);
+
+    if (saved_cwd >= 0 && dir_for_fchdir >= 0) {
+        char fd_file_path[128];
+        char fd_dup_path[128];
+        char fd_fcntl_path[128];
+        char fd_child_path[128];
+
+        snprintf(fd_file_path, sizeof(fd_file_path), "%s/%s", fd_dir_name, fd_file);
+        snprintf(fd_dup_path, sizeof(fd_dup_path), "%s/%s", fd_dir_name, fd_dup_file);
+        snprintf(fd_fcntl_path, sizeof(fd_fcntl_path), "%s/%s", fd_dir_name, fd_fcntl_file);
+        snprintf(fd_child_path, sizeof(fd_child_path), "%s/%s", fd_dir_name, fd_child_file);
+
+        CHECK("fchdir: move cwd using directory fd", fchdir(dir_for_fchdir) == 0);
+        int ffd = open(fd_file, O_CREAT | O_RDWR, 0644);
+        CHECK("open: relative create after fchdir", ffd >= 0);
+        if (ffd >= 0) close(ffd);
+        CHECK("fchdir: restore saved cwd", fchdir(saved_cwd) == 0);
+        CHECK("access: file created under fchdir directory", access(fd_file_path, F_OK) == 0);
+
+        int dup_dir = dup(dir_for_fchdir);
+        CHECK("dup: duplicate tracked directory fd", dup_dir >= 0);
+        if (dup_dir >= 0) {
+            CHECK("fchdir: duplicated directory fd works", fchdir(dup_dir) == 0);
+            int dfd2 = open(fd_dup_file, O_CREAT | O_RDWR, 0644);
+            CHECK("open: relative create after dup fchdir", dfd2 >= 0);
+            if (dfd2 >= 0) close(dfd2);
+            CHECK("fchdir: restore after dup fchdir", fchdir(saved_cwd) == 0);
+            CHECK("access: dup fchdir file created in directory", access(fd_dup_path, F_OK) == 0);
+            close(dup_dir);
+            errno = 0;
+            CHECK("fchdir: closed dup fd fails", fchdir(dup_dir) == -1 && errno == EBADF);
+        }
+
+        int fcntl_dir = fcntl(dir_for_fchdir, F_DUPFD, 50);
+        CHECK("fcntl: F_DUPFD duplicates tracked directory fd", fcntl_dir >= 50);
+        if (fcntl_dir >= 0) {
+            CHECK("fchdir: fcntl-duplicated directory fd works", fchdir(fcntl_dir) == 0);
+            int ffd2 = open(fd_fcntl_file, O_CREAT | O_RDWR, 0644);
+            CHECK("open: relative create after fcntl fchdir", ffd2 >= 0);
+            if (ffd2 >= 0) close(ffd2);
+            CHECK("fchdir: restore after fcntl fchdir", fchdir(saved_cwd) == 0);
+            CHECK("access: fcntl fchdir file created in directory", access(fd_fcntl_path, F_OK) == 0);
+            close(fcntl_dir);
+        }
+
+        pid_t fpid = fork();
+        if (fpid == 0) {
+            if (fchdir(dir_for_fchdir) != 0) _exit(2);
+            int child_fd = open(fd_child_file, O_CREAT | O_RDWR, 0644);
+            if (child_fd < 0) _exit(3);
+            close(child_fd);
+            _exit(0);
+        } else if (fpid > 0) {
+            int fstatus;
+            waitpid(fpid, &fstatus, 0);
+            CHECK("fork: child inherits fchdir directory fd",
+                  WIFEXITED(fstatus) && WEXITSTATUS(fstatus) == 0);
+            CHECK("access: fork fchdir file created in directory", access(fd_child_path, F_OK) == 0);
+        } else {
+            FAIL("fork: fchdir inheritance fork failed");
+        }
+
+        unlink(fd_file_path);
+        unlink(fd_dup_path);
+        unlink(fd_fcntl_path);
+        unlink(fd_child_path);
+    }
+    if (dir_for_fchdir >= 0) close(dir_for_fchdir);
+    if (saved_cwd >= 0) close(saved_cwd);
+    rmdir(fd_dir_name);
 
     // ---- statfs ----
     struct statfs sfs;
