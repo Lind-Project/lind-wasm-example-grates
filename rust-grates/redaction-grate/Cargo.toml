@@ -1,0 +1,8 @@
+[package]
+name = "redaction-grate"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+grate-rs = { path = "../../lib/grate-rs" }
+libc = "0.2"
