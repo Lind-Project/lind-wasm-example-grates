@@ -54,12 +54,24 @@ int main(int argc, char *argv[]) {
     char b[64];
     char c[64];
     char sym[64];
+    char symhard[64];
+    char symat[64];
+    char missing[64];
+    char absmissing[80];
+    char at1[64];
+    char at2[64];
 
     snprintf(dir, sizeof(dir), "sub-%s", seed);
     snprintf(a, sizeof(a), "a.txt-%s", seed);
     snprintf(b, sizeof(b), "b.txt-%s", seed);
     snprintf(c, sizeof(c), "c.txt-%s", seed);
     snprintf(sym, sizeof(sym), "sym-%s", seed);
+    snprintf(symhard, sizeof(symhard), "sym-hard-%s", seed);
+    snprintf(symat, sizeof(symat), "symat-%s", seed);
+    snprintf(missing, sizeof(missing), "missing-%s", seed);
+    snprintf(absmissing, sizeof(absmissing), "/missing-abs-%s", seed);
+    snprintf(at1, sizeof(at1), "at1.txt-%s", seed);
+    snprintf(at2, sizeof(at2), "at2.txt-%s", seed);
 
     // ---- mkdir ----
     CHECK("mkdir: create subdirectory", mkdir(dir, 0755) == 0 || errno == EEXIST);
@@ -91,6 +103,31 @@ int main(int argc, char *argv[]) {
     // ---- rename ----
     CHECK("rename: rename hard link", rename(b, c) == 0);
 
+    // ---- symlink ----
+    CHECK("symlink: create dangling relative symlink", symlink(missing, sym) == 0);
+    char linkbuf[PATH_MAX];
+    ssize_t linklen = readlink(sym, linkbuf, sizeof(linkbuf) - 1);
+    if (linklen >= 0) {
+        linkbuf[linklen] = '\0';
+    }
+    CHECK("readlink: relative symlink target is preserved", linklen >= 0 && strcmp(linkbuf, missing) == 0);
+    CHECK("link: hardlink dangling symlink itself", link(sym, symhard) == 0);
+    linklen = readlink(symhard, linkbuf, sizeof(linkbuf) - 1);
+    if (linklen >= 0) {
+        linkbuf[linklen] = '\0';
+    }
+    CHECK("readlink: hardlinked symlink target is preserved", linklen >= 0 && strcmp(linkbuf, missing) == 0);
+    CHECK("unlink: remove hardlinked symlink", unlink(symhard) == 0);
+    CHECK("unlink: remove relative symlink", unlink(sym) == 0);
+
+    CHECK("symlink: create dangling absolute symlink", symlink(absmissing, sym) == 0);
+    linklen = readlink(sym, linkbuf, sizeof(linkbuf) - 1);
+    if (linklen >= 0) {
+        linkbuf[linklen] = '\0';
+    }
+    CHECK("readlink: absolute symlink target succeeds", linklen >= 0);
+    CHECK("unlink: remove absolute symlink", unlink(sym) == 0);
+
     // ---- unlink ----
     CHECK("unlink: remove original file", unlink(a) == 0);
 
@@ -99,6 +136,23 @@ int main(int argc, char *argv[]) {
     CHECK("open: open current directory as fd", dfd >= 0);
     if (dfd >= 0) {
         CHECK("unlinkat: remove renamed file via dirfd", unlinkat(dfd, c, 0) == 0);
+
+        int atfd = openat(dfd, at1, O_CREAT | O_RDWR, 0644);
+        CHECK("openat: create file relative to dirfd", atfd >= 0);
+        if (atfd >= 0) {
+            CHECK("write: populate openat-created file", write(atfd, "atdata", 6) == 6);
+            close(atfd);
+        }
+
+        CHECK("faccessat: check dirfd-relative file", faccessat(dfd, at1, F_OK, 0) == 0);
+        CHECK("fstatat: retrieve dirfd-relative metadata", fstatat(dfd, at1, &st, 0) == 0);
+        CHECK("fchmodat: change dirfd-relative permissions", fchmodat(dfd, at1, 0600, 0) == 0);
+        CHECK("fstatat: verify fchmodat mode", fstatat(dfd, at1, &st, 0) == 0 && (st.st_mode & 0777) == 0600);
+        CHECK("utimensat: update dirfd-relative timestamps", utimensat(dfd, at1, NULL, 0) == 0);
+        CHECK("unlinkat: remove fd-relative file", unlinkat(dfd, at1, 0) == 0);
+        CHECK("symlinkat: create dangling symlink relative to dirfd", symlinkat(missing, dfd, symat) == 0);
+        CHECK("unlinkat: remove symlinkat result", unlinkat(dfd, symat, 0) == 0);
+
         close(dfd);
     }
 
