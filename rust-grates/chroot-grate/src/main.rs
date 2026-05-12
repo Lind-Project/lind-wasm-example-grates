@@ -214,13 +214,13 @@ fn rewrite_at_path(
 fn call_with_at_path(
     syscall_no: u32,
     cageid: u64,
-    target_cageid: u64,
     mut args: [u64; 6],
     mut arg_cages: [u64; 6],
     dirfd_idx: usize,
     path_idx: usize,
 ) -> i32 {
     let thiscage = getcageid();
+    let target_cageid = arg_cages[path_idx];
     let (dirfd, c_path) =
         match rewrite_at_path(cageid, args[dirfd_idx], args[path_idx], arg_cages[path_idx]) {
             Ok(v) => v,
@@ -429,7 +429,7 @@ extern "C" fn openat_handler(
 
     let ret = make_syscall_from_grate(
         SYS_OPENAT as u32,
-        dirfd_cage,
+        path_cage,
         [
             rewritten_dirfd,
             c_path.as_ptr() as u64,
@@ -916,7 +916,7 @@ extern "C" fn symlinkat_handler(
 
     make_syscall_from_grate(
         SYS_SYMLINKAT as u32,
-        dirfd_cage,
+        linkpath_cage,
         [
             target.as_ptr() as u64,
             rewritten_dirfd,
@@ -954,7 +954,6 @@ extern "C" fn faccessat_handler(
     call_with_at_path(
         SYS_FACCESSAT as u32,
         cageid,
-        dirfd_cage,
         [dirfd, path_ptr, mode, flags, arg5, arg6],
         [
             dirfd_cage, path_cage, mode_cage, flags_cage, arg5cage, arg6cage,
@@ -982,7 +981,6 @@ extern "C" fn fchmodat_handler(
     call_with_at_path(
         SYS_FCHMODAT as u32,
         cageid,
-        dirfd_cage,
         [dirfd, path_ptr, mode, flags, arg5, arg6],
         [
             dirfd_cage, path_cage, mode_cage, flags_cage, arg5cage, arg6cage,
@@ -1010,7 +1008,6 @@ extern "C" fn fchownat_handler(
     call_with_at_path(
         SYS_FCHOWNAT as u32,
         cageid,
-        dirfd_cage,
         [dirfd, path_ptr, owner, group, flags, arg6],
         [
             dirfd_cage, path_cage, owner_cage, group_cage, flags_cage, arg6cage,
@@ -1038,7 +1035,6 @@ extern "C" fn fstatat_handler(
     call_with_at_path(
         SYS_NEWFSTATAT as u32,
         cageid,
-        dirfd_cage,
         [dirfd, path_ptr, statbuf, flags, arg5, arg6],
         [
             dirfd_cage,
@@ -1071,7 +1067,6 @@ extern "C" fn statx_handler(
     call_with_at_path(
         SYS_STATX as u32,
         cageid,
-        dirfd_cage,
         [dirfd, path_ptr, flags, mask, statxbuf, arg6],
         [
             dirfd_cage,
@@ -1110,15 +1105,7 @@ extern "C" fn utimensat_handler(
         return make_syscall_from_grate(SYS_UTIMENSAT as u32, dirfd_cage, args, arg_cages);
     }
 
-    call_with_at_path(
-        SYS_UTIMENSAT as u32,
-        cageid,
-        dirfd_cage,
-        args,
-        arg_cages,
-        0,
-        1,
-    )
+    call_with_at_path(SYS_UTIMENSAT as u32, cageid, args, arg_cages, 0, 1)
 }
 
 extern "C" fn renameat_handler(
@@ -1217,7 +1204,7 @@ fn renameat_common(
 
     make_syscall_from_grate(
         syscall_no,
-        olddirfd_cage,
+        oldpath_cage,
         [
             rewritten_olddirfd,
             oldpath.as_ptr() as u64,
