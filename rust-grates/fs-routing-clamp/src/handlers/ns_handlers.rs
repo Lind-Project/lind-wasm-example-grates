@@ -395,7 +395,7 @@ pub extern "C" fn ns_mmap_handler(
     arg6: u64,      // offset
     arg6cage: u64,
 ) -> i32 {
-    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
     /*
@@ -404,13 +404,20 @@ pub extern "C" fn ns_mmap_handler(
      */
     let is_anonymous = (arg4 & MAP_ANON as u64) != 0;
 
+    let mut fd = arg5;
     if !is_anonymous {
-        let fd = arg5;
+        let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, fd) {
+            Ok(entry) => entry,
+            Err(_) => {
+                return -(EBADF as i32);
+            }
+        };
 
-        if fdtables::translate_virtual_fd(arg1cage, fd)
-            .map(|e| e.perfdinfo != 0)
-            .unwrap_or(false)
-        {
+        let perfdinfo = old_fd_entry.perfdinfo;
+
+        args[4] = old_fd_entry.underfd; // replace virtual fd with underfd for the syscall
+        
+        if perfdinfo != 0 {
             let ret = match helpers::get_route(arg1cage, SYS_MMAP) {
                 Some(alt) => helpers::do_syscall(arg1cage, alt, &args, &arg_cages),
                 None => helpers::do_clamp_syscall(arg1cage, SYS_MMAP, &args, &arg_cages),
@@ -422,7 +429,13 @@ pub extern "C" fn ns_mmap_handler(
         }
     }
 
-    helpers::do_syscall(arg1cage, SYS_MMAP, &args, &arg_cages)
+    let ret = helpers::do_syscall(arg1cage, SYS_MMAP, &args, &arg_cages);
+
+    if ret != -1 && !is_anonymous {
+        args[4] = fd; // restore original fd in args
+    }
+
+    ret
 }
 
 /// munmap (syscall 11): unmap memory.
@@ -509,12 +522,13 @@ pub extern "C" fn ns_fcntl_handler(
         if cmd == F_DUPFD as u64 || cmd == F_DUPFD_CLOEXEC as u64 {
             let cloexec = cmd == F_DUPFD_CLOEXEC as u64;
 
-            match fdtables::get_unused_virtual_fd(
+            match fdtables::get_unused_virtual_fd_from_startfd(
                 arg1cage,
                 0,
                 ret as u64,
                 cloexec,
                 perfdinfo,
+                arg1,
             ) {
                 Ok(vfd) => {
                     // println!(
