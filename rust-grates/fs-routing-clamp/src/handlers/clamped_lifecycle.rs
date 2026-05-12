@@ -1,6 +1,6 @@
 use grate_rs::{
     SyscallHandler, constants::*, copy_data_between_cages, getcageid, is_thread_clone,
-    register_handler, register_default_fd_handlers_except,
+    register_default_fd_handlers_except, register_handler,
 };
 
 use fdtables;
@@ -72,7 +72,7 @@ pub fn register_target_handlers(target_cage: u64) -> i32 {
     //  that the call still goes to interpose-open-write.
     //
     //  The routing logic is handled in the `ns_handlers.rs` helpers.
-    for fs_syscall in FS_CALLS {
+    for fs_syscall in FS_CALLS.iter().copied() {
         let ns_handler = get_ns_handler(fs_syscall);
 
         // Find Interposition Requests aimed at the child_cage.
@@ -99,7 +99,7 @@ pub fn register_target_handlers(target_cage: u64) -> i32 {
             // ... Add to routing table.
             let _ = helpers::set_route(target_cage, fs_syscall, alt_nr);
         }
-        
+
         // The visible handler on the target cage always points at ns-grate.
         match register_handler(target_cage, fs_syscall, ns_cage, ns_handler.unwrap()) {
             Ok(_) => {}
@@ -113,7 +113,7 @@ pub fn register_target_handlers(target_cage: u64) -> i32 {
     match register_default_fd_handlers_except(
         target_cage,
         ns_cage,
-        Some(FS_CALLS.into_iter().collect::<HashSet<u64>>()),
+        Some(FS_CALLS.iter().copied().collect::<HashSet<u64>>()),
     ) {
         Ok(_) => {}
         Err(e) => {

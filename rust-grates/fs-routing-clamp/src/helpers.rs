@@ -8,33 +8,48 @@
 
 use grate_rs::constants::*;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use grate_rs::{GrateError, copy_data_between_cages, make_threei_call};
 
 // These are all the calls that the fs-namespace grate cares about. All of the
 // following calls from the target must be routed through the grate regardless
 // of whether the clamp interposed on them.
-pub const FS_CALLS: [u64; 46] = [
+pub const FS_CALLS: &[u64] = &[
     SYS_OPEN,
     SYS_OPENAT,
     SYS_XSTAT,
+    SYS_LSTAT,
+    SYS_NEWFSTATAT,
+    SYS_STATX,
     SYS_GETCWD,
     SYS_ACCESS,
+    SYS_FACCESSAT,
     SYS_UNLINK,
+    SYS_UNLINKAT,
     SYS_LINK,
+    SYS_SYMLINK,
+    SYS_SYMLINKAT,
     SYS_MKDIR,
     SYS_RMDIR,
     SYS_RENAME,
+    SYS_RENAMEAT,
+    SYS_RENAMEAT2,
     SYS_TRUNCATE,
     SYS_CHMOD,
+    SYS_FCHMODAT,
+    SYS_CHOWN,
+    SYS_LCHOWN,
+    SYS_FCHOWNAT,
     SYS_CHDIR,
     SYS_MKNOD,
     SYS_READLINK,
-    SYS_UNLINKAT,
     SYS_READLINKAT,
     SYS_STATFS,
+    SYS_SETXATTR,
+    SYS_LISTXATTR,
+    SYS_UTIMENSAT,
     SYS_GETDENTS,
     // FD-based
     SYS_READ,
@@ -52,20 +67,20 @@ pub const FS_CALLS: [u64; 46] = [
     SYS_FTRUNCATE,
     SYS_FCHMOD,
     SYS_FCHDIR,
-    SYS_READV,
-    SYS_WRITEV,
+    SYS_FLOCK,
+    SYS_IOCTL,
     SYS_FSYNC,
     SYS_FDATASYNC,
     SYS_FSTATFS,
     SYS_SYNC_FILE_RANGE,
     SYS_MMAP,
+    SYS_MUNMAP,
     // FD-based with fd-tracking side effects
     SYS_DUP,
     SYS_DUP2,
     SYS_DUP3,
     // Lifecycle — interpose so we track child cages
     SYS_CLONE,
-    SYS_GETCWD,
 ];
 
 // =====================================================================
@@ -497,11 +512,7 @@ pub fn is_clamped_mmap(cageid: u64, addr: u64, len: u64) -> bool {
     let maps = clamped_mmaps().lock().unwrap();
 
     maps.get(&cageid)
-        .map(|ranges| {
-            ranges
-                .iter()
-                .any(|r| addr < r.end && end > r.start)
-        })
+        .map(|ranges| ranges.iter().any(|r| addr < r.end && end > r.start))
         .unwrap_or(false)
 }
 
