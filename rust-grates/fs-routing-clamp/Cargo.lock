@@ -50,6 +50,7 @@ dependencies = [
 [[package]]
 name = "grate-rs"
 version = "0.1.0"
+source = "git+https://github.com/Lind-Project/lind-wasm-example-grates?branch=main#0d1f93b7e24cdd3a4b1f39c8524f5f6c8448bd6a"
 dependencies = [
  "fdtables",
  "libc",
