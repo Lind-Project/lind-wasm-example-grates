@@ -294,7 +294,7 @@ fn fd_translation_handler_impl(
                 old_fd_entry = match fdtables::translate_virtual_fd(argcages[spec.index], args[spec.index]) {
                     Ok(entry) => entry,
                     Err(_) => {
-                        return EBADF as i32;
+                        return -(EBADF as i32);
                     }
                 };
                 old_fd_cageid = argcages[spec.index];
@@ -309,11 +309,11 @@ fn fd_translation_handler_impl(
                     Ok(underfd) => {
                         args[0] = underfd;
 
-                        let flags = args[2] as i32;
-                        should_cloexec |= (flags & O_CLOEXEC) != 0;
+                        let cmd = args[1] as i32;
 
-                        if flags & F_DUPFD != 0 || flags & F_DUPFD_CLOEXEC != 0 {
+                        if cmd & F_DUPFD != 0 || cmd & F_DUPFD_CLOEXEC != 0 {
                             should_create_vfd = true;
+                            should_cloexec |= cmd == F_DUPFD_CLOEXEC;
                         }
                     }
 
@@ -511,6 +511,8 @@ fn fd_translation_handler_impl(
         Err(_) => ENOSYS,
     };
 
+    // println!("[fd-translate] syscall={}, ret={}", syscall_num, ret);
+
     // syscall failed, do not create vfd and do not mutate fdtable.
     if ret < 0 {
         return ret;
@@ -559,7 +561,7 @@ fn fd_translation_handler_impl(
             fdtables::get_unused_virtual_fd(origin_pipe_cageid, FDKIND_KERNEL, ksv_1 as u64, should_cloexec, 0).unwrap();
         let vsv_2 =
             fdtables::get_unused_virtual_fd(origin_pipe_cageid, FDKIND_KERNEL, ksv_2 as u64, should_cloexec, 0).unwrap();
-            
+        
         let fds: [i32; 2] = [vsv_1 as i32, vsv_2 as i32];
         
         match copy_data_between_cages(
@@ -775,6 +777,7 @@ define_fd_handler!(fd_mmap_handler, SYS_MMAP, FD_ARG_5);
 define_fd_handler!(fd_unlinkat_handler, SYS_UNLINKAT, DIRFD_ARG_1);
 define_fd_handler!(fd_symlinkat_handler, SYS_SYMLINKAT, DIRFD_ARG_1);
 define_fd_handler!(fd_readlinkat_handler, SYS_READLINKAT, DIRFD_ARG_1);
+define_fd_handler!(fd_fchmodat_handler, SYS_FCHMODAT, DIRFD_ARG_1);
 
 define_fd_handler!(fd_open_handler, SYS_OPEN, CREATION_FLAG_2);
 define_fd_handler!(fd_openat_handler, SYS_OPENAT, CREATION_DIRFD_1_FLAG_3);
@@ -838,6 +841,7 @@ pub const FD_HANDLER_TABLE: &[(u64, SyscallHandler)] = &[
     (SYS_UNLINKAT, fd_unlinkat_handler as SyscallHandler),
     (SYS_SYMLINKAT, fd_symlinkat_handler as SyscallHandler),
     (SYS_READLINKAT, fd_readlinkat_handler as SyscallHandler),
+    (SYS_FCHMODAT, fd_fchmodat_handler as SyscallHandler),
 
     (SYS_OPEN, fd_open_handler as SyscallHandler),
     (SYS_OPENAT, fd_openat_handler as SyscallHandler),
