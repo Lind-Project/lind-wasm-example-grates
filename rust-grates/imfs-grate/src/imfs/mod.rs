@@ -41,6 +41,7 @@ pub struct FDInfo {
 
 const DIRENT64_FIXED_SIZE: usize = 8 + 8 + 2 + 1;
 const IMFS_BLOCK_SIZE: i32 = 512;
+const LIND_AT_FDCWD: i32 = -100;
 
 /// The complete IMFS state.
 pub struct ImfsState {
@@ -349,7 +350,7 @@ impl ImfsState {
             return Ok(self.normalize_path_for_cage(cage_id, path));
         }
 
-        if dirfd == libc::AT_FDCWD {
+        if dirfd == LIND_AT_FDCWD {
             return Ok(self.normalize_path_for_cage(cage_id, path));
         }
 
