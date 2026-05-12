@@ -112,6 +112,7 @@ pub const SYS_READLINKAT: u64 = 267;
 pub const SYS_FCHMODAT: u64 = 268;
 pub const SYS_PPOLL: u64 = 271;
 pub const SYS_SYNC_FILE_RANGE: u64 = 277;
+pub const SYS_UTIMENSAT: u64 = 280;
 pub const SYS_ACCEPT4: u64 = 288;
 pub const SYS_EPOLL_CREATE1: u64 = 291;
 pub const SYS_DUP3: u64 = 292;
