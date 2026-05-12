@@ -1,6 +1,7 @@
 use crate::helpers;
 use grate_rs::{SyscallHandler, constants::*, copy_data_between_cages, getcageid, is_thread_clone};
 use grate_rs::constants::fs::{F_DUPFD, F_DUPFD_CLOEXEC};
+use grate_rs::constants::mman::MAP_ANON;
 use grate_rs::constants::error::{EBADF, EMFILE};
 // =====================================================================
 //  PATH-BASED SYSCALL HANDLERS
@@ -163,7 +164,7 @@ macro_rules! fd_route_handler {
             let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
                 Ok(entry) => entry,
                 Err(_) => {
-                    return EBADF as i32;
+                    return -(EBADF as i32);
                 }
             };
 
@@ -186,7 +187,8 @@ macro_rules! fd_route_handler {
                 };
             }
 
-            helpers::do_syscall(arg1cage, $sysno, &args, &arg_cages)
+            let ret = helpers::do_syscall(arg1cage, $sysno, &args, &arg_cages);
+            ret
         }
     };
 }
@@ -299,7 +301,7 @@ pub extern "C" fn ns_close_handler(
     let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
         Ok(entry) => entry,
         Err(_) => {
-            return EBADF as i32;
+            return -(EBADF as i32);
         }
     };
 
@@ -315,8 +317,9 @@ pub extern "C" fn ns_close_handler(
 
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
 
-    // Always remove the fd from our tracking.
-    let _ = fdtables::close_virtualfd(arg1cage, arg1);
+    if ret >= 0 {
+        let _ = fdtables::close_virtualfd(arg1cage, arg1);
+    }
 
     ret
 }
@@ -432,7 +435,7 @@ pub extern "C" fn ns_fcntl_handler(
     let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
         Ok(entry) => entry,
         Err(_) => {
-            return EBADF as i32;
+            return -(EBADF as i32);
         }
     };
 
@@ -454,14 +457,18 @@ pub extern "C" fn ns_fcntl_handler(
         if cmd == F_DUPFD as u64 || cmd == F_DUPFD_CLOEXEC as u64 {
             let cloexec = cmd == F_DUPFD_CLOEXEC as u64;
 
-            let _ = fdtables::get_specific_virtual_fd(
+            match fdtables::get_unused_virtual_fd(
                 arg1cage,
-                ret as u64,
                 0,
                 ret as u64,
                 cloexec,
                 perfdinfo,
-            );
+            ) {
+                Ok(vfd) => {
+                    return vfd as i32;
+                }
+                Err(_) => return -(EMFILE as i32),
+            };
         }
     }
 
@@ -492,7 +499,7 @@ pub extern "C" fn ns_dup_handler(
     let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
         Ok(entry) => entry,
         Err(_) => {
-            return EBADF as i32;
+            return -(EBADF as i32);
         }
     };
 
@@ -510,12 +517,15 @@ pub extern "C" fn ns_dup_handler(
 
     // On success, record the new fd with the same clamped status as the old one.
     if ret >= 0 {
-        let _ = fdtables::get_unused_virtual_fd(
+        match fdtables::get_unused_virtual_fd(
             arg1cage, 0, ret as u64, false, perfdinfo,
-        );
+        ) {
+            Ok(vfd) => {
+                return vfd as i32;
+            }
+            Err(_) => return -(EMFILE as i32),
+        };
     }
-
-    println!("dup handler: arg1(fd)={}, perfdinfo={}, ret={}", arg1, perfdinfo, ret);
 
     ret
 }
@@ -544,7 +554,7 @@ pub extern "C" fn ns_dup2_handler(
     let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
         Ok(entry) => entry,
         Err(_) => {
-            return EBADF as i32;
+            return -(EBADF as i32);
         }
     };
 
@@ -562,8 +572,10 @@ pub extern "C" fn ns_dup2_handler(
 
     // arg2 is the target fd for dup2.
     if ret >= 0 {
-        let _ = fdtables::get_specific_virtual_fd(arg1cage, arg2, 0, arg2, false, perfdinfo);
+        let _ = fdtables::get_specific_virtual_fd(arg1cage, arg2, 0, ret as u64, false, perfdinfo);
     }
+
+    println!("dup2 handler: arg1(fd)={}, arg2(target fd)={}, perfdinfo={}, ret={}", arg1, arg2, perfdinfo, ret);
 
     ret
 }
@@ -592,7 +604,7 @@ pub extern "C" fn ns_dup3_handler(
     let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
         Ok(entry) => entry,
         Err(_) => {
-            return EBADF as i32;
+            return -(EBADF as i32);
         }
     };
 
@@ -610,7 +622,7 @@ pub extern "C" fn ns_dup3_handler(
 
     // arg2 is the target fd for dup3.
     if ret >= 0 {
-        let _ = fdtables::get_specific_virtual_fd(arg1cage, arg2, 0, arg2, false, perfdinfo);
+        let _ = fdtables::get_specific_virtual_fd(arg1cage, arg2, 0, ret as u64, false, perfdinfo);
     }
 
     ret

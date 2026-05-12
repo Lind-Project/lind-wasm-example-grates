@@ -209,6 +209,8 @@ fn fd_translation_handler_impl(
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let mut argcages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
+    let mut vfd_close = 0;
+
     let mut should_create_vfd = false;
     let mut should_cloexec = false;
     let mut should_socketpair = false;
@@ -257,24 +259,20 @@ fn fd_translation_handler_impl(
     for spec in fd_specs {
         match spec.kind {
             FdArgKind::Fd | FdArgKind::DirFd => {
-                let kernel_fd = args[spec.index];
+                vfd_close = args[spec.index];
                 let fd_cageid = argcages[spec.index];
 
                 if syscall_num == SYS_MMAP {
                     // For mmap, we only translate the fd if it's not -1 (i.e. not MAP_ANONYMOUS)
-                    if kernel_fd == u64::MAX {
+                    if vfd_close == u64::MAX {
                         continue;
                     }
                 }
 
-                match translate_fd_arg(fd_cageid, kernel_fd, spec.kind) {
+                match translate_fd_arg(fd_cageid, vfd_close, spec.kind) {
                     Ok(underfd) => {
 
                         args[spec.index] = underfd;
-
-                        if syscall_num == SYS_CLOSE {
-                            let _ = fdtables::close_virtualfd(fd_cageid, kernel_fd);
-                        }
                     }
 
                     Err(errno_ret) => {
@@ -518,6 +516,9 @@ fn fd_translation_handler_impl(
         return ret;
     }
 
+    if syscall_num == SYS_CLOSE {
+        let _ = fdtables::close_virtualfd(arg1cage, vfd_close);
+    }
 
     if should_dup2 {
         let flags = fd_specs
@@ -535,7 +536,7 @@ fn fd_translation_handler_impl(
             0,
         ) {
             Ok(_) => return new_fd as i32,
-            Err(_) => return EMFILE,
+            Err(_) => return -(EMFILE as i32),
         }
     }
 
@@ -550,7 +551,7 @@ fn fd_translation_handler_impl(
             0,
         ) {
             Ok(vfd) => vfd as i32,
-            Err(_) => EMFILE,
+            Err(_) => -(EMFILE as i32),
         };
     }
 

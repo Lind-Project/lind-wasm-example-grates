@@ -12,6 +12,7 @@ mod handlers;
 mod imfs;
 mod logging;
 
+use grate_rs::constants::fs::O_RDWR;
 use grate_rs::constants::*;
 use grate_rs::{GrateBuilder, GrateError};
 
@@ -100,6 +101,21 @@ fn main() {
             imfs::with_imfs(|s| {
                 s.cwd_info.insert(cageid as u64, "/".to_string());
             });
+
+            fdtables::init_empty_cage(cageid as u64);
+
+            for fd in 0..3 {
+                let _ = fdtables::get_specific_virtual_fd(
+                    cageid as u64,
+                    fd,
+                    imfs::IMFS_FDKIND,
+                    0,
+                    false,
+                    0,
+                );
+
+                imfs::with_imfs(|s| s.insert_perfdinfo(cageid as u64, fd, O_RDWR as u64));
+            }
         })
         .teardown(|result: Result<i32, GrateError>| {
             log!("exited: {:?}", result);
