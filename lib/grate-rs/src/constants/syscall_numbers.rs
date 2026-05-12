@@ -86,6 +86,8 @@ pub const SYS_SYMLINK: u64 = 88;
 pub const SYS_READLINK: u64 = 89;
 pub const SYS_CHMOD: u64 = 90;
 pub const SYS_FCHMOD: u64 = 91;
+pub const SYS_CHOWN: u64 = 92;
+pub const SYS_LCHOWN: u64 = 94;
 
 pub const SYS_GETUID: u64 = 102;
 pub const SYS_GETGID: u64 = 104;
@@ -98,6 +100,8 @@ pub const SYS_STATFS: u64 = 137;
 pub const SYS_FSTATFS: u64 = 138;
 pub const SYS_CHROOT: u64 = 161;
 pub const SYS_GETHOSTNAME: u64 = 170;
+pub const SYS_SETXATTR: u64 = 188;
+pub const SYS_LISTXATTR: u64 = 194;
 pub const SYS_FUTEX: u64 = 202;
 pub const SYS_EPOLL_CREATE: u64 = 213;
 pub const SYS_CLOCK_GETTIME: u64 = 228;
@@ -105,11 +109,17 @@ pub const SYS_EXIT_GROUP: u64 = 231;
 pub const SYS_EPOLL_WAIT: u64 = 232;
 pub const SYS_EPOLL_CTL: u64 = 233;
 pub const SYS_OPENAT: u64 = 257;
+pub const SYS_FCHOWNAT: u64 = 260;
+pub const SYS_NEWFSTATAT: u64 = 262;
 pub const SYS_UNLINKAT: u64 = 263;
+pub const SYS_RENAMEAT: u64 = 264;
 pub const SYS_SYMLINKAT: u64 = 266;
 pub const SYS_READLINKAT: u64 = 267;
+pub const SYS_FCHMODAT: u64 = 268;
+pub const SYS_FACCESSAT: u64 = 269;
 pub const SYS_PPOLL: u64 = 271;
 pub const SYS_SYNC_FILE_RANGE: u64 = 277;
+pub const SYS_UTIMENSAT: u64 = 280;
 pub const SYS_ACCEPT4: u64 = 288;
 pub const SYS_EPOLL_CREATE1: u64 = 291;
 pub const SYS_DUP3: u64 = 292;
@@ -117,7 +127,9 @@ pub const SYS_PIPE2: u64 = 293;
 pub const SYS_PREADV: u64 = 295;
 pub const SYS_PWRITEV: u64 = 296;
 pub const SYS_PRLIMIT64: u64 = 302;
+pub const SYS_RENAMEAT2: u64 = 316;
 pub const SYS_GETRANDOM: u64 = 318;
+pub const SYS_STATX: u64 = 332;
 
 // --- Backwards-compat aliases ---
 //

@@ -1,6 +1,7 @@
 use crate::helpers;
 use grate_rs::{SyscallHandler, constants::*, copy_data_between_cages, getcageid, is_thread_clone};
 use grate_rs::constants::fs::{F_DUPFD, F_DUPFD_CLOEXEC};
+use grate_rs::constants::mman::MAP_ANON;
 // =====================================================================
 //  PATH-BASED SYSCALL HANDLERS
 //
@@ -299,6 +300,96 @@ pub extern "C" fn ns_close_handler(
     let _ = fdtables::close_virtualfd(arg1cage, arg1);
 
     ret
+}
+
+/// mmap (syscall 9): map file or anonymous memory.
+///
+/// Routing decision is based on arg5, the file descriptor.
+/// For MAP_ANONYMOUS / MAP_ANON, fd is ignored and should not trigger fd-based routing.
+pub extern "C" fn ns_mmap_handler(
+    _cageid: u64,
+    arg1: u64,      // addr
+    arg1cage: u64,
+    arg2: u64,      // length
+    arg2cage: u64,
+    arg3: u64,      // prot
+    arg3cage: u64,
+    arg4: u64,      // flags
+    arg4cage: u64,
+    arg5: u64,      // fd
+    arg5cage: u64,
+    arg6: u64,      // offset
+    arg6cage: u64,
+) -> i32 {
+    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    /*
+     * MAP_ANONYMOUS means fd is ignored.
+     * Do not route based on fd in that case, because fd may be -1.
+     */
+    let is_anonymous = (arg4 & MAP_ANON as u64) != 0;
+
+    if !is_anonymous {
+        let fd = arg5;
+
+        if fdtables::translate_virtual_fd(arg1cage, fd)
+            .map(|e| e.perfdinfo != 0)
+            .unwrap_or(false)
+        {
+            let ret = match helpers::get_route(arg1cage, SYS_MMAP) {
+                Some(alt) => helpers::do_syscall(arg1cage, alt, &args, &arg_cages),
+                None => helpers::do_clamp_syscall(arg1cage, SYS_MMAP, &args, &arg_cages),
+            };
+            if ret >= 0 {
+                helpers::record_clamped_mmap(arg1cage, ret as u64, arg2);
+            }
+            return ret;
+        }
+    }
+
+    helpers::do_syscall(arg1cage, SYS_MMAP, &args, &arg_cages)
+}
+
+/// munmap (syscall 11): unmap memory.
+///
+/// munmap has no fd argument, so fd-based routing is impossible here.
+/// Instead, route if the addr/len overlaps a range previously returned by a
+/// clamped mmap. This lets clamped grates such as imfs decrement mmap_refs.
+pub extern "C" fn ns_munmap_handler(
+    _cageid: u64,
+    arg1: u64,      // addr
+    arg1cage: u64,
+    arg2: u64,      // length
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    let is_clamped_mapping = helpers::is_clamped_mmap(arg1cage, arg1, arg2);
+
+    if is_clamped_mapping {
+        let ret = match helpers::get_route(arg1cage, SYS_MUNMAP) {
+            Some(alt) => helpers::do_syscall(arg1cage, alt, &args, &arg_cages),
+            None => helpers::do_clamp_syscall(arg1cage, SYS_MUNMAP, &args, &arg_cages),
+        };
+
+        if ret == 0 {
+            helpers::remove_clamped_mmap(arg1cage, arg1, arg2);
+        }
+
+        return ret;
+    }
+
+    helpers::do_syscall(arg1cage, SYS_MUNMAP, &args, &arg_cages)
 }
 
 pub extern "C" fn ns_fcntl_handler(
@@ -605,6 +696,7 @@ pub fn get_ns_handler(syscall_nr: u64) -> Option<SyscallHandler> {
         SYS_FDATASYNC => Some(ns_fdatasync_handler),
         SYS_FSTATFS => Some(ns_fstatfs_handler),
         SYS_SYNC_FILE_RANGE => Some(ns_sync_file_range_handler),
+        SYS_MMAP => Some(ns_mmap_handler),
 
         // FD-based with fd-tracking side effects
         SYS_DUP => Some(ns_dup_handler),
