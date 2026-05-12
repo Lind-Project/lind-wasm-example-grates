@@ -146,6 +146,17 @@ type = "rust"
 [[grate.tests]]
 test_src = "test/write_filter-test-grate.c"
 
+# ── Redaction (Rust) ────────────────────────────────────────────────
+
+[[grate]]
+name = "redaction-grate"
+dir = "redaction-grate"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/redaction_test.c"
+grate_args = ["--redact", "secret", "--"]
+
 # ── Devnull (Rust) ──────────────────────────────────────────────────
 
 [[grate]]
