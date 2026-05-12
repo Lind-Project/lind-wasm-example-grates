@@ -129,6 +129,20 @@ int main(int argc, char *argv[]) {
         if (origfd >= 0) close(origfd);
     }
 
+    snprintf(out, sizeof(out), "out-at.E-%s", seed);
+    snprintf(orig, sizeof(orig), "%s.orig", out);
+    outfd = open(out, O_CREAT | O_RDWR, 0644);
+    CHECK("open: create file for rename-open-unlinkat sequence", outfd >= 0);
+    if (outfd >= 0) {
+        CHECK("write: populate rename-open-unlinkat file", write(outfd, "x", 1) == 1);
+        close(outfd);
+        CHECK("rename: move output aside before unlinkat normalization", rename(out, orig) == 0);
+        int origfd = open(orig, O_RDONLY);
+        CHECK("open: read renamed output file before unlinkat", origfd >= 0);
+        CHECK("unlinkat: remove renamed output while open", unlinkat(AT_FDCWD, orig, 0) == 0);
+        if (origfd >= 0) close(origfd);
+    }
+
     // ---- symlink ----
     CHECK("symlink: create dangling relative symlink", symlink(missing, sym) == 0);
     char linkbuf[PATH_MAX];
@@ -242,7 +256,7 @@ int main(int argc, char *argv[]) {
             _exit(0);
         } else if (fpid > 0) {
             int fstatus;
-            waitpid(fpid, &fstatus, 0);
+            CHECK("waitpid: collect fchdir child", waitpid(fpid, &fstatus, 0) == fpid);
             CHECK("fork: child inherits fchdir directory fd",
                   WIFEXITED(fstatus) && WEXITSTATUS(fstatus) == 0);
             CHECK("access: fork fchdir file created in directory", access(fd_child_path, F_OK) == 0);
