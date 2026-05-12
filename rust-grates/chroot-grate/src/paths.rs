@@ -29,7 +29,7 @@ use std::ffi::CStr;
 macro_rules! input_path_handler {
     ($name:ident, $syscall_const:expr, $( $idx:expr ),+ $(,)?) => {
         extern "C" fn $name(
-            cageid: u64,
+            _cageid: u64,
             arg1: u64, arg1cage: u64,
             arg2: u64, arg2cage: u64,
             arg3: u64, arg3cage: u64,
@@ -60,7 +60,7 @@ macro_rules! input_path_handler {
                 };
 
                 // Apply chroot transformation (normalize relative to cwd, prepend chroot dir).
-                let transformed = chroot_path(&path, cageid);
+                let transformed = chroot_path(&path, cage);
                 let c_path = match ::std::ffi::CString::new(transformed) {
                     Ok(p) => p,
                     Err(_) => return -1,

@@ -355,7 +355,7 @@ socket_untranslate_handler!(recvfrom_handler, SYS_RECVFROM, 4, 5);
 // -----------------------------------------------------------------------------
 
 extern "C" fn open_handler(
-    cageid: u64,
+    _cageid: u64,
     path_ptr: u64,
     path_cage: u64,
     flags: u64,
@@ -370,6 +370,7 @@ extern "C" fn open_handler(
     arg6cage: u64,
 ) -> i32 {
     let thiscage = getcageid();
+    let cageid = path_cage;
     let path = match read_path_from_cage(path_ptr, path_cage) {
         Some(p) => p,
         None => return -(libc::EFAULT as i32),
@@ -402,7 +403,7 @@ extern "C" fn open_handler(
 }
 
 extern "C" fn openat_handler(
-    cageid: u64,
+    _cageid: u64,
     dirfd: u64,
     dirfd_cage: u64,
     path_ptr: u64,
@@ -417,6 +418,7 @@ extern "C" fn openat_handler(
     arg6cage: u64,
 ) -> i32 {
     let thiscage = getcageid();
+    let cageid = path_cage;
     let path = match read_path_from_cage(path_ptr, path_cage) {
         Some(p) => p,
         None => return -(libc::EFAULT as i32),
@@ -458,7 +460,7 @@ extern "C" fn openat_handler(
 }
 
 extern "C" fn close_handler(
-    cageid: u64,
+    _cageid: u64,
     fd: u64,
     fd_cage: u64,
     arg2: u64,
@@ -472,6 +474,7 @@ extern "C" fn close_handler(
     arg6: u64,
     arg6cage: u64,
 ) -> i32 {
+    let cageid = fd_cage;
     let ret = make_syscall_from_grate(
         SYS_CLOSE as u32,
         fd_cage,
@@ -487,7 +490,7 @@ extern "C" fn close_handler(
 }
 
 extern "C" fn dup_handler(
-    cageid: u64,
+    _cageid: u64,
     oldfd: u64,
     oldfd_cage: u64,
     arg2: u64,
@@ -501,6 +504,7 @@ extern "C" fn dup_handler(
     arg6: u64,
     arg6cage: u64,
 ) -> i32 {
+    let cageid = oldfd_cage;
     let ret = make_syscall_from_grate(
         SYS_DUP as u32,
         oldfd_cage,
@@ -516,7 +520,7 @@ extern "C" fn dup_handler(
 }
 
 extern "C" fn dup2_handler(
-    cageid: u64,
+    _cageid: u64,
     oldfd: u64,
     oldfd_cage: u64,
     newfd: u64,
@@ -530,6 +534,7 @@ extern "C" fn dup2_handler(
     arg6: u64,
     arg6cage: u64,
 ) -> i32 {
+    let cageid = oldfd_cage;
     let ret = make_syscall_from_grate(
         SYS_DUP2 as u32,
         oldfd_cage,
@@ -547,7 +552,7 @@ extern "C" fn dup2_handler(
 }
 
 extern "C" fn dup3_handler(
-    cageid: u64,
+    _cageid: u64,
     oldfd: u64,
     oldfd_cage: u64,
     newfd: u64,
@@ -561,6 +566,7 @@ extern "C" fn dup3_handler(
     arg6: u64,
     arg6cage: u64,
 ) -> i32 {
+    let cageid = oldfd_cage;
     let ret = make_syscall_from_grate(
         SYS_DUP3 as u32,
         oldfd_cage,
@@ -578,7 +584,7 @@ extern "C" fn dup3_handler(
 }
 
 extern "C" fn fcntl_handler(
-    cageid: u64,
+    _cageid: u64,
     fd: u64,
     fd_cage: u64,
     cmd: u64,
@@ -592,6 +598,7 @@ extern "C" fn fcntl_handler(
     arg6: u64,
     arg6cage: u64,
 ) -> i32 {
+    let cageid = fd_cage;
     let ret = make_syscall_from_grate(
         SYS_FCNTL as u32,
         fd_cage,
@@ -617,7 +624,7 @@ extern "C" fn fcntl_handler(
 /// - Strips the chroot prefix from the returned target so the cage sees a
 ///   virtual path.
 extern "C" fn readlink_handler(
-    cageid: u64,
+    _cageid: u64,
     path_ptr: u64,
     path_cage: u64,
     buf: u64,
@@ -632,6 +639,7 @@ extern "C" fn readlink_handler(
     _arg6cage: u64,
 ) -> i32 {
     let thiscage = getcageid();
+    let cageid = path_cage;
 
     // Read and chroot the input path (symlink location).
     let path = match read_path_from_cage(path_ptr, path_cage) {
@@ -649,7 +657,7 @@ extern "C" fn readlink_handler(
     let ret = match make_threei_call(
         SYS_READLINK as u32,
         0,
-        cageid,
+        thiscage,
         path_cage,
         c_path.as_ptr() as u64,
         thiscage | GRATE_MEMORY_FLAG,
@@ -690,7 +698,7 @@ extern "C" fn readlink_handler(
 /// The returned symlink target is always un-chrooted (prefix stripped) so the
 /// cage sees a virtual path.
 extern "C" fn readlinkat_handler(
-    cageid: u64,
+    _cageid: u64,
     dirfd: u64,
     dirfd_cage: u64,
     path_ptr: u64,
@@ -705,6 +713,7 @@ extern "C" fn readlinkat_handler(
     _arg6cage: u64,
 ) -> i32 {
     let thiscage = getcageid();
+    let cageid = path_cage;
     const AT_FDCWD: i64 = -100;
 
     // Read the input path.
@@ -732,7 +741,7 @@ extern "C" fn readlinkat_handler(
     let ret = match make_threei_call(
         SYS_READLINKAT as u32,
         0,
-        cageid,
+        thiscage,
         path_cage,
         if use_chrooted { AT_FDCWD as u64 } else { dirfd },
         dirfd_cage,
@@ -776,7 +785,7 @@ extern "C" fn readlinkat_handler(
 /// `open(2)`-returned dirfd would be normalized against the cage's cwd and
 /// chrooted into an absolute path, causing the kernel to ignore `dirfd`.
 extern "C" fn unlinkat_handler(
-    cageid: u64,
+    _cageid: u64,
     dirfd: u64,
     dirfd_cage: u64,
     path_ptr: u64,
@@ -791,6 +800,7 @@ extern "C" fn unlinkat_handler(
     _arg6cage: u64,
 ) -> i32 {
     let thiscage = getcageid();
+    let cageid = path_cage;
     const AT_FDCWD: i64 = -100;
 
     let path = match read_path_from_cage(path_ptr, path_cage) {
@@ -813,7 +823,7 @@ extern "C" fn unlinkat_handler(
     match make_threei_call(
         SYS_UNLINKAT as u32,
         0,
-        cageid,
+        thiscage,
         path_cage,
         if use_chrooted { AT_FDCWD as u64 } else { dirfd },
         dirfd_cage,
@@ -836,7 +846,7 @@ extern "C" fn unlinkat_handler(
 }
 
 extern "C" fn symlink_handler(
-    cageid: u64,
+    _cageid: u64,
     target_ptr: u64,
     target_cage: u64,
     linkpath_ptr: u64,
@@ -851,6 +861,7 @@ extern "C" fn symlink_handler(
     arg6cage: u64,
 ) -> i32 {
     let thiscage = getcageid();
+    let cageid = linkpath_cage;
 
     let target = match rewrite_symlink_target(cageid, target_ptr, target_cage) {
         Ok(v) => v,
@@ -888,7 +899,7 @@ extern "C" fn symlink_handler(
 }
 
 extern "C" fn symlinkat_handler(
-    cageid: u64,
+    _cageid: u64,
     target_ptr: u64,
     target_cage: u64,
     dirfd: u64,
@@ -903,6 +914,7 @@ extern "C" fn symlinkat_handler(
     arg6cage: u64,
 ) -> i32 {
     let thiscage = getcageid();
+    let cageid = linkpath_cage;
 
     let target = match rewrite_symlink_target(cageid, target_ptr, target_cage) {
         Ok(v) => v,
@@ -937,7 +949,7 @@ extern "C" fn symlinkat_handler(
 }
 
 extern "C" fn faccessat_handler(
-    cageid: u64,
+    _cageid: u64,
     dirfd: u64,
     dirfd_cage: u64,
     path_ptr: u64,
@@ -953,7 +965,7 @@ extern "C" fn faccessat_handler(
 ) -> i32 {
     call_with_at_path(
         SYS_FACCESSAT as u32,
-        cageid,
+        path_cage,
         [dirfd, path_ptr, mode, flags, arg5, arg6],
         [
             dirfd_cage, path_cage, mode_cage, flags_cage, arg5cage, arg6cage,
@@ -964,7 +976,7 @@ extern "C" fn faccessat_handler(
 }
 
 extern "C" fn fchmodat_handler(
-    cageid: u64,
+    _cageid: u64,
     dirfd: u64,
     dirfd_cage: u64,
     path_ptr: u64,
@@ -980,7 +992,7 @@ extern "C" fn fchmodat_handler(
 ) -> i32 {
     call_with_at_path(
         SYS_FCHMODAT as u32,
-        cageid,
+        path_cage,
         [dirfd, path_ptr, mode, flags, arg5, arg6],
         [
             dirfd_cage, path_cage, mode_cage, flags_cage, arg5cage, arg6cage,
@@ -991,7 +1003,7 @@ extern "C" fn fchmodat_handler(
 }
 
 extern "C" fn fchownat_handler(
-    cageid: u64,
+    _cageid: u64,
     dirfd: u64,
     dirfd_cage: u64,
     path_ptr: u64,
@@ -1007,7 +1019,7 @@ extern "C" fn fchownat_handler(
 ) -> i32 {
     call_with_at_path(
         SYS_FCHOWNAT as u32,
-        cageid,
+        path_cage,
         [dirfd, path_ptr, owner, group, flags, arg6],
         [
             dirfd_cage, path_cage, owner_cage, group_cage, flags_cage, arg6cage,
@@ -1018,7 +1030,7 @@ extern "C" fn fchownat_handler(
 }
 
 extern "C" fn fstatat_handler(
-    cageid: u64,
+    _cageid: u64,
     dirfd: u64,
     dirfd_cage: u64,
     path_ptr: u64,
@@ -1034,7 +1046,7 @@ extern "C" fn fstatat_handler(
 ) -> i32 {
     call_with_at_path(
         SYS_NEWFSTATAT as u32,
-        cageid,
+        path_cage,
         [dirfd, path_ptr, statbuf, flags, arg5, arg6],
         [
             dirfd_cage,
@@ -1050,7 +1062,7 @@ extern "C" fn fstatat_handler(
 }
 
 extern "C" fn statx_handler(
-    cageid: u64,
+    _cageid: u64,
     dirfd: u64,
     dirfd_cage: u64,
     path_ptr: u64,
@@ -1066,7 +1078,7 @@ extern "C" fn statx_handler(
 ) -> i32 {
     call_with_at_path(
         SYS_STATX as u32,
-        cageid,
+        path_cage,
         [dirfd, path_ptr, flags, mask, statxbuf, arg6],
         [
             dirfd_cage,
@@ -1082,7 +1094,7 @@ extern "C" fn statx_handler(
 }
 
 extern "C" fn utimensat_handler(
-    cageid: u64,
+    _cageid: u64,
     dirfd: u64,
     dirfd_cage: u64,
     path_ptr: u64,
@@ -1105,11 +1117,11 @@ extern "C" fn utimensat_handler(
         return make_syscall_from_grate(SYS_UTIMENSAT as u32, dirfd_cage, args, arg_cages);
     }
 
-    call_with_at_path(SYS_UTIMENSAT as u32, cageid, args, arg_cages, 0, 1)
+    call_with_at_path(SYS_UTIMENSAT as u32, path_cage, args, arg_cages, 0, 1)
 }
 
 extern "C" fn renameat_handler(
-    cageid: u64,
+    _cageid: u64,
     olddirfd: u64,
     olddirfd_cage: u64,
     oldpath_ptr: u64,
@@ -1125,7 +1137,7 @@ extern "C" fn renameat_handler(
 ) -> i32 {
     renameat_common(
         SYS_RENAMEAT as u32,
-        cageid,
+        oldpath_cage,
         olddirfd,
         olddirfd_cage,
         oldpath_ptr,
@@ -1142,7 +1154,7 @@ extern "C" fn renameat_handler(
 }
 
 extern "C" fn renameat2_handler(
-    cageid: u64,
+    _cageid: u64,
     olddirfd: u64,
     olddirfd_cage: u64,
     oldpath_ptr: u64,
@@ -1158,7 +1170,7 @@ extern "C" fn renameat2_handler(
 ) -> i32 {
     renameat_common(
         SYS_RENAMEAT2 as u32,
-        cageid,
+        oldpath_cage,
         olddirfd,
         olddirfd_cage,
         oldpath_ptr,
@@ -1233,7 +1245,7 @@ fn renameat_common(
 /// Delegates to the real `fork` and, on success in the parent, registers the
 /// child cage in the cwd table with a copy of the parent's virtual cwd.
 extern "C" fn fork_handler(
-    cageid: u64,
+    _cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -1247,12 +1259,15 @@ extern "C" fn fork_handler(
     arg6: u64,
     arg6cage: u64,
 ) -> i32 {
+    let thiscage = getcageid();
+    let parent_cageid = arg1cage;
+
     // Call the real fork syscall.
     let ret = match make_threei_call(
         SYS_CLONE as u32,
         0,
-        cageid,
-        arg1cage,
+        thiscage,
+        parent_cageid,
         arg1,
         arg1cage,
         arg2,
@@ -1274,9 +1289,9 @@ extern "C" fn fork_handler(
 
     if ret > 0 && !is_thread_clone(arg1, arg1cage) {
         let child_cageid = ret as u64;
-        register_cage(cageid, child_cageid);
-        register_child_fd_paths(cageid, child_cageid);
-        let _ = copy_handler_table_to_cage(getcageid(), child_cageid);
+        register_cage(parent_cageid, child_cageid);
+        register_child_fd_paths(parent_cageid, child_cageid);
+        let _ = copy_handler_table_to_cage(thiscage, child_cageid);
     }
 
     ret
@@ -1284,7 +1299,7 @@ extern "C" fn fork_handler(
 
 /// execve handler.
 extern "C" fn execve_handler(
-    cageid: u64,
+    _cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -1300,6 +1315,7 @@ extern "C" fn execve_handler(
 ) -> i32 {
     // Call the real fork syscall.
     let thiscage = getcageid();
+    let cageid = arg1cage;
 
     let path = match read_path_from_cage(arg1, arg1cage) {
         Some(p) => p,
@@ -1344,7 +1360,7 @@ extern "C" fn execve_handler(
 /// This does **not** call the host `chdir`. Instead it updates the per-cage
 /// virtual cwd table, which is used to resolve relative paths in other handlers.
 extern "C" fn chdir_handler(
-    cageid: u64,
+    _cageid: u64,
     path_ptr: u64,
     path_cage: u64,
     _arg2: u64,
@@ -1358,6 +1374,8 @@ extern "C" fn chdir_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
+    let cageid = path_cage;
+
     // Read the requested path from cage memory.
     let path = match read_path_from_cage(path_ptr, path_cage) {
         Some(p) => p,
@@ -1379,7 +1397,7 @@ extern "C" fn chdir_handler(
 }
 
 extern "C" fn fchdir_handler(
-    cageid: u64,
+    _cageid: u64,
     fd: u64,
     fd_cage: u64,
     _arg2: u64,
@@ -1393,6 +1411,8 @@ extern "C" fn fchdir_handler(
     arg6: u64,
     arg6cage: u64,
 ) -> i32 {
+    let cageid = fd_cage;
+
     if let Some(path) = fd_dir_path(cageid, fd) {
         set_cage_cwd(cageid, path);
         return 0;
@@ -1417,7 +1437,7 @@ extern "C" fn fchdir_handler(
 ///
 /// The returned path comes from `CAGE_CWDS` (not the host process cwd).
 extern "C" fn getcwd_handler(
-    cageid: u64,
+    _cageid: u64,
     buf_ptr: u64,
     buf_cage: u64,
     size: u64,
@@ -1432,6 +1452,7 @@ extern "C" fn getcwd_handler(
     _arg6cage: u64,
 ) -> i32 {
     let thiscage = getcageid();
+    let cageid = buf_cage;
 
     // Get the cage's virtual cwd from our table.
     let cwd = get_cage_cwd(cageid);

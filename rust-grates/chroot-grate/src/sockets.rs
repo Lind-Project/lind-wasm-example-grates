@@ -110,7 +110,7 @@ macro_rules! socket_translate_handler {
 macro_rules! socket_untranslate_handler {
     ($name:ident, $syscall_const:expr, $idx:expr, $idx_len:expr) => {
         extern "C" fn $name(
-            cageid: u64,
+            _cageid: u64,
             arg1: u64,
             arg1cage: u64,
             arg2: u64,
@@ -124,6 +124,7 @@ macro_rules! socket_untranslate_handler {
             arg6: u64,
             arg6cage: u64,
         ) -> i32 {
+            let thiscage = getcageid();
             let args = [arg1, arg2, arg3, arg4, arg5, arg6];
             let cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -140,7 +141,7 @@ macro_rules! socket_untranslate_handler {
             let ret = match make_threei_call(
                 $syscall_const as u32,
                 0,
-                cageid,
+                thiscage,
                 arg1cage,
                 arg1,
                 arg1cage,
