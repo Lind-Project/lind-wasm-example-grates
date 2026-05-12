@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -142,6 +143,19 @@ int main(int argc, char *argv[]) {
         CHECK("unlinkat: remove renamed output while open", unlinkat(AT_FDCWD, orig, 0) == 0);
         if (origfd >= 0) close(origfd);
     }
+
+    snprintf(out, sizeof(out), "shell.E-%s", seed);
+    snprintf(orig, sizeof(orig), "%s.orig", out);
+    char cmd[192];
+    snprintf(cmd, sizeof(cmd), "printf x > %s", out);
+    int sysrc = system(cmd);
+    CHECK("system: create redirected output file",
+          sysrc != -1 && WIFEXITED(sysrc) && WEXITSTATUS(sysrc) == 0);
+    CHECK("rename: move shell output aside before normalization", rename(out, orig) == 0);
+    int shellfd = open(orig, O_RDONLY);
+    CHECK("open: read renamed shell output file", shellfd >= 0);
+    CHECK("unlink: remove renamed shell output while open", unlink(orig) == 0);
+    if (shellfd >= 0) close(shellfd);
 
     // ---- symlink ----
     CHECK("symlink: create dangling relative symlink", symlink(missing, sym) == 0);
