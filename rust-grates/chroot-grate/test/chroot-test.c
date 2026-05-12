@@ -113,6 +113,22 @@ int main(int argc, char *argv[]) {
     // ---- rename ----
     CHECK("rename: rename hard link", rename(b, c) == 0);
 
+    char out[64];
+    char orig[72];
+    snprintf(out, sizeof(out), "out.E-%s", seed);
+    snprintf(orig, sizeof(orig), "%s.orig", out);
+    int outfd = open(out, O_CREAT | O_RDWR, 0644);
+    CHECK("open: create file for rename-open-unlink sequence", outfd >= 0);
+    if (outfd >= 0) {
+        CHECK("write: populate rename-open-unlink file", write(outfd, "x", 1) == 1);
+        close(outfd);
+        CHECK("rename: move output aside before normalization", rename(out, orig) == 0);
+        int origfd = open(orig, O_RDONLY);
+        CHECK("open: read renamed output file", origfd >= 0);
+        CHECK("unlink: remove renamed output while open", unlink(orig) == 0);
+        if (origfd >= 0) close(origfd);
+    }
+
     // ---- symlink ----
     CHECK("symlink: create dangling relative symlink", symlink(missing, sym) == 0);
     char linkbuf[PATH_MAX];
