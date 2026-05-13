@@ -66,41 +66,27 @@ static int make_listener(const char *path) {
 
 static void client_process(const char *path) {
     struct sockaddr_un addr;
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) {
         perror("client socket");
         _exit(10);
     }
 
     set_addr(&addr, path);
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 && errno != EINPROGRESS) {
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         perror("client connect");
         _exit(11);
     }
 
-    struct pollfd writable = {.fd = fd, .events = POLLOUT | POLLERR, .revents = 0};
-    if (poll(&writable, 1, 5000) != 1 || !(writable.revents & (POLLOUT | POLLERR))) {
-        perror("client poll connect");
-        _exit(12);
-    }
-
-    int err = -1;
-    socklen_t err_len = sizeof(err);
-    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &err_len) != 0 || err != 0) {
-        errno = err;
-        perror("client SO_ERROR");
-        _exit(13);
-    }
-
     if (send(fd, "startup", 7, 0) != 7) {
         perror("client send startup");
-        _exit(14);
+        _exit(12);
     }
 
     char response[8] = {0};
     if (recv(fd, response, sizeof(response), 0) != 5 || memcmp(response, "ready", 5) != 0) {
         perror("client recv response");
-        _exit(15);
+        _exit(13);
     }
 
     close(fd);
