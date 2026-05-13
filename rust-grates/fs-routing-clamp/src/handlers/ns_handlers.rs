@@ -1,7 +1,8 @@
 use crate::helpers;
 use grate_rs::{SyscallHandler, constants::*, copy_data_between_cages, getcageid, is_thread_clone};
-use grate_rs::constants::fs::{F_DUPFD, F_DUPFD_CLOEXEC};
+use grate_rs::constants::fs::{F_DUPFD, F_DUPFD_CLOEXEC, FD_CLOEXEC, O_CLOEXEC, F_SETFD};
 use grate_rs::constants::mman::MAP_ANON;
+use grate_rs::constants::error::{EBADF, EMFILE, EINVAL};
 // =====================================================================
 //  PATH-BASED SYSCALL HANDLERS
 //
@@ -39,7 +40,18 @@ macro_rules! define_path_handler {
                 None => $sysno,
             };
 
-            helpers::do_syscall(arg1cage, nr, &args, &arg_cages)
+            let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
+            let path = helpers::read_path_from_cage(arg1, arg1cage).unwrap_or_default();
+
+            // println!(
+            //     "[ns_handlers|{}] cageid={} path={} routed_to={} ret={}",
+            //     stringify!($name),
+            //     arg1cage,
+            //     path,
+            //     if nr == $sysno { "kernel" } else { "clamped grate" },
+            //     ret,
+            // );
+            ret
         }
     };
 }
@@ -123,9 +135,18 @@ pub extern "C" fn ns_chdir_handler(
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
 
     if ret == 0 {
-        helpers::set_cage_cwd(arg2cage, resolved_path);
+        helpers::set_cage_cwd(arg2cage, resolved_path.clone());
     }
 
+    // println!(
+    //     "[ns_handlers|chdir] cageid={} path={} resolved_path={} clamped={} routed_to={} ret={}",
+    //     arg1cage,
+    //     pathstr,
+    //     resolved_path,
+    //     if matches { "clamped grate" } else { "kernel" },
+    //     if nr == SYS_CHDIR { "kernel" } else { "clamped grate" },
+    //     ret,
+    // );
     ret
 }
 
@@ -157,33 +178,81 @@ macro_rules! fd_route_handler {
             arg6: u64,
             arg6cage: u64,
         ) -> i32 {
-            let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+            let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
             let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
-            if fdtables::translate_virtual_fd(arg1cage, arg1)
-                .map(|e| e.perfdinfo != 0)
-                .unwrap_or(false)
-            {
+            let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
+                Ok(entry) => entry,
+                Err(_) => {
+                    // println!(
+                    //     "[ns_handlers|{}] cageid={} fd={} invalid virtual fd, ret=EBADF",
+                    //     stringify!($name),
+                    //     arg1cage,
+                    //     arg1,
+                    // );
+                    return -(EBADF as i32);
+                }
+            };
+
+            let perfdinfo = old_fd_entry.perfdinfo != 0;
+
+            args[0] = old_fd_entry.underfd; // replace virtual fd with underfd for the syscall
+            
+            if perfdinfo {
+                
                 // Clamped path.
                 match helpers::get_route(arg1cage, $sysno) {
                     // Clamp entry grate has a handler for this call, invoke that.
                     Some(alt) => {
-                        return helpers::do_syscall(arg1cage, alt, &args, &arg_cages);
+                        let ret = helpers::do_syscall(arg1cage, alt, &args, &arg_cages);
+                        // println!(
+                        //     "[ns_handlers|{}] cageid={} fd={} underfd={} clamped=clamped grate routed_to=clamped grate ret={}",
+                        //     stringify!($name),
+                        //     arg1cage,
+                        //     arg1,
+                        //     old_fd_entry.underfd,
+                        //     ret,
+                        // );
+                        return ret;
                     }
                     // Clamp entry grate does not have a handler for this syscall, invoke through
                     // selfcage_id=entrycage
                     None => {
-                        return helpers::do_clamp_syscall(arg1cage, $sysno, &args, &arg_cages);
+                        let ret = helpers::do_clamp_syscall(arg1cage, $sysno, &args, &arg_cages);
+                        // println!(
+                        //     "[ns_handlers|{}] cageid={} fd={} underfd={} clamped=clamped grate routed_to=kernel ret={}",
+                        //     stringify!($name),
+                        //     arg1cage,
+                        //     arg1,
+                        //     old_fd_entry.underfd,
+                        //     ret,
+                        // );
+                        return ret;
                     }
                 };
             }
 
-            helpers::do_syscall(arg1cage, $sysno, &args, &arg_cages)
+            let ret = helpers::do_syscall(arg1cage, $sysno, &args, &arg_cages);
+
+            // println!(
+            //     "[ns_handlers|{}] cageid={} fd={} underfd={} clamped={} routed_to={} ret={}",
+            //     stringify!($name),
+            //     arg1cage,
+            //     arg1,
+            //     old_fd_entry.underfd,
+            //     if perfdinfo { "clamped grate" } else { "kernel" },
+            //     match helpers::get_route(arg1cage, $sysno) {
+            //         Some(alt) if perfdinfo => "clamped grate",
+            //         _ => "kernel",
+            //     },
+            //     ret,
+            // );
+            
+            ret
         }
     };
 }
 
-fd_route_handler!(ns_openat_handler, SYS_OPENAT);
 fd_route_handler!(ns_getdents_handler, SYS_GETDENTS);
 fd_route_handler!(ns_read_handler, SYS_READ);
 fd_route_handler!(ns_write_handler, SYS_WRITE);
@@ -216,7 +285,7 @@ fd_route_handler!(ns_sync_file_range_handler, SYS_SYNC_FILE_RANGE);
 /// after a successful open, records the new fd with perfdinfo=1 if the
 /// path matched the prefix, or perfdinfo=0 if it didn't.
 pub extern "C" fn ns_open_handler(
-    _cageid: u64,
+    cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -250,13 +319,30 @@ pub extern "C" fn ns_open_handler(
     // perfdinfo=1 means "this fd was opened under the clamped prefix."
     if ret >= 0 {
         let clamped = if matches { 1u64 } else { 0 };
-        let _ = fdtables::get_specific_virtual_fd(
-            arg1cage, ret as u64, // virtual fd = the returned fd
+        match fdtables::get_unused_virtual_fd(
+            arg1cage,
             0,          // fdkind (unused)
             ret as u64, // underfd = same (identity mapping)
-            false,      // should_cloexec
-            clamped,    // perfdinfo: 1=clamped, 0=not
-        );
+            false, // should_cloexec
+            clamped, // perfdinfo: 1=clamped, 0=not
+        ) {
+            Ok(vfd) => {
+                // println!("[ns_handlers|open] cageid={} path={} underfd={} clamped={} virtualfd={}",
+                //     arg1cage,
+                //     helpers::read_path_from_cage(arg1, arg1cage).unwrap_or_default(),
+                //     ret,
+                //     if clamped != 0 { "clamped grate" } else { "kernel" },
+                //     vfd,
+                // );
+                return vfd as i32;
+            }
+            Err(_) => {
+                let close_args = [ret as u64, 0, 0, 0, 0, 0];
+                let close_cages = [arg1cage, arg1cage, arg1cage, arg1cage, arg1cage, arg1cage];
+                let _ = helpers::do_syscall(arg1cage, SYS_CLOSE, &close_args, &close_cages);
+                return -(EMFILE as i32);
+            }
+        };
     }
 
     ret
@@ -267,7 +353,7 @@ pub extern "C" fn ns_open_handler(
 /// Routes based on fdtables (is this fd clamped?), then removes the fd
 /// from fdtables regardless of the result.
 pub extern "C" fn ns_close_handler(
-    _cageid: u64,
+    cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -281,24 +367,43 @@ pub extern "C" fn ns_close_handler(
     arg6: u64,
     arg6cage: u64,
 ) -> i32 {
-    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
-    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+    let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let mut arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
-    // Check if this fd is clamped (perfdinfo != 0).
-    let is_clamped = fdtables::translate_virtual_fd(arg1cage, arg1)
-        .map(|e| e.perfdinfo != 0)
-        .unwrap_or(false);
+    let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
+        Ok(entry) => entry,
+        Err(_) => {
+            // println!(
+            //     "[ns_handlers|close] fd={} invalid virtual fd, ret=EBADF",
+            //     arg1,
+            // );
+            return -(EBADF as i32);
+        }
+    };
+
+    let is_clamped = old_fd_entry.perfdinfo != 0;
 
     let nr = match helpers::get_route(arg1cage, SYS_CLOSE) {
         Some(alt) if is_clamped => alt,
         _ => SYS_CLOSE,
     };
 
+    args[0] = old_fd_entry.underfd; // replace virtual fd with underfd for the syscall
+
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
 
-    // Always remove the fd from our tracking.
-    let _ = fdtables::close_virtualfd(arg1cage, arg1);
+    if ret >= 0 {
+        let _ = fdtables::close_virtualfd(arg1cage, arg1);
+    }
 
+    // println!(
+    //     "[ns_handlers|close] cageid={} fd={} underfd={} clamped={} ret={}",
+    //     arg1cage,
+    //     arg1,
+    //     old_fd_entry.underfd,
+    //     if is_clamped { "clamped grate" } else { "kernel" },
+    //     ret,
+    // );
     ret
 }
 
@@ -321,7 +426,7 @@ pub extern "C" fn ns_mmap_handler(
     arg6: u64,      // offset
     arg6cage: u64,
 ) -> i32 {
-    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
     /*
@@ -330,13 +435,20 @@ pub extern "C" fn ns_mmap_handler(
      */
     let is_anonymous = (arg4 & MAP_ANON as u64) != 0;
 
+    let mut fd = arg5;
     if !is_anonymous {
-        let fd = arg5;
+        let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, fd) {
+            Ok(entry) => entry,
+            Err(_) => {
+                return -(EBADF as i32);
+            }
+        };
 
-        if fdtables::translate_virtual_fd(arg1cage, fd)
-            .map(|e| e.perfdinfo != 0)
-            .unwrap_or(false)
-        {
+        let perfdinfo = old_fd_entry.perfdinfo;
+
+        args[4] = old_fd_entry.underfd; // replace virtual fd with underfd for the syscall
+        
+        if perfdinfo != 0 {
             let ret = match helpers::get_route(arg1cage, SYS_MMAP) {
                 Some(alt) => helpers::do_syscall(arg1cage, alt, &args, &arg_cages),
                 None => helpers::do_clamp_syscall(arg1cage, SYS_MMAP, &args, &arg_cages),
@@ -348,7 +460,13 @@ pub extern "C" fn ns_mmap_handler(
         }
     }
 
-    helpers::do_syscall(arg1cage, SYS_MMAP, &args, &arg_cages)
+    let ret = helpers::do_syscall(arg1cage, SYS_MMAP, &args, &arg_cages);
+
+    if ret != -1 && !is_anonymous {
+        args[4] = fd; // restore original fd in args
+    }
+
+    ret
 }
 
 /// munmap (syscall 11): unmap memory.
@@ -407,17 +525,30 @@ pub extern "C" fn ns_fcntl_handler(
     arg6: u64,
     arg6cage: u64,
 ) -> i32 {
-    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
-    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+    let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let mut arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
-    let perfdinfo = fdtables::translate_virtual_fd(arg1cage, arg1)
-        .map(|e| e.perfdinfo)
-        .unwrap_or(0);
+    let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
+        Ok(entry) => entry,
+        Err(_) => {
+            // println!(
+            //     "[ns_handlers|fcntl] cageid={} fd={} invalid virtual fd, ret=EBADF",
+            //     arg1cage,
+            //     arg1,
+            // );
+            return -(EBADF as i32);
+        }
+    };
+
+    let perfdinfo = old_fd_entry.perfdinfo;
 
     let nr = match helpers::get_route(arg1cage, SYS_FCNTL) {
         Some(alt) if perfdinfo != 0 => alt,
         _ => SYS_FCNTL,
     };
+
+    args[0] = old_fd_entry.underfd; // replace virtual fd with underfd for the syscall
+    // arg_cages[0] = cageid;
 
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
 
@@ -427,108 +558,456 @@ pub extern "C" fn ns_fcntl_handler(
         if cmd == F_DUPFD as u64 || cmd == F_DUPFD_CLOEXEC as u64 {
             let cloexec = cmd == F_DUPFD_CLOEXEC as u64;
 
-            let _ = fdtables::get_specific_virtual_fd(
+            match fdtables::get_unused_virtual_fd_from_startfd(
                 arg1cage,
-                ret as u64,
                 0,
                 ret as u64,
                 cloexec,
                 perfdinfo,
-            );
+                arg3, // startfd
+            ) {
+                Ok(vfd) => {
+                    // println!(
+                    //     "[ns_handlers|fcntl] cageid={} cmd={} old_fd={} underfd={} clamped={} new_virtualfd={}",
+                    //     arg1cage,
+                    //     if cloexec { "F_DUPFD_CLOEXEC" } else { "F_DUPFD" },
+                    //     arg1,
+                    //     old_fd_entry.underfd,
+                    //     if perfdinfo != 0 { "clamped grate" } else { "kernel" },
+                    //     vfd,
+                    // );
+                    return vfd as i32;
+                }
+                Err(_) => return -(EMFILE as i32),
+            };
         }
     }
+
+    // println!(
+    //     "[ns_handlers|fcntl] cageid={} fd={} underfd={} cmd={} clamped={} routed_to={} ret={}",
+    //     arg1cage,
+    //     arg1,
+    //     old_fd_entry.underfd,
+    //     arg2,
+    //     if perfdinfo != 0 { "clamped grate" } else { "kernel" },
+    //     if nr == SYS_FCNTL { "kernel" } else { "clamped grate" },
+    //     ret,
+    // );
 
     ret
 }
 
-/// dup (syscall 32): duplicate a file descriptor.
+// potential bug: may escape the path isolation. can be handled by checking in the individual namespace grates
+pub extern "C" fn ns_fstatat_handler(
+    _cageid: u64,
+    arg1: u64,      // dirfd
+    arg1cage: u64,
+    arg2: u64,      // pathname
+    arg2cage: u64,
+    arg3: u64,      // statbuf
+    arg3cage: u64,
+    arg4: u64,      // flags
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    const AT_FDCWD_I64: i64 = -100;
+
+    let is_at_fdcwd = (arg1 as i64) == AT_FDCWD_I64;
+
+    let path = helpers::read_path_from_cage(arg2, arg2cage).unwrap_or_default();
+
+    let mut underfd = arg1;
+    let mut dirfd_clamped = false;
+
+    /*
+     * If dirfd is not AT_FDCWD, translate virtual dirfd -> underlying kernel fd.
+     */
+    if !is_at_fdcwd {
+        let fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
+            Ok(entry) => entry,
+            Err(_) => {
+                // println!(
+                //     "[ns_handlers|fstatat] cageid={} dirfd={} invalid virtual fd, ret=EBADF",
+                //     arg1cage,
+                //     arg1,
+                // );
+                return -(EBADF as i32);
+            }
+        };
+
+        underfd = fd_entry.underfd;
+        dirfd_clamped = fd_entry.perfdinfo != 0;
+        args[0] = underfd;
+    }
+
+    /*
+     * Routing decision:
+     *
+     * - empty path: usually AT_EMPTY_PATH; route by dirfd only.
+     * - absolute path: dirfd is ignored, route by absolute path prefix.
+     * - AT_FDCWD + relative path: resolve relative to caller cage cwd.
+     * - real dirfd + relative path: route by dirfd's clamped status.
+     */
+    let should_clamp = if path.is_empty() {
+        dirfd_clamped
+    } else if path.starts_with('/') {
+        let resolved = helpers::normalize_path(&path);
+        helpers::path_matches_prefix(&resolved)
+    } else if is_at_fdcwd {
+        helpers::resolve_path_from_cage(arg2cage, arg2, arg2cage)
+            .map(|resolved| helpers::path_matches_prefix(&resolved))
+            .unwrap_or(false)
+    } else {
+        dirfd_clamped
+    };
+
+    let ret = if should_clamp {
+        match helpers::get_route(arg1cage, SYS_NEWFSTATAT) {
+            Some(alt) => helpers::do_syscall(arg1cage, alt, &args, &arg_cages),
+            None => helpers::do_clamp_syscall(arg1cage, SYS_NEWFSTATAT, &args, &arg_cages),
+        }
+    } else {
+        helpers::do_syscall(arg1cage, SYS_NEWFSTATAT, &args, &arg_cages)
+    };
+
+    ret
+}
+
+pub extern "C" fn ns_openat_handler(
+    cageid: u64,
+    arg1: u64,      // dirfd
+    arg1cage: u64,
+    arg2: u64,      // pathname
+    arg2cage: u64,
+    arg3: u64,      // flags
+    arg3cage: u64,
+    arg4: u64,      // mode
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    // Linux AT_FDCWD = -100.
+    let is_at_fdcwd = (arg1 as i64) == -100;
+
+    let path = helpers::read_path_from_cage(arg2, arg2cage).unwrap_or_default();
+
+    let mut dirfd_clamped = false;
+    let mut underfd = arg1;
+
+    /*
+     * If dirfd is not AT_FDCWD, translate virtual fd -> kernel fd.
+     */
+    if !is_at_fdcwd {
+        let fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
+            Ok(entry) => entry,
+            Err(_) => {
+                // println!(
+                //     "[ns_handlers|fstatat] cageid={} dirfd={} invalid virtual fd, ret=EBADF",
+                //     arg1cage,
+                //     arg1,
+                // );
+                return -(EBADF as i32);
+            }
+        };
+
+        underfd = fd_entry.underfd;
+        dirfd_clamped = fd_entry.perfdinfo != 0;
+        args[0] = underfd;
+    }
+
+    /*
+     * Routing decision:
+     *
+     * 1. If dirfd is clamped, relative openat should route to the clamped grate.
+     * 2. If path is absolute or dirfd is AT_FDCWD, resolve by cage cwd and check prefix.
+     * 3. Otherwise, if dirfd is not clamped and path is relative, pass through kernel.
+     */
+    let path_matches = if !path.is_empty() {
+        if path.starts_with("/") || is_at_fdcwd {
+            helpers::resolve_path_from_cage(arg2cage, arg2, arg1cage)
+                .map(|p| helpers::path_matches_prefix(&p))
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let should_clamp = dirfd_clamped || path_matches;
+
+    let nr = match helpers::get_route(arg1cage, SYS_OPENAT) {
+        Some(alt) if should_clamp => alt,
+        _ => SYS_OPENAT,
+    };
+
+    let ret = if should_clamp && nr == SYS_OPENAT {
+        helpers::do_clamp_syscall(arg1cage, SYS_OPENAT, &args, &arg_cages)
+    } else {
+        helpers::do_syscall(arg1cage, nr, &args, &arg_cages)
+    };
+
+    /*
+     * On success, record returned kernel fd as a virtual fd.
+     * perfdinfo=1 means fd belongs to clamped namespace/grate.
+     */
+    if ret >= 0 {
+        let clamped = if should_clamp { 1u64 } else { 0u64 };
+
+        match fdtables::get_unused_virtual_fd(
+            arg1cage,
+            0,          // fdkind
+            ret as u64, // underfd
+            false,      // should_cloexec; openat O_CLOEXEC handling not tracked here
+            clamped,    // perfdinfo
+        ) {
+            Ok(vfd) => {
+                // println!(
+                //     "[ns_handlers|openat] cageid={} dirfd={} path={} underfd={} clamped={} virtualfd={}",
+                //     arg1cage,
+                //     arg1,
+                //     path,
+                //     ret,
+                //     if clamped != 0 { "clamped grate" } else { "kernel" },
+                //     vfd,
+                // );
+                return vfd as i32;
+            }
+            Err(_) => {
+                // Avoid leaking the kernel fd if we cannot allocate a virtual fd.
+                let close_args = [ret as u64, 0, 0, 0, 0, 0];
+                let close_cages = [arg1cage, arg1cage, arg1cage, arg1cage, arg1cage, arg1cage];
+                let _ = helpers::do_syscall(arg1cage, SYS_CLOSE, &close_args, &close_cages);
+
+                return -(EMFILE as i32);
+            }
+        }
+    }
+    ret
+}
+
+/// dup (syscall 32): duplicate fd to the lowest-numbered unused fd.
 ///
-/// Routes based on fdtables, then copies the perfdinfo to the new fd.
+/// It should allocate a fresh virtual fd for the newly duplicated underfd.
 pub extern "C" fn ns_dup_handler(
     _cageid: u64,
     arg1: u64,
     arg1cage: u64,
-    arg2: u64,
-    arg2cage: u64,
-    arg3: u64,
-    arg3cage: u64,
-    arg4: u64,
-    arg4cage: u64,
-    arg5: u64,
-    arg5cage: u64,
-    arg6: u64,
-    arg6cage: u64,
+    _arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
 ) -> i32 {
-    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
-    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
-
-    // Look up the old fd's clamped status before dispatching.
-    let perfdinfo = fdtables::translate_virtual_fd(arg1cage, arg1)
-        .map(|e| e.perfdinfo)
-        .unwrap_or(0);
-
-    let nr = match helpers::get_route(arg1cage, SYS_DUP) {
-        Some(alt) if perfdinfo != 0 => alt,
-        _ => SYS_DUP,
+    let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
+        Ok(entry) => entry,
+        Err(_) => {
+            return -(EBADF as i32);
+        }
     };
 
-    let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
+    let perfdinfo = old_fd_entry.perfdinfo;
 
-    // On success, record the new fd with the same clamped status as the old one.
-    if ret >= 0 {
-        let _ = fdtables::get_specific_virtual_fd(
-            arg1cage, ret as u64, 0, ret as u64, false, perfdinfo,
-        );
+    let dup_args = [old_fd_entry.underfd, 0, 0, 0, 0, 0];
+    let dup_cages = [arg1cage; 6];
+
+    let ret = if perfdinfo != 0 {
+        match helpers::get_route(arg1cage, SYS_DUP) {
+            Some(alt) => helpers::do_syscall(arg1cage, alt, &dup_args, &dup_cages),
+            None => helpers::do_clamp_syscall(arg1cage, SYS_DUP, &dup_args, &dup_cages),
+        }
+    } else {
+        helpers::do_syscall(arg1cage, SYS_DUP, &dup_args, &dup_cages)
+    };
+
+    if ret < 0 {
+        return ret;
     }
 
-    ret
+    let new_underfd = ret as u64;
+
+    // Allocate a fresh unused virtual fd for the new underfd.
+    match fdtables::get_unused_virtual_fd(
+        arg1cage,
+        0,
+        new_underfd,
+        false,
+        perfdinfo,
+    ) {
+        Ok(new_virtual_fd) => {
+            // println!(
+            //     "[ns_handlers|dup] cageid={} old_fd={} underfd={} clamped={} new_underfd={} new_virtual_fd={}",
+            //     arg1cage,
+            //     arg1,
+            //     old_fd_entry.underfd,
+            //     if perfdinfo != 0 { "clamped grate" } else { "kernel" },
+            //     new_underfd,
+            //     new_virtual_fd,
+            // );
+            new_virtual_fd as i32
+        }
+
+        Err(errno) => {
+            // If fdtable installation fails, close the duplicated underfd
+            // to avoid leaking a real fd.
+            let close_args = [new_underfd, 0, 0, 0, 0, 0];
+            let close_cages = [arg1cage; 6];
+            let _ = helpers::do_syscall(arg1cage, SYS_CLOSE, &close_args, &close_cages);
+
+            -(errno as i32)
+        }
+    }
 }
 
-/// dup2 (syscall 33): duplicate fd to a specific target fd.
+/// dup2 (syscall 33): duplicate oldfd to the specific guest-visible newfd.
 ///
-/// Routes based on fdtables, then copies perfdinfo to the target fd.
+/// oldfd = arg1
+/// newfd = arg2
+///
+/// Important:
+/// - arg1/arg2 are guest virtual fds.
+/// - underlying syscall must operate on underfds.
+/// - we should not pass guest newfd directly to kernel/grate dup2.
 pub extern "C" fn ns_dup2_handler(
-    _cageid: u64,
+    cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
-    arg2cage: u64,
-    arg3: u64,
-    arg3cage: u64,
-    arg4: u64,
-    arg4cage: u64,
-    arg5: u64,
-    arg5cage: u64,
-    arg6: u64,
-    arg6cage: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
 ) -> i32 {
-    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
-    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
-
-    let perfdinfo = fdtables::translate_virtual_fd(arg1cage, arg1)
-        .map(|e| e.perfdinfo)
-        .unwrap_or(0);
-
-    let nr = match helpers::get_route(arg1cage, SYS_DUP2) {
-        Some(alt) if perfdinfo != 0 => alt,
-        _ => SYS_DUP2,
+    let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
+        Ok(entry) => entry,
+        Err(_) => {
+            return -(EBADF as i32);
+        }
     };
 
-    let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
+    let perfdinfo = old_fd_entry.perfdinfo;
 
-    // arg2 is the target fd for dup2.
-    if ret >= 0 {
-        let _ = fdtables::get_specific_virtual_fd(arg1cage, arg2, 0, arg2, false, perfdinfo);
+    // dup2 special case:
+    // If oldfd == newfd, dup2 returns newfd without closing/replacing it.
+    if arg1 == arg2 {
+        return arg2 as i32;
     }
 
-    ret
+    // If the target virtual fd already exists, close its underlying fd
+    // and remove the virtual fd mapping first.
+    //
+    // This implements the guest-visible dup2 behavior:
+    // newfd is atomically replaced from the guest's perspective.
+    if let Ok(new_fd_entry) = fdtables::translate_virtual_fd(arg1cage, arg2) {
+        let close_args = [new_fd_entry.underfd, 0, 0, 0, 0, 0];
+        let close_cages = [arg1cage; 6];
+
+        let _ = helpers::do_syscall(arg1cage, SYS_CLOSE, &close_args, &close_cages);
+        let _ = fdtables::close_virtualfd(arg1cage, arg2);
+    }
+
+    // Duplicate the underlying old fd.
+    //
+    // We intentionally use SYS_DUP instead of SYS_DUP2 here, because arg2 is
+    // a guest virtual fd, not a kernel/grate fd number.
+    let dup_args = [old_fd_entry.underfd, 0, 0, 0, 0, 0];
+    let dup_cages = [arg1cage; 6];
+
+    let ret = if perfdinfo != 0 {
+        match helpers::get_route(arg1cage, SYS_DUP) {
+            Some(alt) => helpers::do_syscall(arg1cage, alt, &dup_args, &dup_cages),
+            None => helpers::do_clamp_syscall(arg1cage, SYS_DUP, &dup_args, &dup_cages),
+        }
+    } else {
+        helpers::do_syscall(arg1cage, SYS_DUP, &dup_args, &dup_cages)
+    };
+
+    if ret < 0 {
+        return ret;
+    }
+
+    let new_underfd = ret as u64;
+
+    // Install the newly duplicated underfd at the requested guest virtual fd.
+    match fdtables::get_specific_virtual_fd(
+        arg1cage,
+        arg2,
+        0,
+        new_underfd,
+        false,
+        perfdinfo,
+    ) {
+        Ok(_) => {
+            // println!(
+            //     "[ns_handlers|dup2] cageid={} old_fd={} underfd={} clamped={} new_underfd={} new_virtual_fd={}",
+            //     arg1cage,
+            //     arg1,
+            //     old_fd_entry.underfd,
+            //     if perfdinfo != 0 { "clamped grate" } else { "kernel" },
+            //     new_underfd,
+            //     arg2,
+            // );
+            arg2 as i32
+        }
+
+        Err(errno) => {
+            // If fdtable installation fails, close the duplicated underfd
+            // to avoid leaking a real fd.
+            let close_args = [new_underfd, 0, 0, 0, 0, 0];
+            let close_cages = [arg1cage; 6];
+
+            let _ = helpers::do_syscall(arg1cage, SYS_CLOSE, &close_args, &close_cages);
+
+            // println!(
+            //     "[ns_handlers|dup2] cageid={} old_fd={} underfd={} clamped={} new_underfd={} failed to install new_virtual_fd={}, errno={}",
+            //     arg1cage,
+            //     arg1,
+            //     old_fd_entry.underfd,
+            //     if perfdinfo != 0 { "clamped grate" } else { "kernel" },
+            //     new_underfd,
+            //     arg2,
+            //      errno,
+            // );
+
+            -(errno as i32)
+        }
+    }
 }
 
-/// dup3 (syscall 292): duplicate fd to a specific target fd with flags.
+/// dup3 (syscall 292): duplicate oldfd to the specific guest-visible newfd
+/// with flags.
 ///
-/// Same as dup2 but with an additional flags argument (arg3).
+/// oldfd = arg1
+/// newfd = arg2
+/// flags = arg3
+///
+/// Important:
+/// - arg1/arg2 are guest virtual fds.
+/// - underlying syscalls must operate on underfds.
+/// - do not pass guest newfd directly to kernel/grate dup3.
 pub extern "C" fn ns_dup3_handler(
-    _cageid: u64,
+    cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
@@ -542,26 +1021,137 @@ pub extern "C" fn ns_dup3_handler(
     arg6: u64,
     arg6cage: u64,
 ) -> i32 {
-    let args = [arg1, arg2, arg3, arg4, arg5, arg6];
-    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
-
-    let perfdinfo = fdtables::translate_virtual_fd(arg1cage, arg1)
-        .map(|e| e.perfdinfo)
-        .unwrap_or(0);
-
-    let nr = match helpers::get_route(arg1cage, SYS_DUP3) {
-        Some(alt) if perfdinfo != 0 => alt,
-        _ => SYS_DUP3,
+    let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
+        Ok(entry) => entry,
+        Err(_) => {
+            return -(EBADF as i32);
+        }
     };
 
-    let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
+    let perfdinfo = old_fd_entry.perfdinfo;
 
-    // arg2 is the target fd for dup3.
-    if ret >= 0 {
-        let _ = fdtables::get_specific_virtual_fd(arg1cage, arg2, 0, arg2, false, perfdinfo);
+    // dup3(oldfd, oldfd, flags) returns EINVAL.
+    if arg1 == arg2 {
+        return -(EINVAL as i32);
     }
 
-    ret
+    // Linux dup3 only accepts flags == 0 or O_CLOEXEC.
+    if arg3 & !(O_CLOEXEC as u64) != 0 {
+        return -(EINVAL as i32);
+    }
+
+    let cloexec = (arg3 & (O_CLOEXEC as u64)) != 0;
+
+    // If the target virtual fd already exists, close its underlying fd
+    // and remove the virtual mapping.
+    if let Ok(new_fd_entry) = fdtables::translate_virtual_fd(arg1cage, arg2) {
+        let close_args = [new_fd_entry.underfd, 0, 0, 0, 0, 0];
+        let close_cages = [arg1cage; 6];
+
+        let _ = helpers::do_syscall(arg1cage, SYS_CLOSE, &close_args, &close_cages);
+        let _ = fdtables::close_virtualfd(arg1cage, arg2);
+    }
+
+    // Duplicate old underfd to a fresh real fd.
+    //
+    // We intentionally use SYS_DUP instead of SYS_DUP3 because arg2 is a
+    // guest virtual fd, not an underfd target.
+    let dup_args = [old_fd_entry.underfd, 0, 0, 0, 0, 0];
+    let dup_cages = [arg1cage; 6];
+
+    let ret = if perfdinfo != 0 {
+        match helpers::get_route(arg1cage, SYS_DUP) {
+            Some(alt) => helpers::do_syscall(arg1cage, alt, &dup_args, &dup_cages),
+            None => helpers::do_clamp_syscall(arg1cage, SYS_DUP, &dup_args, &dup_cages),
+        }
+    } else {
+        helpers::do_syscall(arg1cage, SYS_DUP, &dup_args, &dup_cages)
+    };
+
+    if ret < 0 {
+        return ret;
+    }
+
+    let new_underfd = ret as u64;
+
+    // If O_CLOEXEC was requested, set FD_CLOEXEC on the newly duplicated underfd
+    if cloexec {
+        let fcntl_args = [
+            new_underfd,
+            F_SETFD as u64,
+            FD_CLOEXEC as u64,
+            0,
+            0,
+            0,
+        ];
+        let fcntl_cages = [arg1cage; 6];
+
+        let fcntl_ret = helpers::do_syscall(arg1cage, SYS_FCNTL, &fcntl_args, &fcntl_cages);
+
+        if fcntl_ret < 0 {
+            let close_args = [new_underfd, 0, 0, 0, 0, 0];
+            let close_cages = [arg1cage; 6];
+
+            let _ = helpers::do_syscall(arg1cage, SYS_CLOSE, &close_args, &close_cages);
+
+            // println!(
+            //     "[ns_handlers|dup3] cageid={} old_fd={} underfd={} clamped={} new_underfd={} failed to set CLOEXEC, errno={}",
+            //     arg1cage,
+            //     arg1,
+            //     old_fd_entry.underfd,
+            //     if perfdinfo != 0 { "clamped grate" } else { "kernel" },
+            //     new_underfd,
+            //     -fcntl_ret,
+            // );
+
+            return fcntl_ret;
+        }
+    }
+
+    // Install the new underfd at the requested guest virtual fd.
+    match fdtables::get_specific_virtual_fd(
+        arg1cage,
+        arg2,
+        0,
+        new_underfd,
+        cloexec,
+        perfdinfo,
+    ) {
+        Ok(_) => {
+            // println!(
+            //     "[ns_handlers|dup3] cageid={} old_fd={} underfd={} clamped={} new_underfd={} new_virtual_fd={}",
+            //     arg1cage,
+            //     arg1,
+            //     old_fd_entry.underfd,
+            //     if perfdinfo != 0 { "clamped grate" } else { "kernel" },
+            //     new_underfd,
+            //     arg2,
+            // );
+            arg2 as i32
+        }
+
+        Err(errno) => {
+            // If fdtable installation fails, close the duplicated underfd
+            // to avoid leaking a real fd.
+            let close_args = [new_underfd, 0, 0, 0, 0, 0];
+            let close_cages = [arg1cage; 6];
+
+            let _ = helpers::do_syscall(arg1cage, SYS_CLOSE, &close_args, &close_cages);
+
+            // println!(
+            //     "[ns_handlers|dup3] cageid={} old_fd={} underfd={} clamped={} new_underfd={} failed to install new_virtual_fd={}, errno={}",
+            //     arg1cage,
+            //     arg1,
+            //     old_fd_entry.underfd,
+            //     if perfdinfo != 0 { "clamped grate" } else { "kernel" },
+            //     new_underfd,
+            //     arg2,
+            //      errno,
+            // );
+
+            -(errno as i32)
+        }
+    }
 }
 
 // =====================================================================
@@ -640,7 +1230,9 @@ pub extern "C" fn ns_getcwd_handler(
         4096,
         1,
     ) {
-        Ok(_) => return arg1cage as i32,
+        Ok(_) => {
+            return arg1cage as i32;
+        }
         Err(_) => return -14,
     }
 }
@@ -688,6 +1280,7 @@ pub fn get_ns_handler(syscall_nr: u64) -> Option<SyscallHandler> {
         SYS_PWRITEV => Some(ns_pwritev_handler),
         SYS_LSEEK => Some(ns_lseek_handler),
         SYS_FXSTAT => Some(ns_fstat_handler),
+        SYS_NEWFSTATAT => Some(ns_fstatat_handler),
         SYS_FCNTL => Some(ns_fcntl_handler),
         SYS_FTRUNCATE => Some(ns_ftruncate_handler),
         SYS_FCHMOD => Some(ns_fchmod_handler),
@@ -697,6 +1290,7 @@ pub fn get_ns_handler(syscall_nr: u64) -> Option<SyscallHandler> {
         SYS_FSTATFS => Some(ns_fstatfs_handler),
         SYS_SYNC_FILE_RANGE => Some(ns_sync_file_range_handler),
         SYS_MMAP => Some(ns_mmap_handler),
+        SYS_MUNMAP => Some(ns_munmap_handler),
 
         // FD-based with fd-tracking side effects
         SYS_DUP => Some(ns_dup_handler),
