@@ -102,15 +102,25 @@ static int basic_mmap_round_trip(void) {
 /* Child body: open the segment by name, mmap it independently of the
  * inherited mapping, write the marker at the given offset, exit. */
 static void child_body(const char *mark, size_t mark_len, off_t off) {
+    TRACE("child: entry");
+    TRACE("child: before open");
     int fd = open(SEG_PATH, O_RDWR);
     if (fd < 0) _exit(10);
+    TRACE("child: after open");
+
+    TRACE("child: before mmap");
     void *addr = mmap(NULL, SEG_SIZE, PROT_READ | PROT_WRITE,
                       MAP_SHARED, fd, 0);
     if (addr == MAP_FAILED) _exit(11);
+    TRACE("child: after mmap");
 
+    TRACE("child: before mapping write");
     memcpy((char *)addr + off, mark, mark_len);
+    TRACE("child: after mapping write");
 
+    TRACE("child: before munmap");
     if (munmap(addr, SEG_SIZE) != 0) _exit(12);
+    TRACE("child: after munmap");
     close(fd);
     _exit(0);
 }
@@ -138,24 +148,34 @@ int main(void) {
     CHECK("parent: mmap MAP_SHARED", addr != MAP_FAILED);
     if (addr == MAP_FAILED) { close(fd); return 1; }
 
+    TRACE("parent: before mapping write");
     memcpy((char *)addr + OFF_PARENT, MARK_PARENT, sizeof(MARK_PARENT) - 1);
+    TRACE("parent: after mapping write");
 
     /* 3. Fork two children.  Each will independently mmap the segment
      *    by name and stamp its marker at its own offset. */
     pid_t pids[2];
+    TRACE("parent: before fork child A");
     pids[0] = fork();
+    TRACE("parent: after fork child A");
     if (pids[0] == 0) {
         child_body(MARK_A, sizeof(MARK_A) - 1, OFF_CHILD_A);
     }
+    TRACE("parent: before fork child B");
     pids[1] = fork();
+    TRACE("parent: after fork child B");
     if (pids[1] == 0) {
         child_body(MARK_B, sizeof(MARK_B) - 1, OFF_CHILD_B);
     }
 
     /* 4. Wait for both children. */
     int status_a = -1, status_b = -1;
+    TRACE("parent: before wait child A");
     waitpid(pids[0], &status_a, 0);
+    TRACE("parent: after wait child A");
+    TRACE("parent: before wait child B");
     waitpid(pids[1], &status_b, 0);
+    TRACE("parent: after wait child B");
     CHECK("child A exited cleanly",
           WIFEXITED(status_a) && WEXITSTATUS(status_a) == 0);
     CHECK("child B exited cleanly",
