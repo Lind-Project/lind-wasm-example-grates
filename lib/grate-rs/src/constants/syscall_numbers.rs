@@ -109,6 +109,7 @@ pub const SYS_EXIT_GROUP: u64 = 231;
 pub const SYS_EPOLL_WAIT: u64 = 232;
 pub const SYS_EPOLL_CTL: u64 = 233;
 pub const SYS_OPENAT: u64 = 257;
+pub const SYS_MKDIRAT: u64 = 258;
 pub const SYS_FCHOWNAT: u64 = 260;
 pub const SYS_NEWFSTATAT: u64 = 262;
 pub const SYS_UNLINKAT: u64 = 263;

@@ -197,12 +197,22 @@ pub extern "C" fn exec_handler(
             let real_path = u64::from_le_bytes(real_ptr) as u64;
 
             // Call exec with updated arguments.
-            return helpers::do_syscall(
+            let ret = helpers::do_syscall(
                 arg2cage,
                 SYS_EXEC,
                 &[real_path, argv1_addr, arg3, arg4, arg5, arg6],
                 &[arg2cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
             );
+            // let ptr = real_path as *const u8;
+
+            // unsafe {
+            //     let bytes = slice::from_raw_parts(ptr, 8);
+            //     let s = str::from_utf8(bytes).expect("invalid UTF-8");
+                
+            // }
+            
+            // println!("[ns-grate] execing real binary: path={}, ret={}", path, ret);
+            return ret;
         } else {
             // The current method to detect the "entry" grate to the clamp is to track the last
             // exec'd process, and update this state variable. Once we hit the clamp end boundary
@@ -210,12 +220,15 @@ pub extern "C" fn exec_handler(
             helpers::set_clamp_entry(arg1cage);
 
             // In any other case, call exec without argument management.
-            return helpers::do_syscall(
+            let ret = helpers::do_syscall(
                 arg1cage,
                 SYS_EXEC,
                 &[arg1, arg2, arg3, arg4, arg5, arg6],
                 &[arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
             );
+            // let path_print = helpers::resolve_path_from_cage(arg2cage, arg1, arg1cage).unwrap_or_default();
+            // println!("[ns-grate] execing binary: path={}, ret={}", path, ret);
+            return ret;
         }
     }
 
@@ -244,11 +257,12 @@ pub extern "C" fn fork_handler(
 ) -> i32 {
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+    let is_thread = is_thread_clone(arg1, arg1cage);
 
     // Forward the fork to the runtime. Returns child cage ID to parent, 0 to child.
     let child_cage_id = helpers::do_syscall(arg1cage, SYS_CLONE, &args, &arg_cages) as u64;
 
-    if !is_thread_clone(arg1, arg1cage) {
+    if !is_thread {
         // Copy fdtables — child always needs an entry for inner grates
         // to track fds, regardless of clamp status.
         let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);

@@ -209,6 +209,8 @@ fn fd_translation_handler_impl(
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let mut argcages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
+    let mut vfd_close = 0;
+
     let mut should_create_vfd = false;
     let mut should_cloexec = false;
     let mut should_socketpair = false;
@@ -238,6 +240,9 @@ fn fd_translation_handler_impl(
 
     let mut origin_pollfds_ptr: u64 = 0;
     let mut pollfd_cageid: u64 = 0;
+    let mut pollfds: Vec<libc::pollfd> = Vec::new();
+    let mut pollfd_original_fds: Vec<i32> = Vec::new();
+    let mut pollfd_bytes: u64 = 0;
 
     let mut should_select = false;
     let mut select_cageid = 0;
@@ -257,24 +262,20 @@ fn fd_translation_handler_impl(
     for spec in fd_specs {
         match spec.kind {
             FdArgKind::Fd | FdArgKind::DirFd => {
-                let kernel_fd = args[spec.index];
+                vfd_close = args[spec.index];
                 let fd_cageid = argcages[spec.index];
 
                 if syscall_num == SYS_MMAP {
                     // For mmap, we only translate the fd if it's not -1 (i.e. not MAP_ANONYMOUS)
-                    if kernel_fd == u64::MAX {
+                    if vfd_close == u64::MAX {
                         continue;
                     }
                 }
 
-                match translate_fd_arg(fd_cageid, kernel_fd, spec.kind) {
+                match translate_fd_arg(fd_cageid, vfd_close, spec.kind) {
                     Ok(underfd) => {
 
                         args[spec.index] = underfd;
-
-                        if syscall_num == SYS_CLOSE {
-                            let _ = fdtables::close_virtualfd(fd_cageid, kernel_fd);
-                        }
                     }
 
                     Err(errno_ret) => {
@@ -294,7 +295,7 @@ fn fd_translation_handler_impl(
                 old_fd_entry = match fdtables::translate_virtual_fd(argcages[spec.index], args[spec.index]) {
                     Ok(entry) => entry,
                     Err(_) => {
-                        return EBADF as i32;
+                        return -(EBADF as i32);
                     }
                 };
                 old_fd_cageid = argcages[spec.index];
@@ -309,11 +310,11 @@ fn fd_translation_handler_impl(
                     Ok(underfd) => {
                         args[0] = underfd;
 
-                        let flags = args[2] as i32;
-                        should_cloexec |= (flags & O_CLOEXEC) != 0;
+                        let cmd = args[1] as i32;
 
-                        if flags & F_DUPFD != 0 || flags & F_DUPFD_CLOEXEC != 0 {
+                        if cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC {
                             should_create_vfd = true;
+                            should_cloexec |= cmd == F_DUPFD_CLOEXEC;
                         }
                     }
 
@@ -327,8 +328,6 @@ fn fd_translation_handler_impl(
                 should_pipe = true;
                 origin_pipe_ptr = args[spec.index];
                 origin_pipe_cageid = argcages[spec.index];
-                args[spec.index] = kernel_pipe_vector.as_ptr() as u64;
-                argcages[spec.index] = this_grateid | ARG_TRANSLATE_FLAG;
             }
 
             FdArgKind::SOCKPAIR => {
@@ -343,42 +342,47 @@ fn fd_translation_handler_impl(
                 should_poll = true;
                 origin_pollfds_ptr = args[spec.index];
                 pollfd_cageid = argcages[spec.index];
-                let mut pollfds_ptr: *mut libc::pollfd = std::ptr::null_mut();
-                
-                let ret = copy_data_between_cages(
-                    this_grateid, pollfd_cageid,
-                    origin_pollfds_ptr, pollfd_cageid,
-                    pollfds_ptr as u64, this_grateid,
-                    4096, 1,
-                );
-                
-                let nfds = args[spec.index + 1] as libc::nfds_t;
 
-                if !pollfds_ptr.is_null() {
-                    for i in 0..nfds {
-                        unsafe {
-                            let pollfd_ptr = pollfds_ptr.add(i as usize);
-                            let kernel_fd = (*pollfd_ptr).fd;
+                let nfds = args[spec.index + 1] as usize;
+                if nfds != 0 {
+                    pollfds = vec![libc::pollfd { fd: -1, events: 0, revents: 0 }; nfds];
+                    pollfd_bytes = (nfds * std::mem::size_of::<libc::pollfd>()) as u64;
 
-                            // Per POSIX/Linux poll semantics, negative fd means ignored.
-                            // Do not translate it.
-                            if kernel_fd < 0 {
-                                continue;
+                    match copy_data_between_cages(
+                        this_grateid, pollfd_cageid,
+                        origin_pollfds_ptr, pollfd_cageid,
+                        pollfds.as_mut_ptr() as u64, this_grateid,
+                        pollfd_bytes, 0,
+                    ) {
+                        Ok(_) => {}
+                        Err(e) => panic!("[fd translate] copy pollfds from cage failed: {:?}", e),
+                    }
+
+                    pollfd_original_fds = pollfds.iter().map(|pollfd| pollfd.fd).collect();
+
+                    for pollfd in pollfds.iter_mut() {
+                        let grate_fd = pollfd.fd;
+
+                        // Per POSIX/Linux poll semantics, negative fd means ignored.
+                        // Do not translate it.
+                        if grate_fd < 0 {
+                            continue;
+                        }
+
+                        match translate_fd_arg(pollfd_cageid, grate_fd as u64, FdArgKind::Fd) {
+                            Ok(underfd) => {
+                                pollfd.fd = underfd as i32;
                             }
 
-                            match translate_fd_arg(pollfd_cageid, kernel_fd as u64, FdArgKind::Fd) {
-                                Ok(underfd) => {
-                                    (*pollfd_ptr).fd = underfd as i32;
-                                }
-
-                                Err(errno_ret) => {
-                                    return -(errno_ret as i32);
-                                }
+                            Err(errno_ret) => {
+                                return -(errno_ret as i32);
                             }
                         }
                     }
-                }
 
+                    args[spec.index] = pollfds.as_mut_ptr() as u64;
+                    argcages[spec.index] = this_grateid | ARG_TRANSLATE_FLAG;
+                }
             }
 
             FdArgKind::EPFD => {
@@ -511,11 +515,16 @@ fn fd_translation_handler_impl(
         Err(_) => ENOSYS,
     };
 
+    // println!("[fd-translate] syscall={}, ret={}", syscall_num, ret);
+
     // syscall failed, do not create vfd and do not mutate fdtable.
     if ret < 0 {
         return ret;
     }
 
+    if syscall_num == SYS_CLOSE {
+        let _ = fdtables::close_virtualfd(arg1cage, vfd_close);
+    }
 
     if should_dup2 {
         let flags = fd_specs
@@ -533,7 +542,7 @@ fn fd_translation_handler_impl(
             0,
         ) {
             Ok(_) => return new_fd as i32,
-            Err(_) => return EMFILE,
+            Err(_) => return -(EMFILE as i32),
         }
     }
 
@@ -548,18 +557,28 @@ fn fd_translation_handler_impl(
             0,
         ) {
             Ok(vfd) => vfd as i32,
-            Err(_) => EMFILE,
+            Err(_) => -(EMFILE as i32),
         };
     }
 
     if should_pipe {
+        match copy_data_between_cages(
+            this_grateid, origin_pipe_cageid,
+            origin_pipe_ptr, origin_pipe_cageid,
+            kernel_pipe_vector.as_mut_ptr() as u64, this_grateid,
+            8, 0, // 2 x i32 = 8 bytes
+        ) {
+            Ok(_) => {}
+            Err(e) => panic!("[fd translate] copy pipe fds from cage failed: {:?}", e),
+        }
+
         let ksv_1 = kernel_pipe_vector[0];
         let ksv_2 = kernel_pipe_vector[1];
         let vsv_1 =
             fdtables::get_unused_virtual_fd(origin_pipe_cageid, FDKIND_KERNEL, ksv_1 as u64, should_cloexec, 0).unwrap();
         let vsv_2 =
             fdtables::get_unused_virtual_fd(origin_pipe_cageid, FDKIND_KERNEL, ksv_2 as u64, should_cloexec, 0).unwrap();
-            
+        
         let fds: [i32; 2] = [vsv_1 as i32, vsv_2 as i32];
         
         match copy_data_between_cages(
@@ -598,7 +617,21 @@ fn fd_translation_handler_impl(
     }
 
     if should_poll {
-        args[0] = origin_pollfds_ptr as u64;
+        if pollfd_bytes != 0 {
+            for (pollfd, original_fd) in pollfds.iter_mut().zip(pollfd_original_fds.iter()) {
+                pollfd.fd = *original_fd;
+            }
+
+            match copy_data_between_cages(
+                this_grateid, pollfd_cageid,
+                pollfds.as_ptr() as u64, this_grateid,
+                origin_pollfds_ptr, pollfd_cageid,
+                pollfd_bytes, 0,
+            ) {
+                Ok(_) => {}
+                Err(e) => panic!("[fd translate] copy pollfds back to cage failed: {:?}", e),
+            }
+        }
     }
 
     if should_select {
@@ -775,6 +808,7 @@ define_fd_handler!(fd_mmap_handler, SYS_MMAP, FD_ARG_5);
 define_fd_handler!(fd_unlinkat_handler, SYS_UNLINKAT, DIRFD_ARG_1);
 define_fd_handler!(fd_symlinkat_handler, SYS_SYMLINKAT, DIRFD_ARG_1);
 define_fd_handler!(fd_readlinkat_handler, SYS_READLINKAT, DIRFD_ARG_1);
+define_fd_handler!(fd_fchmodat_handler, SYS_FCHMODAT, DIRFD_ARG_1);
 
 define_fd_handler!(fd_open_handler, SYS_OPEN, CREATION_FLAG_2);
 define_fd_handler!(fd_openat_handler, SYS_OPENAT, CREATION_DIRFD_1_FLAG_3);
@@ -838,6 +872,7 @@ pub const FD_HANDLER_TABLE: &[(u64, SyscallHandler)] = &[
     (SYS_UNLINKAT, fd_unlinkat_handler as SyscallHandler),
     (SYS_SYMLINKAT, fd_symlinkat_handler as SyscallHandler),
     (SYS_READLINKAT, fd_readlinkat_handler as SyscallHandler),
+    (SYS_FCHMODAT, fd_fchmodat_handler as SyscallHandler),
 
     (SYS_OPEN, fd_open_handler as SyscallHandler),
     (SYS_OPENAT, fd_openat_handler as SyscallHandler),

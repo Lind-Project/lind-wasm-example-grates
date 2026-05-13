@@ -28,6 +28,7 @@ pub const SEEK_SET: i32 = 0;
 pub const SEEK_CUR: i32 = 1;
 pub const SEEK_END: i32 = 2;
 
+pub const F_SETFD: i32 = 2;
 pub const F_GETFL: i32 = 3;
 
 pub const S_IRUSR: u32 = 0o400;
@@ -43,3 +44,4 @@ pub const X_OK: i32 = 1;
 
 pub const F_DUPFD: i32 = 0;
 pub const F_DUPFD_CLOEXEC: i32 = 1030;
+pub const FD_CLOEXEC: i32 = 1;

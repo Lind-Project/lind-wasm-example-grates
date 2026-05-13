@@ -277,6 +277,65 @@ pub extern "C" fn close_handler(
     imfs::with_imfs(|state| state.close(arg1cage, arg1))
 }
 
+pub extern "C" fn dup_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    _arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    imfs::with_imfs(|state| state.dup(arg1cage, arg1))
+}
+
+pub extern "C" fn dup2_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    imfs::with_imfs(|state| state.dup2(arg1cage, arg1, arg2, false))
+}
+
+pub extern "C" fn dup3_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    _arg2cage: u64,
+    arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    if arg1 == arg2 {
+        return -22;
+    }
+
+    let cloexec = (arg3 as i32 & grate_rs::constants::fs::O_CLOEXEC) != 0;
+    imfs::with_imfs(|state| state.dup2(arg1cage, arg1, arg2, cloexec))
+}
+
 // =====================================================================
 //  read (syscall 0)
 //
@@ -1428,6 +1487,27 @@ pub extern "C" fn chdir_handler(
     imfs::with_imfs(|s| s.chdir(arg2cage, &pathname))
 }
 
+pub extern "C" fn fchdir_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    _arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let fd = arg1;
+    let cage_id = arg1cage;
+
+    imfs::with_imfs(|state| state.fchdir(cage_id, fd))
+}
+
 // =====================================================================
 //  mkdir (syscall 83)
 // =====================================================================
@@ -1556,24 +1636,6 @@ pub extern "C" fn fchmod_handler(
     _arg6cage: u64,
 ) -> i32 {
     imfs::with_imfs(|state| state.fchmod(arg1cage, arg1, arg2 as u32))
-}
-
-pub extern "C" fn fchdir_handler(
-    _cageid: u64,
-    arg1: u64,
-    arg1cage: u64,
-    _arg2: u64,
-    _arg2cage: u64,
-    _arg3: u64,
-    _arg3cage: u64,
-    _arg4: u64,
-    _arg4cage: u64,
-    _arg5: u64,
-    _arg5cage: u64,
-    _arg6: u64,
-    _arg6cage: u64,
-) -> i32 {
-    imfs::with_imfs(|state| state.fchdir(arg1cage, arg1))
 }
 
 pub extern "C" fn utimensat_handler(

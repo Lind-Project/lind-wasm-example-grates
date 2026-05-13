@@ -29,7 +29,7 @@ use std::ffi::CStr;
 macro_rules! input_path_handler {
     ($name:ident, $syscall_const:expr, $( $idx:expr ),+ $(,)?) => {
         extern "C" fn $name(
-            cageid: u64,
+            _cageid: u64,
             arg1: u64, arg1cage: u64,
             arg2: u64, arg2cage: u64,
             arg3: u64, arg3cage: u64,
@@ -58,9 +58,12 @@ macro_rules! input_path_handler {
                     Some(p) => p,
                     None => return -(::libc::EFAULT as i32),
                 };
+                if path.is_empty() {
+                    return -(::grate_rs::constants::error::ENOENT as i32);
+                }
 
                 // Apply chroot transformation (normalize relative to cwd, prepend chroot dir).
-                let transformed = chroot_path(&path, cageid);
+                let transformed = chroot_path(&path, cage);
                 let c_path = match ::std::ffi::CString::new(transformed) {
                     Ok(p) => p,
                     Err(_) => return -1,
@@ -89,6 +92,10 @@ macro_rules! input_path_handler {
 ///
 /// Relative `path`s are interpreted relative to `cwd`.
 pub fn normalize_path(path: &str, cwd: &str) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+
     let abs_path = if path.starts_with('/') {
         path.to_string()
     } else {
@@ -111,6 +118,10 @@ pub fn normalize_path(path: &str, cwd: &str) -> String {
 
 /// Apply chroot mapping: normalize and prepend the configured chroot directory.
 pub fn chroot_path(path: &str, cageid: u64) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+
     let chroot_dir = crate::CHROOT_DIR.lock().unwrap().clone();
     let cwd = get_cage_cwd(cageid);
 
@@ -119,6 +130,24 @@ pub fn chroot_path(path: &str, cageid: u64) -> String {
 
     // Prepend chroot directory
     format!("{}{}", chroot_dir.trim_end_matches('/'), normalized)
+}
+
+fn virtualize_host_cwd(host_cwd: &str) -> String {
+    let chroot_dir = crate::CHROOT_DIR.lock().unwrap().clone();
+    let chroot_dir = chroot_dir.trim_end_matches('/');
+
+    if chroot_dir.is_empty() || chroot_dir == "/" {
+        return normalize_path(host_cwd, "/");
+    }
+
+    if host_cwd == chroot_dir {
+        return "/".to_string();
+    }
+
+    match host_cwd.strip_prefix(chroot_dir) {
+        Some(stripped) if stripped.starts_with('/') => normalize_path(stripped, "/"),
+        _ => normalize_path(host_cwd, "/"),
+    }
 }
 
 /// Read a NUL-terminated C string from a cage's memory and return it as UTF-8.
@@ -158,11 +187,12 @@ pub fn init_cwd(cageid: u64) -> String {
 
     let _ = unsafe { libc::getcwd(buf.as_mut_ptr() as *mut libc::c_char, 4096) };
 
-    let cwd = unsafe {
+    let host_cwd = unsafe {
         CStr::from_ptr(buf.as_ptr() as *mut i8)
             .to_string_lossy()
             .into_owned()
     };
+    let cwd = virtualize_host_cwd(&host_cwd);
 
     set_cage_cwd(cageid, cwd.clone());
     cwd
@@ -170,6 +200,7 @@ pub fn init_cwd(cageid: u64) -> String {
 
 /// Return the cage's tracked virtual cwd, defaulting to `/`.
 pub fn get_cage_cwd(cageid: u64) -> String {
+    crate::ensure_cage_cwd(cageid);
     crate::CAGE_CWDS
         .lock()
         .unwrap()
