@@ -325,8 +325,6 @@ fn fd_translation_handler_impl(
                 should_pipe = true;
                 origin_pipe_ptr = args[spec.index];
                 origin_pipe_cageid = argcages[spec.index];
-                args[spec.index] = kernel_pipe_vector.as_ptr() as u64;
-                argcages[spec.index] = this_grateid | ARG_TRANSLATE_FLAG;
             }
 
             FdArgKind::SOCKPAIR => {
@@ -556,6 +554,16 @@ fn fd_translation_handler_impl(
     }
 
     if should_pipe {
+        match copy_data_between_cages(
+            this_grateid, origin_pipe_cageid,
+            origin_pipe_ptr, origin_pipe_cageid,
+            kernel_pipe_vector.as_mut_ptr() as u64, this_grateid,
+            8, 0, // 2 x i32 = 8 bytes
+        ) {
+            Ok(_) => {}
+            Err(e) => panic!("[fd translate] copy pipe fds from cage failed: {:?}", e),
+        }
+
         let ksv_1 = kernel_pipe_vector[0];
         let ksv_2 = kernel_pipe_vector[1];
         let vsv_1 =
@@ -563,7 +571,7 @@ fn fd_translation_handler_impl(
         let vsv_2 =
             fdtables::get_unused_virtual_fd(origin_pipe_cageid, FDKIND_KERNEL, ksv_2 as u64, should_cloexec, 0).unwrap();
         eprintln!(
-            "[popen-trace|fd_support pipe] syscall={} cage={} kernel_fds=[{},{}] virtual_fds=[{},{}] cloexec={}",
+            "[popen-trace|fd_support pipe] syscall={} cage={} under_fds=[{},{}] virtual_fds=[{},{}] cloexec={}",
             syscall_num,
             origin_pipe_cageid,
             ksv_1,
