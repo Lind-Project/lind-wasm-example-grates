@@ -146,11 +146,17 @@ static void nonblocking_client_process(const char *path) {
                 poll_ret, readable.revents, errno);
         _exit(25);
     }
+    if ((readable.revents & POLLIN) == 0) {
+        fprintf(stderr, "nonblocking client response poll missing POLLIN revents=0x%x\n",
+                readable.revents);
+        _exit(26);
+    }
 
     char response[8] = {0};
     if (recv(fd, response, sizeof(response), 0) != 5 || memcmp(response, "ready", 5) != 0) {
-        perror("nonblocking client recv response");
-        _exit(26);
+        fprintf(stderr, "nonblocking client recv response failed revents=0x%x errno=%d: %s\n",
+                readable.revents, errno, strerror(errno));
+        _exit(27);
     }
 
     close(fd);
