@@ -350,6 +350,34 @@ static void test_read_eof(void) {
 	close(fd);
 }
 
+static void test_sparse_write(void) {
+	printf("\n[test_sparse_write]\n");
+
+	int fd = open("/test_sparse", O_CREAT | O_RDWR, 0644);
+	CHECK("create /test_sparse", fd >= 0);
+	if (fd < 0)
+		return;
+
+	CHECK("seed sparse file", write(fd, "abc", 3) == 3);
+	CHECK("seek beyond multiple chunks", lseek(fd, 3000, SEEK_SET) == 3000);
+	CHECK("write after sparse seek", write(fd, "Z", 1) == 1);
+
+	struct stat st;
+	CHECK("fstat sparse file", fstat(fd, &st) == 0);
+	CHECK("sparse write extends size", st.st_size == 3001);
+
+	char buf[3001];
+	memset(buf, 'X', sizeof(buf));
+	CHECK("seek to start of sparse file", lseek(fd, 0, SEEK_SET) == 0);
+	CHECK("read full sparse file", read(fd, buf, sizeof(buf)) == 3001);
+	CHECK("prefix data preserved", memcmp(buf, "abc", 3) == 0);
+	CHECK("early sparse hole reads as zero", buf[3] == '\0');
+	CHECK("late sparse hole reads as zero", buf[2999] == '\0');
+	CHECK("sparse data byte preserved", buf[3000] == 'Z');
+
+	close(fd);
+}
+
 /*  Test 11: Write to stdout passes through (fd < 3)  */
 
 static void test_stdout_passthrough(void) {
@@ -533,6 +561,7 @@ int main(void) {
 	test_fcntl();
 	test_large_write();
 	test_read_eof();
+	test_sparse_write();
 	test_stdout_passthrough();
 	test_fork();
 	test_wrong_write();
