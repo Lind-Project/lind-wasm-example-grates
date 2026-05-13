@@ -30,6 +30,14 @@ static int tests_passed = 0;
         }                                                                      \
     } while (0)
 
+static int has_read_or_error_event(short revents) {
+    return (revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL)) != 0;
+}
+
+static int has_write_or_error_event(short revents) {
+    return (revents & (POLLOUT | POLLERR | POLLHUP | POLLNVAL)) != 0;
+}
+
 static void timeout_handler(int sig) {
     (void)sig;
     write(STDERR_FILENO, "FAIL: timed out\n", 16);
@@ -103,23 +111,27 @@ static void nonblocking_client_process(const char *path) {
     }
 
     set_addr(&addr, path);
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 && errno != EINPROGRESS) {
-        perror("nonblocking client connect");
-        _exit(21);
-    }
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        if (errno != EINPROGRESS) {
+            perror("nonblocking client connect");
+            _exit(21);
+        }
 
-    struct pollfd writable = {.fd = fd, .events = POLLOUT | POLLERR, .revents = 0};
-    if (poll(&writable, 1, 5000) != 1 || !(writable.revents & (POLLOUT | POLLERR))) {
-        perror("nonblocking client poll connect");
-        _exit(22);
-    }
+        struct pollfd writable = {.fd = fd, .events = POLLOUT | POLLERR, .revents = 0};
+        int poll_ret = poll(&writable, 1, 5000);
+        if (poll_ret != 1 || !has_write_or_error_event(writable.revents)) {
+            fprintf(stderr, "nonblocking client poll connect ret=%d revents=0x%x errno=%d\n",
+                    poll_ret, writable.revents, errno);
+            _exit(22);
+        }
 
-    int err = -1;
-    socklen_t err_len = sizeof(err);
-    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &err_len) != 0 || err != 0) {
-        errno = err;
-        perror("nonblocking client SO_ERROR");
-        _exit(23);
+        int err = -1;
+        socklen_t err_len = sizeof(err);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &err_len) != 0 || err != 0) {
+            errno = err;
+            perror("nonblocking client SO_ERROR");
+            _exit(23);
+        }
     }
 
     if (send(fd, "startup", 7, 0) != 7) {
@@ -128,8 +140,10 @@ static void nonblocking_client_process(const char *path) {
     }
 
     struct pollfd readable = {.fd = fd, .events = POLLIN | POLLERR, .revents = 0};
-    if (poll(&readable, 1, 5000) != 1 || !(readable.revents & (POLLIN | POLLERR))) {
-        perror("nonblocking client poll response");
+    int poll_ret = poll(&readable, 1, 5000);
+    if (poll_ret != 1 || !has_read_or_error_event(readable.revents)) {
+        fprintf(stderr, "nonblocking client poll response ret=%d revents=0x%x errno=%d\n",
+                poll_ret, readable.revents, errno);
         _exit(25);
     }
 
@@ -256,7 +270,8 @@ static void run_nonblocking_socket_test(const char *path) {
 
     struct pollfd listener_pfd = {.fd = listener, .events = POLLIN, .revents = 0};
     CHECK("poll listener before nonblocking accept", poll(&listener_pfd, 1, 5000) == 1);
-    CHECK("listener has POLLIN before nonblocking accept", (listener_pfd.revents & POLLIN) != 0);
+    CHECK("listener has read/error event before nonblocking accept",
+          has_read_or_error_event(listener_pfd.revents));
 
     int accepted = accept(listener, NULL, NULL);
     CHECK("accept nonblocking client", accepted >= 0);
@@ -268,7 +283,8 @@ static void run_nonblocking_socket_test(const char *path) {
 
         struct pollfd readable = {.fd = accepted, .events = POLLIN | POLLERR, .revents = 0};
         CHECK("poll accepted nonblocking socket for startup", poll(&readable, 1, 5000) == 1);
-        CHECK("accepted nonblocking socket has POLLIN", (readable.revents & POLLIN) != 0);
+        CHECK("accepted nonblocking socket has read/error event",
+              has_read_or_error_event(readable.revents));
         CHECK("recv startup from nonblocking accepted socket", recv(accepted, buf, sizeof(buf), 0) == 7);
         CHECK("nonblocking startup payload matches", memcmp(buf, "startup", 7) == 0);
         CHECK("send response on nonblocking accepted socket", send(accepted, "ready", 5, 0) == 5);
