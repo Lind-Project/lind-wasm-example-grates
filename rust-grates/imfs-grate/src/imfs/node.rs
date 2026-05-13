@@ -74,10 +74,10 @@ pub enum NodeInfo {
     /// matches a "needs mmap" rule in the routing layer).
     ///
     /// The backing file descriptor is internal to IMFS.  When a cage
-    /// `mmap`s the file, IMFS temporarily registers that backing in
-    /// the target cage's fdtable and asks RawPOSIX for a file-backed
-    /// `MAP_SHARED` mapping.  Every cage mapping the same RegMapped
-    /// node therefore maps the same kernel-backed pages.
+    /// `mmap`s the file, IMFS opens the same backing path in the
+    /// target cage and asks RawPOSIX for a file-backed `MAP_SHARED`
+    /// mapping.  Every cage mapping the same RegMapped node therefore
+    /// maps the same kernel-backed pages.
     ///
     /// `host_addr`: base of the host mapping (0 if not yet allocated).
     /// `capacity`: size of the mapping in bytes; the file's logical

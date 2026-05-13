@@ -99,6 +99,9 @@ pub struct ImfsState {
     /// munmap; fork and exit only clone/drop entries.
     pub mmap_tracking: HashMap<(u64, u64), (usize, usize, usize)>,
 
+    /// Host RawPOSIX backing paths for RegMapped nodes.
+    backing_paths: HashMap<usize, String>,
+
     /// Monotonic suffix for internal RegMapped backing file names.
     backing_counter: u64,
 }
@@ -114,6 +117,7 @@ pub fn init() {
         fd_info: HashMap::new(),
         cwd_info: HashMap::new(),
         mmap_tracking: HashMap::new(),
+        backing_paths: HashMap::new(),
         backing_counter: 0,
     };
 
@@ -435,23 +439,18 @@ impl ImfsState {
                 return Err((-fd) as i32);
             }
 
-            let unlink_ret = self.make_syscall_from_grate(
-                SYS_UNLINK as u32,
-                thiscage,
-                [c_path.as_ptr() as u64, 0, 0, 0, 0, 0],
-                [thiscage | GRATE_MEMORY_FLAG, 0, 0, 0, 0, 0],
-            );
-            if unlink_ret < 0 {
-                self.close_backing_vfd(fd as u64);
-                return Err((-unlink_ret) as i32);
-            }
-
             if fdtables::get_specific_virtual_fd(thiscage, fd as u64, 0, fd as u64, false, 0)
                 .is_err()
             {
                 self.close_backing_vfd(fd as u64);
                 return Err(grate_rs::constants::error::EBADF);
             }
+
+            let path = c_path.into_string().map_err(|_| {
+                self.close_backing_vfd(fd as u64);
+                grate_rs::constants::error::EINVAL
+            })?;
+            self.backing_paths.insert(node_idx, path);
             return Ok(fd as u64);
         }
 
@@ -472,6 +471,13 @@ impl ImfsState {
             *backing_vfd = fd;
         }
         Ok(fd)
+    }
+
+    fn backing_path_for_node(&self, node_idx: usize) -> Result<&str, i32> {
+        self.backing_paths
+            .get(&node_idx)
+            .map(|path| path.as_str())
+            .ok_or(grate_rs::constants::error::EBADF)
     }
 
     fn ftruncate_backing(&self, backing_vfd: u64, len: usize) -> Result<(), i32> {
@@ -501,29 +507,55 @@ impl ImfsState {
         }
     }
 
+    fn unlink_backing_path(&self, path: &str) {
+        let thiscage = getcageid();
+        let Ok(c_path) = CString::new(path) else {
+            return;
+        };
+        let _ = self.make_syscall_from_grate(
+            SYS_UNLINK as u32,
+            thiscage,
+            [c_path.as_ptr() as u64, 0, 0, 0, 0, 0],
+            [thiscage | GRATE_MEMORY_FLAG, 0, 0, 0, 0, 0],
+        );
+    }
+
+    fn open_backing_vfd_in_cage(&self, cage_id: u64, node_idx: usize) -> Result<u64, i32> {
+        let thiscage = getcageid();
+        let path = self.backing_path_for_node(node_idx)?;
+        let c_path = CString::new(path).map_err(|_| grate_rs::constants::error::EINVAL)?;
+        let ret = self.make_syscall_from_grate(
+            SYS_OPEN as u32,
+            cage_id,
+            [
+                c_path.as_ptr() as u64,
+                (O_RDWR | O_CLOEXEC) as u64,
+                0,
+                0,
+                0,
+                0,
+            ],
+            [thiscage | GRATE_MEMORY_FLAG, cage_id, cage_id, 0, 0, 0],
+        );
+
+        if ret < 0 {
+            Err((-ret) as i32)
+        } else {
+            Ok(ret as u64)
+        }
+    }
+
     fn mmap_backing_in_cage(
         &self,
         cage_id: u64,
+        node_idx: usize,
         len: usize,
         prot: i32,
         flags: i32,
-        backing_vfd: u64,
         offset: u64,
     ) -> Result<u64, i32> {
         let thiscage = getcageid();
-        if !fdtables::check_cage_exists(cage_id) {
-            return Err(grate_rs::constants::error::EBADF);
-        }
-        let backing_entry = fdtables::translate_virtual_fd(thiscage, backing_vfd)
-            .map_err(|_| grate_rs::constants::error::EBADF)?;
-        let temp_fd = fdtables::get_unused_virtual_fd(
-            cage_id,
-            backing_entry.fdkind,
-            backing_entry.underfd,
-            false,
-            0,
-        )
-        .map_err(|_| grate_rs::constants::error::EMFILE)?;
+        let temp_fd = self.open_backing_vfd_in_cage(cage_id, node_idx)?;
 
         let cage_flags = flags & !MAP_ANON;
         let ret = make_threei_call(
@@ -545,7 +577,12 @@ impl ImfsState {
             0,
             0,
         );
-        let _ = fdtables::close_virtualfd(cage_id, temp_fd);
+        let _ = self.make_syscall_from_grate(
+            SYS_CLOSE as u32,
+            cage_id,
+            [temp_fd, 0, 0, 0, 0, 0],
+            [cage_id, 0, 0, 0, 0, 0],
+        );
         Self::mmap_ret_to_uaddr(ret)
     }
 
@@ -779,6 +816,9 @@ impl ImfsState {
             );
         }
         self.close_backing_vfd(backing_vfd);
+        if let Some(path) = self.backing_paths.remove(&node_idx) {
+            self.unlink_backing_path(&path);
+        }
     }
 
     // =====================================================================
@@ -2501,12 +2541,11 @@ impl ImfsState {
             return -(grate_rs::constants::error::EBUSY as i32);
         }
 
-        let backing_vfd = match self.backing_vfd_for_node(node_idx) {
+        let _backing_vfd = match self.backing_vfd_for_node(node_idx) {
             Ok(fd) => fd,
             Err(e) => return -(e as i32),
         };
-        let mapped = match self.mmap_backing_in_cage(cage_id, len, prot, flags, backing_vfd, offset)
-        {
+        let mapped = match self.mmap_backing_in_cage(cage_id, node_idx, len, prot, flags, offset) {
             Ok(addr) => addr,
             Err(e) => return e,
         };
