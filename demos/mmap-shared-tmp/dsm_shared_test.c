@@ -35,6 +35,7 @@
 
 #define SEG_PATH    "/tmp/dsm_segment"
 #define BASIC_PATH  "/tmp/mmap_basic"
+#define REMAP_PATH  "/tmp/mmap_remap"
 #define SEG_SIZE    4096
 #define OFF_PARENT  0
 #define OFF_CHILD_A 1024
@@ -99,6 +100,46 @@ static int basic_mmap_round_trip(void) {
     return 0;
 }
 
+static int remap_after_munmap_round_trip(void) {
+    TRACE("remap: before open");
+    int fd = open(REMAP_PATH, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    TRACE("remap: after open");
+    CHECK("remap: create " REMAP_PATH, fd >= 0);
+    if (fd < 0) return -1;
+
+    TRACE("remap: before ftruncate");
+    CHECK("remap: ftruncate to one page", ftruncate(fd, SEG_SIZE) == 0);
+
+    TRACE("remap: before mmap");
+    void *addr = mmap(NULL, SEG_SIZE, PROT_READ | PROT_WRITE,
+                      MAP_SHARED, fd, 0);
+    TRACE("remap: after mmap");
+    CHECK("remap: mmap MAP_SHARED", addr != MAP_FAILED);
+    if (addr == MAP_FAILED) {
+        close(fd);
+        return -1;
+    }
+
+    TRACE("remap: before mapping write");
+    memcpy(addr, "second mmap write", 17);
+    TRACE("remap: after mapping write");
+
+    char buf[32] = {0};
+    TRACE("remap: before lseek");
+    CHECK("remap: lseek back to start", lseek(fd, 0, SEEK_SET) == 0);
+    TRACE("remap: before read");
+    ssize_t nr = read(fd, buf, sizeof(buf));
+    TRACE("remap: after read");
+    CHECK("remap: read sees mmap write", nr >= 17 &&
+          memcmp(buf, "second mmap write", 17) == 0);
+
+    TRACE("remap: before munmap");
+    CHECK("remap: munmap", munmap(addr, SEG_SIZE) == 0);
+    close(fd);
+    unlink(REMAP_PATH);
+    return 0;
+}
+
 /* Child body: open the segment by name, mmap it independently of the
  * inherited mapping, write the marker at the given offset, exit. */
 static void child_body(const char *mark, size_t mark_len, off_t off) {
@@ -134,6 +175,7 @@ int main(void) {
     mkdir("/tmp", 0755);
 
     basic_mmap_round_trip();
+    remap_after_munmap_round_trip();
 
     /* 1. Parent creates the segment. */
     int fd = open(SEG_PATH, O_CREAT | O_RDWR | O_TRUNC, 0644);
