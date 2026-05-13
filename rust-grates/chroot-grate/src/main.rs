@@ -232,6 +232,14 @@ fn rewrite_at_path(
 
     let (rewritten_dirfd, rewritten_path) = if path.starts_with('/') || dirfd as i64 == AT_FDCWD {
         (AT_FDCWD as u64, chroot_path(&path, cageid))
+    } else if !path.is_empty() {
+        match fd_dir_path(cageid, dirfd) {
+            Some(dir) => (
+                AT_FDCWD as u64,
+                chroot_path(&normalize_path(&path, &dir), cageid),
+            ),
+            None => (dirfd, path),
+        }
     } else {
         (dirfd, path)
     };
@@ -337,6 +345,18 @@ fn register_child_fd_paths(parent_cageid: u64, child_cageid: u64) {
     }
 }
 
+fn dev_fd_target(path: &str) -> Option<u64> {
+    let fd = path
+        .strip_prefix("/dev/fd/")
+        .or_else(|| path.strip_prefix("/proc/self/fd/"))?;
+
+    if fd.is_empty() || !fd.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+
+    fd.parse().ok()
+}
+
 fn resolve_virtual_at_path(cageid: u64, dirfd: u64, path: &str) -> Option<String> {
     if path.starts_with('/') || dirfd as i64 == AT_FDCWD {
         Some(normalize_path(path, &get_cage_cwd(cageid)))
@@ -407,6 +427,23 @@ extern "C" fn open_handler(
         Some(p) => p,
         None => return -(libc::EFAULT as i32),
     };
+    if path.is_empty() {
+        return -(grate_rs::constants::error::ENOENT as i32);
+    }
+    if let Some(fd) = dev_fd_target(&path) {
+        let ret = make_syscall_from_grate(
+            SYS_DUP as u32,
+            path_cage,
+            [fd, 0, 0, 0, 0, 0],
+            [
+                path_cage, path_cage, path_cage, path_cage, path_cage, path_cage,
+            ],
+        );
+        if ret >= 0 {
+            copy_fd_dir_path(cageid, fd, ret as u64);
+        }
+        return ret;
+    }
     let virtual_path = normalize_path(&path, &get_cage_cwd(cageid));
     let c_path = match CString::new(chroot_path(&path, cageid)) {
         Ok(p) => p,
@@ -455,6 +492,25 @@ extern "C" fn openat_handler(
         Some(p) => p,
         None => return -(libc::EFAULT as i32),
     };
+    if path.is_empty() {
+        return -(grate_rs::constants::error::ENOENT as i32);
+    }
+    if path.starts_with('/') {
+        if let Some(fd) = dev_fd_target(&path) {
+            let ret = make_syscall_from_grate(
+                SYS_DUP as u32,
+                path_cage,
+                [fd, 0, 0, 0, 0, 0],
+                [
+                    path_cage, path_cage, path_cage, path_cage, path_cage, path_cage,
+                ],
+            );
+            if ret >= 0 {
+                copy_fd_dir_path(cageid, fd, ret as u64);
+            }
+            return ret;
+        }
+    }
     let virtual_path = resolve_virtual_at_path(cageid, dirfd, &path);
     let (rewritten_dirfd, c_path) = match rewrite_at_path(cageid, dirfd, path_ptr, path_cage) {
         Ok(v) => v,
@@ -839,6 +895,9 @@ extern "C" fn unlinkat_handler(
         Some(p) => p,
         None => return -14, // EFAULT
     };
+    if path.is_empty() {
+        return -(grate_rs::constants::error::ENOENT as i32);
+    }
 
     let (c_path, use_chrooted) = if path.starts_with('/') || dirfd as i64 == AT_FDCWD {
         let chrooted = chroot_path(&path, cageid);

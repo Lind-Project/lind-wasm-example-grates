@@ -58,6 +58,9 @@ macro_rules! input_path_handler {
                     Some(p) => p,
                     None => return -(::libc::EFAULT as i32),
                 };
+                if path.is_empty() {
+                    return -(::grate_rs::constants::error::ENOENT as i32);
+                }
 
                 // Apply chroot transformation (normalize relative to cwd, prepend chroot dir).
                 let transformed = chroot_path(&path, cage);
@@ -89,6 +92,10 @@ macro_rules! input_path_handler {
 ///
 /// Relative `path`s are interpreted relative to `cwd`.
 pub fn normalize_path(path: &str, cwd: &str) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+
     let abs_path = if path.starts_with('/') {
         path.to_string()
     } else {
@@ -111,6 +118,10 @@ pub fn normalize_path(path: &str, cwd: &str) -> String {
 
 /// Apply chroot mapping: normalize and prepend the configured chroot directory.
 pub fn chroot_path(path: &str, cageid: u64) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+
     let chroot_dir = crate::CHROOT_DIR.lock().unwrap().clone();
     let cwd = get_cage_cwd(cageid);
 

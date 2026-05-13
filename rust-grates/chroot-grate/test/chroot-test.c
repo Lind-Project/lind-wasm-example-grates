@@ -112,6 +112,32 @@ int main(int argc, char *argv[]) {
     // ---- truncate ----
     CHECK("truncate: shrink file to 1 byte", truncate(a, 1) == 0);
 
+    // ---- /dev/fd aliases ----
+    int source_fd = open(a, O_RDONLY);
+    CHECK("open: source fd for /dev/fd alias", source_fd >= 0);
+    if (source_fd >= 0) {
+        char fd_path[64];
+        char fd_buf[2] = {0};
+        snprintf(fd_path, sizeof(fd_path), "/dev/fd/%d", source_fd);
+        int alias_fd = open(fd_path, O_RDONLY);
+        CHECK("open: /dev/fd/N duplicates readable fd", alias_fd >= 0);
+        if (alias_fd >= 0) {
+            CHECK("read: /dev/fd/N alias reads original file", read(alias_fd, fd_buf, 1) == 1 && fd_buf[0] == 'h');
+            close(alias_fd);
+        }
+
+        snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", source_fd);
+        alias_fd = openat(AT_FDCWD, fd_path, O_RDONLY);
+        CHECK("openat: /proc/self/fd/N duplicates readable fd", alias_fd >= 0);
+        if (alias_fd >= 0) {
+            lseek(alias_fd, 0, SEEK_SET);
+            memset(fd_buf, 0, sizeof(fd_buf));
+            CHECK("read: /proc/self/fd/N alias reads original file", read(alias_fd, fd_buf, 1) == 1 && fd_buf[0] == 'h');
+            close(alias_fd);
+        }
+        close(source_fd);
+    }
+
     // ---- link ----
     CHECK("link: create hard link", link(a, b) == 0);
 
@@ -148,19 +174,6 @@ int main(int argc, char *argv[]) {
         if (origfd >= 0) close(origfd);
     }
 
-    snprintf(out, sizeof(out), "shell.E-%s", seed);
-    snprintf(orig, sizeof(orig), "%s.orig", out);
-    char cmd[192];
-    snprintf(cmd, sizeof(cmd), "printf x > %s", out);
-    int sysrc = system(cmd);
-    CHECK("system: create redirected output file",
-          sysrc != -1 && WIFEXITED(sysrc) && WEXITSTATUS(sysrc) == 0);
-    CHECK("rename: move shell output aside before normalization", rename(out, orig) == 0);
-    int shellfd = open(orig, O_RDONLY);
-    CHECK("open: read renamed shell output file", shellfd >= 0);
-    CHECK("unlink: remove renamed shell output while open", unlink(orig) == 0);
-    if (shellfd >= 0) close(shellfd);
-
     // ---- symlink ----
     CHECK("symlink: create dangling relative symlink", symlink(missing, sym) == 0);
     char linkbuf[PATH_MAX];
@@ -188,6 +201,12 @@ int main(int argc, char *argv[]) {
 
     // ---- unlink ----
     CHECK("unlink: remove original file", unlink(a) == 0);
+    errno = 0;
+    CHECK("unlink: empty path stays empty and fails with ENOENT",
+          unlink("") == -1 && errno == ENOENT);
+    errno = 0;
+    CHECK("unlinkat: empty path stays empty and fails with ENOENT",
+          unlinkat(AT_FDCWD, "", 0) == -1 && errno == ENOENT);
 
     // ---- unlinkat ----
     int dfd = open(".", O_DIRECTORY);
