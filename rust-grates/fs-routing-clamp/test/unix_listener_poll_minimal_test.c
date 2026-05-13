@@ -147,8 +147,17 @@ static void nonblocking_client_process(const char *path) {
         _exit(25);
     }
     if ((readable.revents & POLLIN) == 0) {
+        errno = 0;
+        int fd_flags = fcntl(fd, F_GETFD);
+        int fd_errno = errno;
+        errno = 0;
+        int fl_flags = fcntl(fd, F_GETFL);
+        int fl_errno = errno;
         fprintf(stderr, "nonblocking client response poll missing POLLIN revents=0x%x\n",
                 readable.revents);
+        fprintf(stderr, "nonblocking client fd check F_GETFD=%d errno=%d F_GETFL=%d errno=%d\n",
+                fd_flags, fd_errno, fl_flags, fl_errno);
+        sleep(1);
         _exit(26);
     }
 
