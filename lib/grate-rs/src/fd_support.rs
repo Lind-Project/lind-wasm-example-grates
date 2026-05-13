@@ -309,7 +309,7 @@ fn fd_translation_handler_impl(
 
                         let cmd = args[1] as i32;
 
-                        if cmd & F_DUPFD != 0 || cmd & F_DUPFD_CLOEXEC != 0 {
+                        if cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC {
                             should_create_vfd = true;
                             should_cloexec |= cmd == F_DUPFD_CLOEXEC;
                         }
