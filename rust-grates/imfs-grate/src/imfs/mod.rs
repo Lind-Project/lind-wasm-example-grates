@@ -661,6 +661,7 @@ impl ImfsState {
             if local_offset < CHUNK_SIZE {
                 break;
             }
+            self.chunks[ci].used = CHUNK_SIZE;
             local_offset -= CHUNK_SIZE;
             chunk_idx = self.chunks[ci].next;
         }
@@ -688,6 +689,13 @@ impl ImfsState {
                     new_ci
                 }
             };
+
+            if local_offset >= CHUNK_SIZE {
+                self.chunks[ci].used = CHUNK_SIZE;
+                local_offset -= CHUNK_SIZE;
+                chunk_idx = self.chunks[ci].next;
+                continue;
+            }
 
             let space = CHUNK_SIZE - local_offset;
             let to_copy = (buf.len() - written).min(space);
@@ -995,6 +1003,38 @@ impl ImfsState {
         }
 
         self.cwd_info.insert(cage_id, norm_path);
+        0
+    }
+
+    /// fchdir: change current working directory using an open directory fd.
+    pub fn fchdir(&mut self, cage_id: u64, fd: u64) -> i32 {
+        let entry = match fdtables::translate_virtual_fd(cage_id, fd) {
+            Ok(entry) => entry,
+            Err(_) => return -9, // EBADF
+        };
+
+        let mut node_idx = entry.underfd as usize;
+
+        if node_idx >= self.nodes.len() {
+            return -9; // EBADF
+        }
+
+        // Follow link nodes until reaching the actual target.
+        while let NodeInfo::Lnk { target } = &self.nodes[node_idx].info {
+            node_idx = *target;
+
+            if node_idx >= self.nodes.len() {
+                return -9; // EBADF
+            }
+        }
+
+        if self.nodes[node_idx].node_type != NodeType::Dir {
+            return -20; // ENOTDIR
+        }
+
+        let cwd = self.absolute_path_for_node(node_idx);
+        self.cwd_info.insert(cage_id, cwd);
+
         0
     }
 
