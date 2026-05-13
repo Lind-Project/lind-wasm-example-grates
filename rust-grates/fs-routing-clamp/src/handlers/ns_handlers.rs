@@ -428,6 +428,10 @@ pub extern "C" fn ns_mmap_handler(
 ) -> i32 {
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+    eprintln!(
+        "[popen-trace|fsrouting ns_mmap] cage={} addr=0x{:x} len={} flags=0x{:x} fd={}",
+        arg1cage, arg1, arg2, arg4, arg5 as i64
+    );
 
     /*
      * MAP_ANONYMOUS means fd is ignored.
@@ -1186,19 +1190,43 @@ pub extern "C" fn ns_clone_handler(
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
     let nr = helpers::get_route(arg1cage, SYS_CLONE).unwrap_or(SYS_CLONE);
+    let mut flags = 0u64;
+    let _ = copy_data_between_cages(
+        getcageid(),
+        arg1cage,
+        arg1,
+        arg1cage,
+        &mut flags as *mut u64 as u64,
+        getcageid(),
+        8,
+        0,
+    );
+    let is_thread = is_thread_clone(arg1, arg1cage);
+    eprintln!(
+        "[popen-trace|fsrouting ns_clone] parent={} flags=0x{:x} is_thread={} route_nr={}",
+        arg1cage, flags, is_thread, nr
+    );
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
+    eprintln!(
+        "[popen-trace|fsrouting ns_clone] parent={} route_nr={} ret={}",
+        arg1cage, nr, ret
+    );
 
     if ret <= 0 {
         return ret;
     }
 
-    if !is_thread_clone(arg1, arg1cage) {
+    if !is_thread {
         let child_cage_id = ret as u64;
 
         // Route cloning only — fdtables copy is handled by the lifecycle
         // fork_handler to avoid double-init when inner grates also handle fork.
         helpers::clone_cage_routes(arg1cage, child_cage_id);
         helpers::clone_cage_cwd(arg1cage, child_cage_id);
+        eprintln!(
+            "[popen-trace|fsrouting ns_clone] cloned route/cwd parent={} child={}",
+            arg1cage, child_cage_id
+        );
     }
 
     ret
