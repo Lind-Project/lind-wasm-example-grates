@@ -2,6 +2,8 @@ use crate::secondary_log;
 use crate::tee::*;
 use crate::utils;
 use crate::utils::*;
+use grate_rs::constants::fs::F_DUPFD;
+use grate_rs::constants::fs::F_DUPFD_CLOEXEC;
 use grate_rs::constants::*;
 use grate_rs::is_thread_clone;
 
@@ -503,7 +505,7 @@ pub extern "C" fn tee_fcntl(
         None => -1,
     };
 
-    if arg2 == F_DUPFD || arg2 == F_DUPFD_CLOEXEC {
+    if arg2 == F_DUPFD as u64 || arg2 == F_DUPFD_CLOEXEC as u64 {
         record_fd_pair(arg1cage, primary_result, secondary_result);
     }
 
