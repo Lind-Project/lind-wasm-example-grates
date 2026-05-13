@@ -21,6 +21,9 @@ use grate_rs::constants::fs::*;
 
 /// fdtables fdkind for IMFS file descriptors.
 pub const IMFS_FDKIND: u32 = 1;
+const IMFS_F_GETFD: i32 = 1;
+const IMFS_F_SETFD: i32 = 2;
+const IMFS_FD_CLOEXEC: i32 = 1;
 
 /// Global IMFS state.
 pub static IMFS: Mutex<Option<ImfsState>> = Mutex::new(None);
@@ -215,9 +218,71 @@ impl ImfsState {
 
     /// Mark a node slot as free and return it to the free list for reuse.
     fn reclaim_node(&mut self, idx: usize) {
+        let chunk_head = match &mut self.nodes[idx].info {
+            NodeInfo::Reg { head, tail } => {
+                let old_head = *head;
+                *head = None;
+                *tail = None;
+                old_head
+            }
+            _ => None,
+        };
+        self.reclaim_chunk_chain(chunk_head);
+
         self.nodes[idx].node_type = NodeType::Free;
         self.nodes[idx].info = NodeInfo::Free;
         self.node_free_list.push(idx);
+    }
+
+    fn link_count(&self, node_idx: usize) -> u32 {
+        match &self.nodes[node_idx].info {
+            NodeInfo::Dir { children } => {
+                let child_dirs = children
+                    .iter()
+                    .filter(|entry| entry.name != "." && entry.name != "..")
+                    .filter(|entry| self.nodes[entry.node_idx].node_type == NodeType::Dir)
+                    .count() as u32;
+                2 + child_dirs
+            }
+            _ => self
+                .nodes
+                .iter()
+                .filter_map(|node| match &node.info {
+                    NodeInfo::Dir { children } => Some(children),
+                    _ => None,
+                })
+                .flat_map(|children| children.iter())
+                .filter(|entry| {
+                    entry.node_idx == node_idx
+                        || matches!(
+                            &self.nodes[entry.node_idx].info,
+                            NodeInfo::Lnk { target } if *target == node_idx
+                        )
+                })
+                .count() as u32,
+        }
+    }
+
+    fn unlink_node(&mut self, node_idx: usize) {
+        if let NodeInfo::Lnk { target } = &self.nodes[node_idx].info {
+            let target = *target;
+            self.update_ctime(target);
+            if self.link_count(target) == 0 {
+                self.nodes[target].doomed = true;
+                if self.nodes[target].in_use == 0 {
+                    self.reclaim_node(target);
+                }
+            }
+            self.reclaim_node(node_idx);
+            return;
+        }
+
+        if self.link_count(node_idx) == 0 {
+            self.nodes[node_idx].doomed = true;
+            if self.nodes[node_idx].in_use == 0 {
+                self.reclaim_node(node_idx);
+            }
+        }
     }
 
     // =====================================================================
@@ -404,7 +469,7 @@ impl ImfsState {
             st_dev: 1,
             st_ino: node_idx as u64,
             st_mode: node.mode,
-            st_nlink: 1,
+            st_nlink: self.link_count(node_idx),
             st_uid: 0, //node.owner,
             st_gid: 0, //node.group,
             st_rdev: 0,
@@ -467,7 +532,7 @@ impl ImfsState {
                 && (flags & O_TRUNC) != 0
                 && (flags & O_ACCMODE) != O_RDONLY
             {
-                self.nodes[idx].total_size = 0;
+                self.truncate_node(idx, 0);
                 self.update_mtime(idx);
                 self.update_ctime(idx);
             }
@@ -849,6 +914,53 @@ impl ImfsState {
         }
     }
 
+    fn dup_from_startfd(&mut self, cage_id: u64, oldfd: u64, startfd: i32, cloexec: bool) -> i32 {
+        if startfd < 0 {
+            return -22;
+        }
+
+        let entry = match fdtables::translate_virtual_fd(cage_id, oldfd) {
+            Ok(entry) => entry,
+            Err(_) => return -9,
+        };
+
+        let fd_info = match self.fd_info.get(&(cage_id, oldfd)).cloned() {
+            Some(info) => info,
+            None => return -9,
+        };
+
+        let node_idx = entry.underfd as usize;
+        if node_idx >= self.nodes.len() {
+            return -9;
+        }
+
+        match fdtables::get_unused_virtual_fd_from_startfd(
+            cage_id,
+            IMFS_FDKIND,
+            entry.underfd,
+            cloexec,
+            0,
+            startfd as u64,
+        ) {
+            Ok(newfd) => {
+                self.nodes[node_idx].in_use += 1;
+                if let NodeInfo::Pip {
+                    readers, writers, ..
+                } = &mut self.nodes[node_idx].info
+                {
+                    let flags = fd_info.lock().unwrap().flags as i32;
+                    match flags & O_ACCMODE {
+                        O_WRONLY => *writers += 1,
+                        _ => *readers += 1,
+                    }
+                }
+                self.fd_info.insert((cage_id, newfd), fd_info);
+                newfd as i32
+            }
+            Err(_) => -24,
+        }
+    }
+
     // =====================================================================
     //  Public filesystem operations
     //
@@ -873,12 +985,17 @@ impl ImfsState {
     /// chdir
     pub fn chdir(&mut self, cage_id: u64, path: &str) -> i32 {
         let norm_path = self.normalize_path_for_cage(cage_id, path);
-        if let Some(cwd) = self.cwd_info.get_mut(&cage_id) {
-            *cwd = norm_path.to_string();
-            0
-        } else {
-            -1
+        let node_idx = match self.resolve_path(&norm_path, true) {
+            Ok(idx) => idx,
+            Err(e) => return e,
+        };
+
+        if self.nodes[node_idx].node_type != NodeType::Dir {
+            return -20; // ENOTDIR
         }
+
+        self.cwd_info.insert(cage_id, norm_path);
+        0
     }
 
     pub fn getcwd(&self, cage_id: u64) -> Result<String, i32> {
@@ -1012,11 +1129,7 @@ impl ImfsState {
         self.update_mtime(parent_idx);
         self.update_ctime(parent_idx);
         self.update_ctime(node_idx);
-        self.nodes[node_idx].doomed = true;
-
-        if self.nodes[node_idx].in_use == 0 {
-            self.reclaim_node(node_idx);
-        }
+        self.unlink_node(node_idx);
 
         0
     }
@@ -1091,6 +1204,10 @@ impl ImfsState {
 
     /// pread: read at a specific offset without changing the fd offset.
     pub fn pread(&mut self, cage_id: u64, fd: u64, buf: &mut [u8], offset: i64) -> i32 {
+        if offset < 0 {
+            return -22; // EINVAL
+        }
+
         // Look up fd in fdtables — get node index and flags.
         let (node_idx, flags) = match self.get_node_and_flags(cage_id, fd) {
             Ok((n, f)) => (n, f),
@@ -1151,6 +1268,10 @@ impl ImfsState {
 
     /// pwrite: write at a specific offset without changing the fd offset.
     pub fn pwrite(&mut self, cage_id: u64, fd: u64, buf: &[u8], offset: i64) -> i32 {
+        if offset < 0 {
+            return -22; // EINVAL
+        }
+
         // Look up fd in fdtables — get node index and flags.
         let (node_idx, flags) = match self.get_node_and_flags(cage_id, fd) {
             Ok((n, f)) => (n, f),
@@ -1202,16 +1323,39 @@ impl ImfsState {
             _ => return -22,
         };
 
+        if new_offset < 0 {
+            return -22;
+        }
+
         self.set_offset(cage_id, fd, new_offset);
 
         new_offset as i32
     }
 
     /// fcntl: only F_GETFL implemented — returns flags from fdtables perfdinfo.
-    pub fn fcntl(&self, cage_id: u64, fd: u64, op: i32, _arg: i32) -> i32 {
+    pub fn fcntl(&mut self, cage_id: u64, fd: u64, op: i32, arg: i32) -> i32 {
         match op {
+            F_DUPFD => self.dup_from_startfd(cage_id, fd, arg, false),
+            F_DUPFD_CLOEXEC => self.dup_from_startfd(cage_id, fd, arg, true),
+            IMFS_F_GETFD => match fdtables::translate_virtual_fd(cage_id, fd) {
+                Ok(entry) => {
+                    if entry.should_cloexec {
+                        IMFS_FD_CLOEXEC
+                    } else {
+                        0
+                    }
+                }
+                Err(_) => -9,
+            },
+            IMFS_F_SETFD => match fdtables::set_cloexec(cage_id, fd, arg & IMFS_FD_CLOEXEC != 0) {
+                Ok(_) => 0,
+                Err(_) => -9,
+            },
             F_GETFL => {
-                let fd_info = self.fd_info.get(&(cage_id, fd)).unwrap().lock().unwrap();
+                let Some(fd_info) = self.fd_info.get(&(cage_id, fd)) else {
+                    return -9;
+                };
+                let fd_info = fd_info.lock().unwrap();
 
                 fd_info.flags as i32
             }
@@ -1470,11 +1614,7 @@ impl ImfsState {
                 self.update_mtime(new_parent_idx);
                 self.update_ctime(new_parent_idx);
                 self.update_ctime(existing_idx);
-                self.nodes[existing_idx].doomed = true;
-
-                if self.nodes[existing_idx].in_use == 0 {
-                    self.reclaim_node(existing_idx);
-                }
+                self.unlink_node(existing_idx);
             }
             Err(-2) => {}
             Err(e) => return e,
