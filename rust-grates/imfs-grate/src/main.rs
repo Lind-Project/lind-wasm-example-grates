@@ -106,11 +106,15 @@ fn main() {
         .register(SYS_READV, handlers::readv_handler)
         .register(SYS_WRITEV, handlers::writev_handler)
         .register(SYS_FSYNC, handlers::fsync_handler)
-        .register(SYS_FDATASYNC, handlers::enosys_handler)
+        .register(SYS_FDATASYNC, handlers::fsync_handler)
         .register(SYS_STATFS, handlers::statfs_handler)
         .register(SYS_FSTATFS, handlers::fstatfs_handler)
-        .register(SYS_SYNC_FILE_RANGE, handlers::enosys_handler)
+        .register(SYS_SYNC_FILE_RANGE, handlers::sync_file_range_handler)
         .register(SYS_UTIMENSAT, handlers::utimensat_handler)
+        .register(SYS_MMAP, handlers::mmap_handler)
+        .register(SYS_MUNMAP, handlers::munmap_handler)
+        .register(SYS_EXIT, handlers::exit_handler)
+        .register(SYS_EXIT_GROUP, handlers::exit_group_handler)
         .preexec(|cageid: i32| {
             imfs::with_imfs(|s| {
                 s.cwd_info.insert(cageid as u64, "/".to_string());

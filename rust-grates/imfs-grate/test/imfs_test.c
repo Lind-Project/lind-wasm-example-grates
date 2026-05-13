@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/wait.h>
+#include <sys/mman.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -547,6 +548,279 @@ static void test_statfs(void) {
 	CHECK("statfs nonexistent path fails", ret != 0);
 }
 
+static void test_sync_syscalls(void) {
+	printf("\n[test_sync_syscalls]\n");
+
+	int fd = open("/test_sync_syscalls", O_CREAT | O_RDWR, 0644);
+	CHECK("create /test_sync_syscalls", fd >= 0);
+	if (fd < 0)
+		return;
+
+	CHECK("write sync test data", write(fd, "wal", 3) == 3);
+	CHECK("fsync succeeds", fsync(fd) == 0);
+	CHECK("fdatasync succeeds", fdatasync(fd) == 0);
+	CHECK("sync_file_range succeeds", sync_file_range(fd, 0, 3, 0) == 0);
+
+	close(fd);
+	unlink("/test_sync_syscalls");
+}
+
+/*  Test N: mmap basic round-trip.
+ *
+ *  Postgres' dyn-shm pattern: open → ftruncate → mmap → use.  This
+ *  exercises imfs's lazy Reg→RegMapped promotion (first mmap call
+ *  triggers the drain), and verifies that bytes written via the
+ *  mapping are subsequently readable via read(fd).
+ */
+
+static void test_mmap_basic(void) {
+	printf("\n[test_mmap_basic]\n");
+
+	const size_t SZ = 4096;
+	int fd = open("/mmap_basic", O_CREAT | O_RDWR, 0644);
+	CHECK("open /mmap_basic", fd >= 0);
+	if (fd < 0) return;
+
+	int rc = ftruncate(fd, SZ);
+	CHECK("ftruncate to 4096", rc == 0);
+
+	void *addr =
+	    mmap(NULL, SZ, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	CHECK("mmap returns non-MAP_FAILED", addr != MAP_FAILED);
+	if (addr == MAP_FAILED) { close(fd); return; }
+
+	/* Write a pattern through the mapping. */
+	memcpy(addr, "hello mmap world", 16);
+	((char *)addr)[100] = 'Z';
+
+	/* Read back via the fd — should see the writes. */
+	char buf[128] = {0};
+	off_t pos = lseek(fd, 0, SEEK_SET);
+	CHECK("lseek back to 0", pos == 0);
+	ssize_t nr = read(fd, buf, sizeof(buf));
+	CHECK("read returns >= 101 bytes", nr >= 101);
+	CHECK("read sees mapping write at offset 0",
+	      memcmp(buf, "hello mmap world", 16) == 0);
+	CHECK("read sees mapping write at offset 100", buf[100] == 'Z');
+
+	rc = munmap(addr, SZ);
+	CHECK("munmap returns 0", rc == 0);
+
+	close(fd);
+	unlink("/mmap_basic");
+}
+
+/*  Test N+1: ftruncate shrink zeros the tail bytes.
+ *
+ *  Verifies the shrink-zeroing behavior we added to truncate_node:
+ *  bytes past the new EOF must read as zeros (Linux SIGBUSes
+ *  instead, but we degrade to zeros for graceful behavior).
+ */
+
+static void test_mmap_truncate_shrink_zeros(void) {
+	printf("\n[test_mmap_truncate_shrink_zeros]\n");
+
+	const size_t SZ = 4096;
+	int fd = open("/mmap_shrink", O_CREAT | O_RDWR, 0644);
+	CHECK("open /mmap_shrink", fd >= 0);
+	if (fd < 0) return;
+	if (ftruncate(fd, SZ) != 0) { close(fd); return; }
+
+	void *addr =
+	    mmap(NULL, SZ, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	CHECK("mmap returns non-MAP_FAILED", addr != MAP_FAILED);
+	if (addr == MAP_FAILED) { close(fd); return; }
+
+	/* Fill the whole region with 0xAB. */
+	memset(addr, 0xAB, SZ);
+
+	/* Shrink to 1024 bytes — bytes [1024, 4096) should be zeroed. */
+	int rc = ftruncate(fd, 1024);
+	CHECK("ftruncate shrink to 1024", rc == 0);
+
+	int tail_zeroed = 1;
+	for (size_t i = 1024; i < SZ; i++) {
+		if (((unsigned char *)addr)[i] != 0) {
+			tail_zeroed = 0;
+			break;
+		}
+	}
+	CHECK("bytes past new EOF are zeroed via mapping", tail_zeroed);
+
+	/* Head bytes [0, 1024) should still hold the 0xAB pattern. */
+	int head_intact = 1;
+	for (size_t i = 0; i < 1024; i++) {
+		if (((unsigned char *)addr)[i] != 0xAB) {
+			head_intact = 0;
+			break;
+		}
+	}
+	CHECK("bytes before new EOF are unchanged", head_intact);
+
+	munmap(addr, SZ);
+	close(fd);
+	unlink("/mmap_shrink");
+}
+
+/*  Test N+2: mmap shared across fork.
+ *
+ *  Parent maps the file with MAP_SHARED, then forks.  Child writes
+ *  through the mapping, parent reads after waitpid and should see
+ *  the child's writes.  This is the cross-cage MAP_SHARED semantic
+ *  the imfs design relies on for postgres' dyn-shm.
+ */
+
+static void test_mmap_shared_fork(void) {
+	printf("\n[test_mmap_shared_fork]\n");
+
+	const size_t SZ = 4096;
+	int fd = open("/mmap_shared", O_CREAT | O_RDWR, 0644);
+	CHECK("open /mmap_shared", fd >= 0);
+	if (fd < 0) return;
+	if (ftruncate(fd, SZ) != 0) { close(fd); return; }
+
+	void *addr =
+	    mmap(NULL, SZ, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	CHECK("parent mmap", addr != MAP_FAILED);
+	if (addr == MAP_FAILED) { close(fd); return; }
+
+	memcpy(addr, "PARENT WROTE   ", 16);
+
+	pid_t pid = fork();
+	if (pid == 0) {
+		/* Child sees the parent's bytes through the same
+		 * MAP_SHARED region, then overwrites. */
+		if (memcmp(addr, "PARENT WROTE   ", 16) != 0) {
+			_exit(2);
+		}
+		memcpy(addr, "CHILD WROTE    ", 16);
+		_exit(0);
+	}
+
+	int status = 0;
+	waitpid(pid, &status, 0);
+	CHECK("child saw parent's writes", WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	CHECK("parent sees child's writes via shared mapping",
+	      memcmp(addr, "CHILD WROTE    ", 16) == 0);
+
+	munmap(addr, SZ);
+	close(fd);
+	unlink("/mmap_shared");
+}
+
+/*  Test N+3: munmap drops the mmap_refs counter.
+ *
+ *  Indirect check via a follow-up ftruncate grow: after the cage
+ *  has mmap'd then munmap'd, ftruncate should be allowed to grow
+ *  the region (which would fail with EBUSY if mmap_refs were still
+ *  positive).
+ */
+
+static void test_mmap_refcount_release(void) {
+	printf("\n[test_mmap_refcount_release]\n");
+
+	int fd = open("/mmap_refs", O_CREAT | O_RDWR, 0644);
+	CHECK("open /mmap_refs", fd >= 0);
+	if (fd < 0) return;
+	if (ftruncate(fd, 4096) != 0) { close(fd); return; }
+
+	void *addr =
+	    mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	CHECK("mmap succeeds", addr != MAP_FAILED);
+	if (addr == MAP_FAILED) { close(fd); return; }
+
+	int rc = munmap(addr, 4096);
+	CHECK("munmap succeeds", rc == 0);
+
+	/* After munmap, mmap_refs should be back to 0, so a grow is
+	 * allowed.  If we leaked the refcount, this fails. */
+	rc = ftruncate(fd, 16384);
+	CHECK("ftruncate grow after munmap succeeds", rc == 0);
+
+	close(fd);
+	unlink("/mmap_refs");
+}
+
+/*  Test N+4: fd I/O outside a live mmap.
+ *
+ *  PostgreSQL can keep a small mapping live while later fd reads/writes
+ *  touch byte ranges outside that mapping. IMFS must mirror only the
+ *  overlapping part of a live mmap; it must not treat the mapping as if
+ *  it covers the whole file.
+ */
+
+static void test_mmap_fd_io_outside_live_mapping(void) {
+	printf("\n[test_mmap_fd_io_outside_live_mapping]\n");
+
+	const size_t MAP_SZ = 4096;
+	const size_t FILE_SZ = 65536;
+	const off_t OUTSIDE_OFF = 32768;
+	char write_buf[8192];
+	char read_buf[8192];
+
+	memset(write_buf, 'Q', sizeof(write_buf));
+	memset(read_buf, 0, sizeof(read_buf));
+
+	int fd = open("/mmap_outside_live", O_CREAT | O_RDWR, 0644);
+	CHECK("open /mmap_outside_live", fd >= 0);
+	if (fd < 0) return;
+
+	CHECK("ftruncate large file", ftruncate(fd, FILE_SZ) == 0);
+
+	void *addr =
+	    mmap(NULL, MAP_SZ, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	CHECK("mmap small live range", addr != MAP_FAILED);
+	if (addr == MAP_FAILED) { close(fd); return; }
+
+	memcpy(addr, "live mapping", 12);
+
+	ssize_t nw = pwrite(fd, write_buf, sizeof(write_buf), OUTSIDE_OFF);
+	CHECK("pwrite outside live mmap range", nw == (ssize_t)sizeof(write_buf));
+
+	ssize_t nr = pread(fd, read_buf, sizeof(read_buf), OUTSIDE_OFF);
+	CHECK("pread outside live mmap range", nr == (ssize_t)sizeof(read_buf));
+	CHECK("pread sees outside fd write",
+	      memcmp(read_buf, write_buf, sizeof(write_buf)) == 0);
+	CHECK("live mapping remains valid",
+	      memcmp(addr, "live mapping", 12) == 0);
+
+	CHECK("munmap outside-live test", munmap(addr, MAP_SZ) == 0);
+	close(fd);
+	unlink("/mmap_outside_live");
+}
+
+/*  Test N+5: unlink and close while mmap is still live.
+ *
+ *  A doomed mapped file must not be reclaimed until the final munmap
+ *  releases mmap_refs. This mirrors postgres DSM cleanup paths where
+ *  descriptors and names can disappear before the mapping itself.
+ */
+
+static void test_mmap_unlink_close_while_live(void) {
+	printf("\n[test_mmap_unlink_close_while_live]\n");
+
+	const size_t MAP_SZ = 4096;
+
+	int fd = open("/mmap_unlink_live", O_CREAT | O_RDWR, 0644);
+	CHECK("open /mmap_unlink_live", fd >= 0);
+	if (fd < 0) return;
+
+	CHECK("ftruncate unlink-live file", ftruncate(fd, MAP_SZ) == 0);
+
+	void *addr =
+	    mmap(NULL, MAP_SZ, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	CHECK("mmap unlink-live file", addr != MAP_FAILED);
+	if (addr == MAP_FAILED) { close(fd); unlink("/mmap_unlink_live"); return; }
+
+	memcpy(addr, "mapped after unlink", 19);
+
+	CHECK("unlink while mmap is live", unlink("/mmap_unlink_live") == 0);
+	CHECK("close while mmap is live", close(fd) == 0);
+	CHECK("live mapping remains readable after unlink and close",
+	      memcmp(addr, "mapped after unlink", 19) == 0);
+	CHECK("munmap after unlink and close", munmap(addr, MAP_SZ) == 0);
+}
+
 /*  Main  */
 
 int main(void) {
@@ -569,6 +843,13 @@ int main(void) {
 	test_at_metadata_syscalls();
 	test_lseek();
 	test_statfs();
+	test_sync_syscalls();
+	test_mmap_basic();
+	test_mmap_truncate_shrink_zeros();
+	test_mmap_shared_fork();
+	test_mmap_refcount_release();
+	test_mmap_fd_io_outside_live_mapping();
+	test_mmap_unlink_close_while_live();
 
 	printf("\n=== results: %d/%d passed ===\n", tests_passed, tests_run);
 	return (tests_passed == tests_run) ? 0 : 1;

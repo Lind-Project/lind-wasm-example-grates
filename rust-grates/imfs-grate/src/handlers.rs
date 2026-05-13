@@ -1597,6 +1597,24 @@ pub extern "C" fn fsync_handler(
     0
 }
 
+pub extern "C" fn sync_file_range_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    _arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    imfs::with_imfs(|state| state.sync_file_range(arg1cage, arg1))
+}
+
 pub extern "C" fn utimensat_handler(
     _cageid: u64,
     arg1: u64,
@@ -1626,6 +1644,215 @@ pub extern "C" fn utimensat_handler(
     };
 
     imfs::with_imfs(|state| state.utimensat(arg4cage, arg1 as i32, pathname.as_deref()))
+}
+
+// =====================================================================
+//  mmap (syscall 9)
+//
+//  arg1 = addr, arg2 = len, arg3 = prot, arg4 = flags,
+//  arg5 = fd, arg6 = offset.
+//
+//  Only RegMapped imfs files are handled here.  Anonymous mappings
+//  (fd == -1 or MAP_ANONYMOUS in flags) and mappings of non-RegMapped
+//  fds are forwarded straight to RawPOSIX — imfs has nothing useful
+//  to add for those.
+// =====================================================================
+
+pub extern "C" fn mmap_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64, // addr (pointer — cage tag may be a transient grate)
+    arg2: u64,
+    arg2cage: u64, // len
+    arg3: u64,
+    arg3cage: u64, // prot
+    arg4: u64,
+    arg4cage: u64, // flags
+    arg5: u64,
+    arg5cage: u64, // fd (integer — reliable for cage_id)
+    arg6: u64,
+    arg6cage: u64, // offset
+) -> i32 {
+    // Use an integer-arg's cage tag, not arg1's: arg1 is a pointer
+    // (addr hint), so its cage tag may have been rewritten by a
+    // transient grate.  arg5 (fd) is an integer; its cage tag is
+    // the original caller.  See open_handler's note on this.
+    let cage_id = arg5cage;
+
+    let ret = imfs::with_imfs(|state| {
+        state.mmap(
+            cage_id,
+            arg1,
+            arg2 as usize,
+            arg3 as i32,
+            arg4 as i32,
+            arg5,
+            arg6,
+        )
+    });
+
+    // imfs::mmap returns -ENOSYS when the request isn't ours to
+    // handle (anonymous, or a non-RegMapped fd) — forward to
+    // RawPOSIX in that case so the cage sees normal mmap semantics.
+    if ret == -(grate_rs::constants::error::ENOSYS as i32) {
+        let thiscage = getcageid();
+        return match make_threei_call(
+            SYS_MMAP as u32,
+            0,
+            thiscage,
+            cage_id,
+            arg1,
+            arg1cage,
+            arg2,
+            arg2cage,
+            arg3,
+            arg3cage,
+            arg4,
+            arg4cage,
+            arg5,
+            arg5cage,
+            arg6,
+            arg6cage,
+            0,
+        ) {
+            Ok(v) => v,
+            Err(grate_rs::GrateError::MakeSyscallError(n)) => n,
+            Err(_) => -(grate_rs::constants::error::ENOMEM as i32),
+        };
+    }
+
+    ret
+}
+
+// =====================================================================
+//  munmap (syscall 11)
+//
+//  arg1 = addr, arg2 = len.
+//
+//  Always forwards to RawPOSIX (so the cage's vmmap entry is torn
+//  down properly).  If the address corresponds to a live imfs
+//  RegMapped mapping, also decrements that node's mmap_refs counter
+//  so the region can be grown / freed later.
+// =====================================================================
+
+pub extern "C" fn munmap_handler(
+    _cageid: u64,
+    arg1: u64,
+    _arg1cage: u64, // addr (pointer — cage tag unreliable)
+    arg2: u64,
+    arg2cage: u64, // len (integer — reliable)
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    imfs::with_imfs(|state| state.munmap(arg2cage, arg1, arg2 as usize))
+}
+
+// =====================================================================
+//  exit / exit_group (syscalls 60 / 231)
+//
+//  A cage exiting without explicit `munmap`s would otherwise leave
+//  its RegMapped mappings tracked, pinning the underlying node's
+//  mmap_refs counter and blocking future grows.  We hook the exit
+//  path to drop those references before forwarding to RawPOSIX.
+//
+//  We also drop the cage from fdtables and clean up its cwd / fd
+//  bookkeeping in imfs.
+// =====================================================================
+
+pub extern "C" fn exit_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let cage_id = arg1cage;
+    imfs::with_imfs(|s| s.cage_exit(cage_id));
+    let _ = fdtables::remove_cage_from_fdtable(cage_id);
+
+    let thiscage = getcageid();
+    match make_threei_call(
+        SYS_EXIT as u32,
+        0,
+        thiscage,
+        cage_id,
+        arg1,
+        arg1cage,
+        arg2,
+        arg2cage,
+        arg3,
+        arg3cage,
+        arg4,
+        arg4cage,
+        arg5,
+        arg5cage,
+        arg6,
+        arg6cage,
+        0,
+    ) {
+        Ok(v) => v,
+        Err(grate_rs::GrateError::MakeSyscallError(n)) => n,
+        Err(_) => -1,
+    }
+}
+
+pub extern "C" fn exit_group_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let cage_id = arg1cage;
+    imfs::with_imfs(|s| s.cage_exit(cage_id));
+    let _ = fdtables::remove_cage_from_fdtable(cage_id);
+
+    let thiscage = getcageid();
+    match make_threei_call(
+        SYS_EXIT_GROUP as u32,
+        0,
+        thiscage,
+        cage_id,
+        arg1,
+        arg1cage,
+        arg2,
+        arg2cage,
+        arg3,
+        arg3cage,
+        arg4,
+        arg4cage,
+        arg5,
+        arg5cage,
+        arg6,
+        arg6cage,
+        0,
+    ) {
+        Ok(v) => v,
+        Err(grate_rs::GrateError::MakeSyscallError(n)) => n,
+        Err(_) => -1,
+    }
 }
 
 // =====================================================================

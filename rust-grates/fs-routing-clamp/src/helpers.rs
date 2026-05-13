@@ -334,6 +334,8 @@ pub fn remove_cage_state(cage_id: u64) {
     if let Some(cwds) = s.cwd_by_cage.as_mut() {
         cwds.remove(&cage_id);
     }
+
+    clamped_mmaps().lock().unwrap().remove(&cage_id);
 }
 
 // =====================================================================
