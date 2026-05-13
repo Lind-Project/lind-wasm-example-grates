@@ -29,7 +29,7 @@ macro_rules! tee_handler {
                 arg1cage,
                 &mut [arg1, arg2, arg3, arg4, arg5, arg6],
                 &[arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
-                1,
+                0,
             )
         }
     };
