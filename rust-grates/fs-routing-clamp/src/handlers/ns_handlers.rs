@@ -184,6 +184,12 @@ macro_rules! fd_route_handler {
             let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
                 Ok(entry) => entry,
                 Err(_) => {
+                    if $sysno == SYS_READ {
+                        eprintln!(
+                            "[popen-trace|fsrouting ns_read] cage={} fd={} translate=EBADF",
+                            arg1cage, arg1
+                        );
+                    }
                     // println!(
                     //     "[ns_handlers|{}] cageid={} fd={} invalid virtual fd, ret=EBADF",
                     //     stringify!($name),
@@ -195,6 +201,12 @@ macro_rules! fd_route_handler {
             };
 
             let perfdinfo = old_fd_entry.perfdinfo != 0;
+            if $sysno == SYS_READ {
+                eprintln!(
+                    "[popen-trace|fsrouting ns_read] cage={} fd={} underfd={} perfdinfo={}",
+                    arg1cage, arg1, old_fd_entry.underfd, old_fd_entry.perfdinfo
+                );
+            }
 
             args[0] = old_fd_entry.underfd; // replace virtual fd with underfd for the syscall
             
@@ -205,6 +217,12 @@ macro_rules! fd_route_handler {
                     // Clamp entry grate has a handler for this call, invoke that.
                     Some(alt) => {
                         let ret = helpers::do_syscall(arg1cage, alt, &args, &arg_cages);
+                        if $sysno == SYS_READ {
+                            eprintln!(
+                                "[popen-trace|fsrouting ns_read] cage={} fd={} routed=alt({}) ret={}",
+                                arg1cage, arg1, alt, ret
+                            );
+                        }
                         // println!(
                         //     "[ns_handlers|{}] cageid={} fd={} underfd={} clamped=clamped grate routed_to=clamped grate ret={}",
                         //     stringify!($name),
@@ -219,6 +237,12 @@ macro_rules! fd_route_handler {
                     // selfcage_id=entrycage
                     None => {
                         let ret = helpers::do_clamp_syscall(arg1cage, $sysno, &args, &arg_cages);
+                        if $sysno == SYS_READ {
+                            eprintln!(
+                                "[popen-trace|fsrouting ns_read] cage={} fd={} routed=clamp-default ret={}",
+                                arg1cage, arg1, ret
+                            );
+                        }
                         // println!(
                         //     "[ns_handlers|{}] cageid={} fd={} underfd={} clamped=clamped grate routed_to=kernel ret={}",
                         //     stringify!($name),
@@ -233,6 +257,12 @@ macro_rules! fd_route_handler {
             }
 
             let ret = helpers::do_syscall(arg1cage, $sysno, &args, &arg_cages);
+            if $sysno == SYS_READ {
+                eprintln!(
+                    "[popen-trace|fsrouting ns_read] cage={} fd={} routed=kernel ret={}",
+                    arg1cage, arg1, ret
+                );
+            }
 
             // println!(
             //     "[ns_handlers|{}] cageid={} fd={} underfd={} clamped={} routed_to={} ret={}",
