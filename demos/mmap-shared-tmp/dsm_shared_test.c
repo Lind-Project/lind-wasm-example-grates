@@ -34,6 +34,7 @@
 #include <unistd.h>
 
 #define SEG_PATH    "/tmp/dsm_segment"
+#define BASIC_PATH  "/tmp/mmap_basic"
 #define SEG_SIZE    4096
 #define OFF_PARENT  0
 #define OFF_CHILD_A 1024
@@ -50,6 +51,37 @@ static int tests_passed = 0;
     if (expr) { printf("  PASS: %s\n", name); tests_passed++; } \
     else { printf("  FAIL: %s (errno=%d %s)\n", name, errno, strerror(errno)); } \
 } while (0)
+
+static int basic_mmap_round_trip(void) {
+    int fd = open(BASIC_PATH, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    CHECK("basic: create " BASIC_PATH, fd >= 0);
+    if (fd < 0) return -1;
+
+    CHECK("basic: ftruncate to one page", ftruncate(fd, SEG_SIZE) == 0);
+
+    void *addr = mmap(NULL, SEG_SIZE, PROT_READ | PROT_WRITE,
+                      MAP_SHARED, fd, 0);
+    CHECK("basic: mmap MAP_SHARED", addr != MAP_FAILED);
+    if (addr == MAP_FAILED) {
+        close(fd);
+        return -1;
+    }
+
+    memcpy(addr, "hello mmap world", 16);
+    ((char *)addr)[100] = 'Z';
+
+    char buf[128] = {0};
+    CHECK("basic: lseek back to start", lseek(fd, 0, SEEK_SET) == 0);
+    ssize_t nr = read(fd, buf, sizeof(buf));
+    CHECK("basic: read sees mmap writes", nr >= 101 &&
+          memcmp(buf, "hello mmap world", 16) == 0 &&
+          buf[100] == 'Z');
+
+    CHECK("basic: munmap", munmap(addr, SEG_SIZE) == 0);
+    close(fd);
+    unlink(BASIC_PATH);
+    return 0;
+}
 
 /* Child body: open the segment by name, mmap it independently of the
  * inherited mapping, write the marker at the given offset, exit. */
@@ -71,6 +103,8 @@ int main(void) {
     printf("=== DSM shared-mmap demo (parent + 2 children) ===\n");
 
     mkdir("/tmp", 0755);
+
+    basic_mmap_round_trip();
 
     /* 1. Parent creates the segment. */
     int fd = open(SEG_PATH, O_CREAT | O_RDWR | O_TRUNC, 0644);
