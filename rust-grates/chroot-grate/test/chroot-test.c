@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -34,6 +35,19 @@ static int total = 0;
         if (expr) PASS(x); else FAIL(x); \
     } while (0)
 
+#define CHECK_CHILD_EXIT(x, status) \
+    do { \
+        total++; \
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) { \
+            PASS(x); \
+        } else { \
+            printf("FAIL: %s (raw_status=%d exit_status=%d signal=%d)\n", \
+                   x, status, WIFEXITED(status) ? WEXITSTATUS(status) : -1, \
+                   WIFSIGNALED(status) ? WTERMSIG(status) : -1); \
+            failures++; \
+        } \
+    } while (0)
+
 static void mkaddr(struct sockaddr_un *un, const char *p) {
     memset(un, 0, sizeof(*un));
     un->sun_family = AF_UNIX;
@@ -43,9 +57,10 @@ static void mkaddr(struct sockaddr_un *un, const char *p) {
 int main(int argc, char *argv[]) {
     char cwd[PATH_MAX];
 
-    char *seed = "CHROOT_TEST";
+    char seed[64];
+    snprintf(seed, sizeof(seed), "CHROOT_TEST_%ld", (long)getpid());
     if (argc > 1) {
-        strcpy(seed, argv[1]);
+        snprintf(seed, sizeof(seed), "%s", argv[1]);
     }
 
     // ---- basic paths ----
@@ -97,11 +112,67 @@ int main(int argc, char *argv[]) {
     // ---- truncate ----
     CHECK("truncate: shrink file to 1 byte", truncate(a, 1) == 0);
 
+    // ---- /dev/fd aliases ----
+    int source_fd = open(a, O_RDONLY);
+    CHECK("open: source fd for /dev/fd alias", source_fd >= 0);
+    if (source_fd >= 0) {
+        char fd_path[64];
+        char fd_buf[2] = {0};
+        snprintf(fd_path, sizeof(fd_path), "/dev/fd/%d", source_fd);
+        int alias_fd = open(fd_path, O_RDONLY);
+        CHECK("open: /dev/fd/N duplicates readable fd", alias_fd >= 0);
+        if (alias_fd >= 0) {
+            CHECK("read: /dev/fd/N alias reads original file", read(alias_fd, fd_buf, 1) == 1 && fd_buf[0] == 'h');
+            close(alias_fd);
+        }
+
+        snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", source_fd);
+        alias_fd = openat(AT_FDCWD, fd_path, O_RDONLY);
+        CHECK("openat: /proc/self/fd/N duplicates readable fd", alias_fd >= 0);
+        if (alias_fd >= 0) {
+            lseek(alias_fd, 0, SEEK_SET);
+            memset(fd_buf, 0, sizeof(fd_buf));
+            CHECK("read: /proc/self/fd/N alias reads original file", read(alias_fd, fd_buf, 1) == 1 && fd_buf[0] == 'h');
+            close(alias_fd);
+        }
+        close(source_fd);
+    }
+
     // ---- link ----
     CHECK("link: create hard link", link(a, b) == 0);
 
     // ---- rename ----
     CHECK("rename: rename hard link", rename(b, c) == 0);
+
+    char out[64];
+    char orig[72];
+    snprintf(out, sizeof(out), "out.E-%s", seed);
+    snprintf(orig, sizeof(orig), "%s.orig", out);
+    int outfd = open(out, O_CREAT | O_RDWR, 0644);
+    CHECK("open: create file for rename-open-unlink sequence", outfd >= 0);
+    if (outfd >= 0) {
+        CHECK("write: populate rename-open-unlink file", write(outfd, "x", 1) == 1);
+        close(outfd);
+        CHECK("rename: move output aside before normalization", rename(out, orig) == 0);
+        int origfd = open(orig, O_RDONLY);
+        CHECK("open: read renamed output file", origfd >= 0);
+        CHECK("unlink: remove renamed output while open", unlink(orig) == 0);
+        if (origfd >= 0) close(origfd);
+    }
+
+    snprintf(out, sizeof(out), "out-at.E-%s", seed);
+    snprintf(orig, sizeof(orig), "%s.orig", out);
+    outfd = open(out, O_CREAT | O_RDWR, 0644);
+    CHECK("open: create file for rename-open-unlinkat sequence", outfd >= 0);
+    if (outfd >= 0) {
+        CHECK("write: populate rename-open-unlinkat file", write(outfd, "x", 1) == 1);
+        close(outfd);
+        CHECK("rename: move output aside before unlinkat normalization", rename(out, orig) == 0);
+        int origfd = open(orig, O_RDONLY);
+        CHECK("open: read renamed output file before unlinkat", origfd >= 0);
+        CHECK("unlinkat: remove renamed output while open", unlinkat(AT_FDCWD, orig, 0) == 0);
+        if (origfd >= 0) close(origfd);
+    }
 
     // ---- symlink ----
     CHECK("symlink: create dangling relative symlink", symlink(missing, sym) == 0);
@@ -130,6 +201,12 @@ int main(int argc, char *argv[]) {
 
     // ---- unlink ----
     CHECK("unlink: remove original file", unlink(a) == 0);
+    errno = 0;
+    CHECK("unlink: empty path stays empty and fails with ENOENT",
+          unlink("") == -1 && errno == ENOENT);
+    errno = 0;
+    CHECK("unlinkat: empty path stays empty and fails with ENOENT",
+          unlinkat(AT_FDCWD, "", 0) == -1 && errno == ENOENT);
 
     // ---- unlinkat ----
     int dfd = open(".", O_DIRECTORY);
@@ -155,6 +232,96 @@ int main(int argc, char *argv[]) {
 
         close(dfd);
     }
+
+    // ---- fchdir / fd inheritance ----
+    char fd_dir_name[64];
+    snprintf(fd_dir_name, sizeof(fd_dir_name), "fd-dir-%ld", (long)getpid());
+    CHECK("mkdir: create fchdir target directory", mkdir(fd_dir_name, 0755) == 0 || errno == EEXIST);
+    int saved_cwd = open(".", O_RDONLY);
+    int dir_for_fchdir = open(fd_dir_name, O_RDONLY);
+    CHECK("open: save current directory fd", saved_cwd >= 0);
+    CHECK("open: open fchdir target directory", dir_for_fchdir >= 0);
+
+    if (saved_cwd >= 0 && dir_for_fchdir >= 0) {
+        char fd_file_path[128];
+        char fd_dup_path[128];
+        char fd_fcntl_path[128];
+        char fd_child_path[128];
+        const char *fd_file = "from-fchdir";
+        const char *fd_dup_file = "from-dup-fchdir";
+        const char *fd_fcntl_file = "from-fcntl-fchdir";
+        const char *fd_child_file = "from-fork-fchdir";
+
+        snprintf(fd_file_path, sizeof(fd_file_path), "%s/%s", fd_dir_name, fd_file);
+        snprintf(fd_dup_path, sizeof(fd_dup_path), "%s/%s", fd_dir_name, fd_dup_file);
+        snprintf(fd_fcntl_path, sizeof(fd_fcntl_path), "%s/%s", fd_dir_name, fd_fcntl_file);
+        snprintf(fd_child_path, sizeof(fd_child_path), "%s/%s", fd_dir_name, fd_child_file);
+
+        CHECK("fchdir: move cwd using directory fd", fchdir(dir_for_fchdir) == 0);
+        int ffd = open(fd_file, O_CREAT | O_RDWR, 0644);
+        CHECK("open: relative create after fchdir", ffd >= 0);
+        if (ffd >= 0) close(ffd);
+        CHECK("fchdir: restore saved cwd", fchdir(saved_cwd) == 0);
+        CHECK("access: file created under fchdir directory", access(fd_file_path, F_OK) == 0);
+
+        int dup_dir = dup(dir_for_fchdir);
+        CHECK("dup: duplicate tracked directory fd", dup_dir >= 0);
+        if (dup_dir >= 0) {
+            CHECK("fchdir: duplicated directory fd works", fchdir(dup_dir) == 0);
+            int dfd2 = open(fd_dup_file, O_CREAT | O_RDWR, 0644);
+            CHECK("open: relative create after dup fchdir", dfd2 >= 0);
+            if (dfd2 >= 0) close(dfd2);
+            CHECK("fchdir: restore after dup fchdir", fchdir(saved_cwd) == 0);
+            CHECK("access: dup fchdir file created in directory", access(fd_dup_path, F_OK) == 0);
+            close(dup_dir);
+            errno = 0;
+            CHECK("fchdir: closed dup fd fails", fchdir(dup_dir) == -1 && errno == EBADF);
+        }
+
+        int fcntl_dir = fcntl(dir_for_fchdir, F_DUPFD, 50);
+        CHECK("fcntl: F_DUPFD duplicates tracked directory fd", fcntl_dir >= 50);
+        if (fcntl_dir >= 0) {
+            CHECK("fchdir: fcntl-duplicated directory fd works", fchdir(fcntl_dir) == 0);
+            int ffd2 = open(fd_fcntl_file, O_CREAT | O_RDWR, 0644);
+            CHECK("open: relative create after fcntl fchdir", ffd2 >= 0);
+            if (ffd2 >= 0) close(ffd2);
+            CHECK("fchdir: restore after fcntl fchdir", fchdir(saved_cwd) == 0);
+            CHECK("access: fcntl fchdir file created in directory", access(fd_fcntl_path, F_OK) == 0);
+            close(fcntl_dir);
+        }
+
+        unlink(fd_child_path);
+        pid_t fpid = fork();
+        if (fpid == 0) {
+            if (fchdir(dir_for_fchdir) != 0) _exit(2);
+            int child_fd = open(fd_child_file, O_CREAT | O_RDWR, 0644);
+            if (child_fd < 0) _exit(3);
+            if (write(child_fd, "c", 1) != 1) _exit(4);
+            if (close(child_fd) != 0) _exit(5);
+            _exit(0);
+        } else if (fpid > 0) {
+            int fstatus;
+            CHECK("waitpid: collect fchdir child", waitpid(fpid, &fstatus, 0) == fpid);
+            CHECK_CHILD_EXIT("fork: child inherits fchdir directory fd", fstatus);
+            int verify_fd = open(fd_child_path, O_RDONLY);
+            CHECK("open: fork fchdir file created in directory", verify_fd >= 0);
+            if (verify_fd >= 0) {
+                char marker = '\0';
+                CHECK("read: fork fchdir child wrote marker", read(verify_fd, &marker, 1) == 1 && marker == 'c');
+                close(verify_fd);
+            }
+        } else {
+            FAIL("fork: fchdir inheritance fork failed");
+        }
+
+        unlink(fd_file_path);
+        unlink(fd_dup_path);
+        unlink(fd_fcntl_path);
+        unlink(fd_child_path);
+    }
+    if (dir_for_fchdir >= 0) close(dir_for_fchdir);
+    if (saved_cwd >= 0) close(saved_cwd);
+    rmdir(fd_dir_name);
 
     // ---- statfs ----
     struct statfs sfs;

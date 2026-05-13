@@ -109,8 +109,7 @@ type = "rust"
 
 [[grate.tests]]
 test_src = "test/chroot-test.c"
-grate_args = ["--chroot-dir", "/tmp"]
-lindfs_dir = "tmp"
+grate_args = ["--chroot-dir", "/"]
 
 # ── Resource (Rust) ─────────────────────────────────────────────────
 
