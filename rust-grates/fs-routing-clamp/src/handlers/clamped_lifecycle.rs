@@ -1,6 +1,6 @@
 use grate_rs::{
     SyscallHandler, constants::*, copy_data_between_cages, getcageid, is_thread_clone,
-    register_handler, register_default_fd_handlers_except,
+    register_default_fd_handlers_except, register_handler,
 };
 
 use fdtables;
@@ -10,7 +10,6 @@ use crate::helpers::{self, FS_CALLS};
 use crate::log;
 
 use std::collections::HashSet;
-use std::slice;
 
 // =====================================================================
 //  1. LIFECYCLE HANDLERS
@@ -100,7 +99,7 @@ pub fn register_target_handlers(target_cage: u64) -> i32 {
             // ... Add to routing table.
             let _ = helpers::set_route(target_cage, fs_syscall, alt_nr);
         }
-        
+
         // The visible handler on the target cage always points at ns-grate.
         match register_handler(target_cage, fs_syscall, ns_cage, ns_handler.unwrap()) {
             Ok(_) => {}
@@ -209,9 +208,9 @@ pub extern "C" fn exec_handler(
             // unsafe {
             //     let bytes = slice::from_raw_parts(ptr, 8);
             //     let s = str::from_utf8(bytes).expect("invalid UTF-8");
-                
+
             // }
-            
+
             // println!("[ns-grate] execing real binary: path={}, ret={}", path, ret);
             return ret;
         } else {

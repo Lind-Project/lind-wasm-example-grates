@@ -1,8 +1,8 @@
 use crate::helpers;
-use grate_rs::{SyscallHandler, constants::*, copy_data_between_cages, getcageid, is_thread_clone};
-use grate_rs::constants::fs::{F_DUPFD, F_DUPFD_CLOEXEC, FD_CLOEXEC, O_CLOEXEC, F_SETFD};
+use grate_rs::constants::error::{EBADF, EINVAL, EMFILE};
+use grate_rs::constants::fs::{F_DUPFD, F_DUPFD_CLOEXEC, F_SETFD, FD_CLOEXEC, O_CLOEXEC};
 use grate_rs::constants::mman::MAP_ANON;
-use grate_rs::constants::error::{EBADF, EMFILE, EINVAL};
+use grate_rs::{SyscallHandler, constants::*, copy_data_between_cages, getcageid, is_thread_clone};
 // =====================================================================
 //  PATH-BASED SYSCALL HANDLERS
 //
@@ -197,9 +197,8 @@ macro_rules! fd_route_handler {
             let perfdinfo = old_fd_entry.perfdinfo != 0;
 
             args[0] = old_fd_entry.underfd; // replace virtual fd with underfd for the syscall
-            
+
             if perfdinfo {
-                
                 // Clamped path.
                 match helpers::get_route(arg1cage, $sysno) {
                     // Clamp entry grate has a handler for this call, invoke that.
@@ -247,7 +246,7 @@ macro_rules! fd_route_handler {
             //     },
             //     ret,
             // );
-            
+
             ret
         }
     };
@@ -320,11 +319,10 @@ pub extern "C" fn ns_open_handler(
     if ret >= 0 {
         let clamped = if matches { 1u64 } else { 0 };
         match fdtables::get_unused_virtual_fd(
-            arg1cage,
-            0,          // fdkind (unused)
+            arg1cage, 0,          // fdkind (unused)
             ret as u64, // underfd = same (identity mapping)
-            false, // should_cloexec
-            clamped, // perfdinfo: 1=clamped, 0=not
+            false,      // should_cloexec
+            clamped,    // perfdinfo: 1=clamped, 0=not
         ) {
             Ok(vfd) => {
                 // println!("[ns_handlers|open] cageid={} path={} underfd={} clamped={} virtualfd={}",
@@ -413,17 +411,17 @@ pub extern "C" fn ns_close_handler(
 /// For MAP_ANONYMOUS / MAP_ANON, fd is ignored and should not trigger fd-based routing.
 pub extern "C" fn ns_mmap_handler(
     _cageid: u64,
-    arg1: u64,      // addr
+    arg1: u64, // addr
     arg1cage: u64,
-    arg2: u64,      // length
+    arg2: u64, // length
     arg2cage: u64,
-    arg3: u64,      // prot
+    arg3: u64, // prot
     arg3cage: u64,
-    arg4: u64,      // flags
+    arg4: u64, // flags
     arg4cage: u64,
-    arg5: u64,      // fd
+    arg5: u64, // fd
     arg5cage: u64,
-    arg6: u64,      // offset
+    arg6: u64, // offset
     arg6cage: u64,
 ) -> i32 {
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
@@ -447,7 +445,7 @@ pub extern "C" fn ns_mmap_handler(
         let perfdinfo = old_fd_entry.perfdinfo;
 
         args[4] = old_fd_entry.underfd; // replace virtual fd with underfd for the syscall
-        
+
         if perfdinfo != 0 {
             let ret = match helpers::get_route(arg1cage, SYS_MMAP) {
                 Some(alt) => helpers::do_syscall(arg1cage, alt, &args, &arg_cages),
@@ -476,9 +474,9 @@ pub extern "C" fn ns_mmap_handler(
 /// clamped mmap. This lets clamped grates such as imfs decrement mmap_refs.
 pub extern "C" fn ns_munmap_handler(
     _cageid: u64,
-    arg1: u64,      // addr
+    arg1: u64, // addr
     arg1cage: u64,
-    arg2: u64,      // length
+    arg2: u64, // length
     arg2cage: u64,
     arg3: u64,
     arg3cage: u64,
@@ -566,12 +564,7 @@ pub extern "C" fn ns_fcntl_handler(
             let cloexec = cmd == F_DUPFD_CLOEXEC as u64;
 
             match fdtables::get_unused_virtual_fd_from_startfd(
-                arg1cage,
-                0,
-                ret as u64,
-                cloexec,
-                perfdinfo,
-                arg3, // startfd
+                arg1cage, 0, ret as u64, cloexec, perfdinfo, arg3, // startfd
             ) {
                 Ok(vfd) => {
                     // println!(
@@ -607,13 +600,13 @@ pub extern "C" fn ns_fcntl_handler(
 // potential bug: may escape the path isolation. can be handled by checking in the individual namespace grates
 pub extern "C" fn ns_fstatat_handler(
     _cageid: u64,
-    arg1: u64,      // dirfd
+    arg1: u64, // dirfd
     arg1cage: u64,
-    arg2: u64,      // pathname
+    arg2: u64, // pathname
     arg2cage: u64,
-    arg3: u64,      // statbuf
+    arg3: u64, // statbuf
     arg3cage: u64,
-    arg4: u64,      // flags
+    arg4: u64, // flags
     arg4cage: u64,
     arg5: u64,
     arg5cage: u64,
@@ -688,13 +681,13 @@ pub extern "C" fn ns_fstatat_handler(
 
 pub extern "C" fn ns_openat_handler(
     cageid: u64,
-    arg1: u64,      // dirfd
+    arg1: u64, // dirfd
     arg1cage: u64,
-    arg2: u64,      // pathname
+    arg2: u64, // pathname
     arg2cage: u64,
-    arg3: u64,      // flags
+    arg3: u64, // flags
     arg3cage: u64,
-    arg4: u64,      // mode
+    arg4: u64, // mode
     arg4cage: u64,
     arg5: u64,
     arg5cage: u64,
@@ -773,8 +766,7 @@ pub extern "C" fn ns_openat_handler(
         let clamped = if should_clamp { 1u64 } else { 0u64 };
 
         match fdtables::get_unused_virtual_fd(
-            arg1cage,
-            0,          // fdkind
+            arg1cage, 0,          // fdkind
             ret as u64, // underfd
             false,      // should_cloexec; openat O_CLOEXEC handling not tracked here
             clamped,    // perfdinfo
@@ -850,13 +842,7 @@ pub extern "C" fn ns_dup_handler(
     let new_underfd = ret as u64;
 
     // Allocate a fresh unused virtual fd for the new underfd.
-    match fdtables::get_unused_virtual_fd(
-        arg1cage,
-        0,
-        new_underfd,
-        false,
-        perfdinfo,
-    ) {
+    match fdtables::get_unused_virtual_fd(arg1cage, 0, new_underfd, false, perfdinfo) {
         Ok(new_virtual_fd) => {
             // println!(
             //     "[ns_handlers|dup] cageid={} old_fd={} underfd={} clamped={} new_underfd={} new_virtual_fd={}",
@@ -957,14 +943,7 @@ pub extern "C" fn ns_dup2_handler(
     let new_underfd = ret as u64;
 
     // Install the newly duplicated underfd at the requested guest virtual fd.
-    match fdtables::get_specific_virtual_fd(
-        arg1cage,
-        arg2,
-        0,
-        new_underfd,
-        false,
-        perfdinfo,
-    ) {
+    match fdtables::get_specific_virtual_fd(arg1cage, arg2, 0, new_underfd, false, perfdinfo) {
         Ok(_) => {
             // println!(
             //     "[ns_handlers|dup2] cageid={} old_fd={} underfd={} clamped={} new_underfd={} new_virtual_fd={}",
@@ -1083,14 +1062,7 @@ pub extern "C" fn ns_dup3_handler(
 
     // If O_CLOEXEC was requested, set FD_CLOEXEC on the newly duplicated underfd
     if cloexec {
-        let fcntl_args = [
-            new_underfd,
-            F_SETFD as u64,
-            FD_CLOEXEC as u64,
-            0,
-            0,
-            0,
-        ];
+        let fcntl_args = [new_underfd, F_SETFD as u64, FD_CLOEXEC as u64, 0, 0, 0];
         let fcntl_cages = [arg1cage; 6];
 
         let fcntl_ret = helpers::do_syscall(arg1cage, SYS_FCNTL, &fcntl_args, &fcntl_cages);
@@ -1116,14 +1088,7 @@ pub extern "C" fn ns_dup3_handler(
     }
 
     // Install the new underfd at the requested guest virtual fd.
-    match fdtables::get_specific_virtual_fd(
-        arg1cage,
-        arg2,
-        0,
-        new_underfd,
-        cloexec,
-        perfdinfo,
-    ) {
+    match fdtables::get_specific_virtual_fd(arg1cage, arg2, 0, new_underfd, cloexec, perfdinfo) {
         Ok(_) => {
             // println!(
             //     "[ns_handlers|dup3] cageid={} old_fd={} underfd={} clamped={} new_underfd={} new_virtual_fd={}",
