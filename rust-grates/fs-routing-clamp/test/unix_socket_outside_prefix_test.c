@@ -1,4 +1,6 @@
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -40,6 +42,8 @@ static void set_addr(struct sockaddr_un *addr) {
 static void child_client(void) {
     struct sockaddr_un addr;
     char buf[16] = {0};
+    int err = -1;
+    socklen_t err_len = sizeof(err);
 
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -47,20 +51,62 @@ static void child_client(void) {
         _exit(10);
     }
 
-    set_addr(&addr);
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        perror("child connect");
+    if (fcntl(fd, F_GETFD) < 0) {
+        perror("child fcntl F_GETFD");
         _exit(11);
+    }
+
+    int flags = fcntl(fd, F_GETFL);
+    if (flags < 0) {
+        perror("child fcntl F_GETFL");
+        _exit(12);
+    }
+
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        perror("child fcntl F_SETFL O_NONBLOCK");
+        _exit(13);
+    }
+
+    set_addr(&addr);
+    int connect_ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+    if (connect_ret < 0 && errno != EINPROGRESS) {
+        perror("child connect");
+        _exit(14);
+    }
+
+    struct pollfd pfd = {
+        .fd = fd,
+        .events = POLLOUT,
+        .revents = 0,
+    };
+    if (poll(&pfd, 1, 5000) != 1) {
+        perror("child poll connect");
+        _exit(15);
+    }
+    if (!(pfd.revents & POLLOUT)) {
+        fprintf(stderr, "child poll missing POLLOUT: revents=%d\n", pfd.revents);
+        _exit(16);
+    }
+
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &err_len) < 0 || err != 0) {
+        errno = err;
+        perror("child getsockopt SO_ERROR");
+        _exit(17);
+    }
+
+    if (fcntl(fd, F_SETFL, flags) < 0) {
+        perror("child fcntl restore flags");
+        _exit(18);
     }
 
     if (write(fd, "ping", 4) != 4) {
         perror("child write");
-        _exit(12);
+        _exit(19);
     }
 
     if (read(fd, buf, sizeof(buf)) != 4 || memcmp(buf, "pong", 4) != 0) {
         perror("child read");
-        _exit(13);
+        _exit(20);
     }
 
     close(fd);
@@ -69,6 +115,10 @@ static void child_client(void) {
 
 static void test_unix_socket_outside_prefix(void) {
     struct sockaddr_un addr;
+    struct sockaddr_un local_addr;
+    struct sockaddr_un peer_addr;
+    socklen_t local_len = sizeof(local_addr);
+    socklen_t peer_len = sizeof(peer_addr);
     char buf[16] = {0};
 
     printf("\n[test_unix_socket_outside_prefix]\n");
@@ -82,10 +132,15 @@ static void test_unix_socket_outside_prefix(void) {
     if (server < 0)
         return;
 
+    CHECK("server fcntl F_GETFD", fcntl(server, F_GETFD) >= 0);
+    CHECK("server fcntl F_GETFL", fcntl(server, F_GETFL) >= 0);
+
     set_addr(&addr);
     CHECK("bind unix socket outside routed prefix",
           bind(server, (struct sockaddr *)&addr, sizeof(addr)) == 0);
     CHECK("listen unix socket outside routed prefix", listen(server, 1) == 0);
+    CHECK("getsockname listening unix socket",
+          getsockname(server, (struct sockaddr *)&local_addr, &local_len) == 0);
 
     pid_t pid = fork();
     CHECK("fork client process", pid >= 0);
@@ -97,6 +152,10 @@ static void test_unix_socket_outside_prefix(void) {
     int accepted = accept(server, NULL, NULL);
     CHECK("accept unix socket outside routed prefix", accepted >= 0);
     if (accepted >= 0) {
+        CHECK("accepted fd fcntl F_GETFD", fcntl(accepted, F_GETFD) >= 0);
+        CHECK("accepted fd fcntl F_GETFL", fcntl(accepted, F_GETFL) >= 0);
+        CHECK("getpeername accepted unix socket",
+              getpeername(accepted, (struct sockaddr *)&peer_addr, &peer_len) == 0);
         CHECK("parent reads client payload", read(accepted, buf, sizeof(buf)) == 4);
         CHECK("client payload matches", memcmp(buf, "ping", 4) == 0);
         CHECK("parent writes response", write(accepted, "pong", 4) == 4);
