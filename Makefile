@@ -120,9 +120,9 @@ demos-run:
 # Test suite
 test:
 ifdef GRATE
-	@./test/run_tests.sh "$(GRATE)"; ret=$$?; $(MAKE) -s clean-lindfs; exit $$ret
+	@PROFILE="$(PROFILE)" ./test/run_tests.sh "$(GRATE)"; ret=$$?; $(MAKE) -s clean-lindfs; exit $$ret
 else
-	@./test/run_tests.sh; ret=$$?; $(MAKE) -s clean-lindfs; exit $$ret
+	@PROFILE="$(PROFILE)" ./test/run_tests.sh; ret=$$?; $(MAKE) -s clean-lindfs; exit $$ret
 endif
 
 list:

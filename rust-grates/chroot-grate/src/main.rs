@@ -3,10 +3,12 @@
 use grate_rs::constants::fs::S_IFDIR;
 use grate_rs::constants::lind::GRATE_MEMORY_FLAG;
 use grate_rs::constants::{
-    SYS_ACCEPT, SYS_ACCESS, SYS_BIND, SYS_CHDIR, SYS_CHMOD, SYS_CHROOT, SYS_CLONE, SYS_CONNECT,
-    SYS_EXECVE, SYS_FCHDIR, SYS_GETCWD, SYS_GETPEERNAME, SYS_GETSOCKNAME, SYS_LINK, SYS_MKDIR,
-    SYS_OPEN, SYS_READLINK, SYS_READLINKAT, SYS_RECVFROM, SYS_RENAME, SYS_RMDIR, SYS_SENDTO,
-    SYS_STATFS, SYS_TRUNCATE, SYS_UNLINK, SYS_UNLINKAT, SYS_XSTAT,
+    SYS_ACCEPT, SYS_ACCESS, SYS_BIND, SYS_CHDIR, SYS_CHMOD, SYS_CHOWN, SYS_CHROOT, SYS_CLONE,
+    SYS_CONNECT, SYS_EXECVE, SYS_FACCESSAT, SYS_FCHDIR, SYS_FCHMODAT, SYS_FCHOWNAT, SYS_GETCWD,
+    SYS_GETPEERNAME, SYS_GETSOCKNAME, SYS_LCHOWN, SYS_LINK, SYS_LISTXATTR, SYS_MKDIR,
+    SYS_NEWFSTATAT, SYS_OPEN, SYS_READLINK, SYS_READLINKAT, SYS_RECVFROM, SYS_RENAME, SYS_RENAMEAT,
+    SYS_RENAMEAT2, SYS_RMDIR, SYS_SENDTO, SYS_SETXATTR, SYS_STATFS, SYS_STATX, SYS_SYMLINK,
+    SYS_SYMLINKAT, SYS_TRUNCATE, SYS_UNLINK, SYS_UNLINKAT, SYS_UTIMENSAT, SYS_XSTAT,
 };
 use grate_rs::ffi::stat;
 use grate_rs::{GrateBuilder, GrateError, copy_data_between_cages, getcageid, make_threei_call};
@@ -15,9 +17,9 @@ use std::ffi::CString;
 use std::ffi::c_char;
 use std::sync::Mutex;
 
+mod logging;
 mod paths;
 mod sockets;
-mod logging;
 
 use crate::paths::{
     chroot_path, get_cage_cwd, init_cwd, normalize_path, read_path_from_cage, register_cage,
@@ -144,6 +146,101 @@ fn write_bytes_to_cage(
     }
 }
 
+const AT_FDCWD: i64 = -100;
+
+fn make_syscall_from_grate(
+    syscall_no: u32,
+    target_cageid: u64,
+    args: [u64; 6],
+    arg_cages: [u64; 6],
+) -> i32 {
+    let thiscage = getcageid();
+    match make_threei_call(
+        syscall_no,
+        0,
+        thiscage,
+        target_cageid,
+        args[0],
+        arg_cages[0],
+        args[1],
+        arg_cages[1],
+        args[2],
+        arg_cages[2],
+        args[3],
+        arg_cages[3],
+        args[4],
+        arg_cages[4],
+        args[5],
+        arg_cages[5],
+        0,
+    ) {
+        Ok(r) => r,
+        Err(GrateError::MakeSyscallError(n)) => n,
+        Err(_) => -1,
+    }
+}
+
+fn rewrite_at_path(
+    cageid: u64,
+    dirfd: u64,
+    path_ptr: u64,
+    path_cage: u64,
+) -> Result<(u64, CString), i32> {
+    let path = match read_path_from_cage(path_ptr, path_cage) {
+        Some(p) => p,
+        None => return Err(-(libc::EFAULT as i32)),
+    };
+
+    let (rewritten_dirfd, rewritten_path) = if path.starts_with('/') || dirfd as i64 == AT_FDCWD {
+        (AT_FDCWD as u64, chroot_path(&path, cageid))
+    } else {
+        (dirfd, path)
+    };
+
+    match CString::new(rewritten_path) {
+        Ok(path) => Ok((rewritten_dirfd, path)),
+        Err(_) => Err(-(libc::EINVAL as i32)),
+    }
+}
+
+fn call_with_at_path(
+    syscall_no: u32,
+    cageid: u64,
+    target_cageid: u64,
+    mut args: [u64; 6],
+    mut arg_cages: [u64; 6],
+    dirfd_idx: usize,
+    path_idx: usize,
+) -> i32 {
+    let thiscage = getcageid();
+    let (dirfd, c_path) =
+        match rewrite_at_path(cageid, args[dirfd_idx], args[path_idx], arg_cages[path_idx]) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+
+    args[dirfd_idx] = dirfd;
+    args[path_idx] = c_path.as_ptr() as u64;
+    arg_cages[path_idx] = thiscage | GRATE_MEMORY_FLAG;
+
+    make_syscall_from_grate(syscall_no, target_cageid, args, arg_cages)
+}
+
+fn rewrite_symlink_target(cageid: u64, target_ptr: u64, target_cage: u64) -> Result<CString, i32> {
+    let target = match read_path_from_cage(target_ptr, target_cage) {
+        Some(p) => p,
+        None => return Err(-(libc::EFAULT as i32)),
+    };
+
+    let rewritten = if target.starts_with('/') {
+        chroot_path(&target, cageid)
+    } else {
+        target
+    };
+
+    CString::new(rewritten).map_err(|_| -(libc::EINVAL as i32))
+}
+
 // -----------------------------------------------------------------------------
 // Macro-generated handler declarations
 // -----------------------------------------------------------------------------
@@ -159,7 +256,11 @@ input_path_handler!(mkdir_handler, SYS_MKDIR, 0);
 input_path_handler!(rmdir_handler, SYS_RMDIR, 0);
 input_path_handler!(unlink_handler, SYS_UNLINK, 0);
 input_path_handler!(chmod_handler, SYS_CHMOD, 0);
+input_path_handler!(chown_handler, SYS_CHOWN, 0);
+input_path_handler!(lchown_handler, SYS_LCHOWN, 0);
 input_path_handler!(truncate_handler, SYS_TRUNCATE, 0);
+input_path_handler!(setxattr_handler, SYS_SETXATTR, 0);
+input_path_handler!(listxattr_handler, SYS_LISTXATTR, 0);
 
 // Two-path syscalls: chroot both path arguments.
 input_path_handler!(rename_handler, SYS_RENAME, 0, 1);
@@ -405,6 +506,408 @@ extern "C" fn unlinkat_handler(
         Err(GrateError::MakeSyscallError(n)) => n,
         Err(_) => -1,
     }
+}
+
+extern "C" fn symlink_handler(
+    cageid: u64,
+    target_ptr: u64,
+    target_cage: u64,
+    linkpath_ptr: u64,
+    linkpath_cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let thiscage = getcageid();
+
+    let target = match rewrite_symlink_target(cageid, target_ptr, target_cage) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let linkpath = match read_path_from_cage(linkpath_ptr, linkpath_cage) {
+        Some(p) => p,
+        None => return -(libc::EFAULT as i32),
+    };
+    let linkpath = match CString::new(chroot_path(&linkpath, cageid)) {
+        Ok(v) => v,
+        Err(_) => return -(libc::EINVAL as i32),
+    };
+
+    make_syscall_from_grate(
+        SYS_SYMLINK as u32,
+        target_cage,
+        [
+            target.as_ptr() as u64,
+            linkpath.as_ptr() as u64,
+            arg3,
+            arg4,
+            arg5,
+            arg6,
+        ],
+        [
+            thiscage | GRATE_MEMORY_FLAG,
+            thiscage | GRATE_MEMORY_FLAG,
+            arg3cage,
+            arg4cage,
+            arg5cage,
+            arg6cage,
+        ],
+    )
+}
+
+extern "C" fn symlinkat_handler(
+    cageid: u64,
+    target_ptr: u64,
+    target_cage: u64,
+    dirfd: u64,
+    dirfd_cage: u64,
+    linkpath_ptr: u64,
+    linkpath_cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let thiscage = getcageid();
+
+    let target = match rewrite_symlink_target(cageid, target_ptr, target_cage) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let (rewritten_dirfd, linkpath) =
+        match rewrite_at_path(cageid, dirfd, linkpath_ptr, linkpath_cage) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+
+    make_syscall_from_grate(
+        SYS_SYMLINKAT as u32,
+        dirfd_cage,
+        [
+            target.as_ptr() as u64,
+            rewritten_dirfd,
+            linkpath.as_ptr() as u64,
+            arg4,
+            arg5,
+            arg6,
+        ],
+        [
+            thiscage | GRATE_MEMORY_FLAG,
+            dirfd_cage,
+            thiscage | GRATE_MEMORY_FLAG,
+            arg4cage,
+            arg5cage,
+            arg6cage,
+        ],
+    )
+}
+
+extern "C" fn faccessat_handler(
+    cageid: u64,
+    dirfd: u64,
+    dirfd_cage: u64,
+    path_ptr: u64,
+    path_cage: u64,
+    mode: u64,
+    mode_cage: u64,
+    flags: u64,
+    flags_cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    call_with_at_path(
+        SYS_FACCESSAT as u32,
+        cageid,
+        dirfd_cage,
+        [dirfd, path_ptr, mode, flags, arg5, arg6],
+        [
+            dirfd_cage, path_cage, mode_cage, flags_cage, arg5cage, arg6cage,
+        ],
+        0,
+        1,
+    )
+}
+
+extern "C" fn fchmodat_handler(
+    cageid: u64,
+    dirfd: u64,
+    dirfd_cage: u64,
+    path_ptr: u64,
+    path_cage: u64,
+    mode: u64,
+    mode_cage: u64,
+    flags: u64,
+    flags_cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    call_with_at_path(
+        SYS_FCHMODAT as u32,
+        cageid,
+        dirfd_cage,
+        [dirfd, path_ptr, mode, flags, arg5, arg6],
+        [
+            dirfd_cage, path_cage, mode_cage, flags_cage, arg5cage, arg6cage,
+        ],
+        0,
+        1,
+    )
+}
+
+extern "C" fn fchownat_handler(
+    cageid: u64,
+    dirfd: u64,
+    dirfd_cage: u64,
+    path_ptr: u64,
+    path_cage: u64,
+    owner: u64,
+    owner_cage: u64,
+    group: u64,
+    group_cage: u64,
+    flags: u64,
+    flags_cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    call_with_at_path(
+        SYS_FCHOWNAT as u32,
+        cageid,
+        dirfd_cage,
+        [dirfd, path_ptr, owner, group, flags, arg6],
+        [
+            dirfd_cage, path_cage, owner_cage, group_cage, flags_cage, arg6cage,
+        ],
+        0,
+        1,
+    )
+}
+
+extern "C" fn fstatat_handler(
+    cageid: u64,
+    dirfd: u64,
+    dirfd_cage: u64,
+    path_ptr: u64,
+    path_cage: u64,
+    statbuf: u64,
+    statbuf_cage: u64,
+    flags: u64,
+    flags_cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    call_with_at_path(
+        SYS_NEWFSTATAT as u32,
+        cageid,
+        dirfd_cage,
+        [dirfd, path_ptr, statbuf, flags, arg5, arg6],
+        [
+            dirfd_cage,
+            path_cage,
+            statbuf_cage,
+            flags_cage,
+            arg5cage,
+            arg6cage,
+        ],
+        0,
+        1,
+    )
+}
+
+extern "C" fn statx_handler(
+    cageid: u64,
+    dirfd: u64,
+    dirfd_cage: u64,
+    path_ptr: u64,
+    path_cage: u64,
+    flags: u64,
+    flags_cage: u64,
+    mask: u64,
+    mask_cage: u64,
+    statxbuf: u64,
+    statxbuf_cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    call_with_at_path(
+        SYS_STATX as u32,
+        cageid,
+        dirfd_cage,
+        [dirfd, path_ptr, flags, mask, statxbuf, arg6],
+        [
+            dirfd_cage,
+            path_cage,
+            flags_cage,
+            mask_cage,
+            statxbuf_cage,
+            arg6cage,
+        ],
+        0,
+        1,
+    )
+}
+
+extern "C" fn utimensat_handler(
+    cageid: u64,
+    dirfd: u64,
+    dirfd_cage: u64,
+    path_ptr: u64,
+    path_cage: u64,
+    times: u64,
+    times_cage: u64,
+    flags: u64,
+    flags_cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let args = [dirfd, path_ptr, times, flags, arg5, arg6];
+    let arg_cages = [
+        dirfd_cage, path_cage, times_cage, flags_cage, arg5cage, arg6cage,
+    ];
+
+    if path_ptr == 0 {
+        return make_syscall_from_grate(SYS_UTIMENSAT as u32, dirfd_cage, args, arg_cages);
+    }
+
+    call_with_at_path(
+        SYS_UTIMENSAT as u32,
+        cageid,
+        dirfd_cage,
+        args,
+        arg_cages,
+        0,
+        1,
+    )
+}
+
+extern "C" fn renameat_handler(
+    cageid: u64,
+    olddirfd: u64,
+    olddirfd_cage: u64,
+    oldpath_ptr: u64,
+    oldpath_cage: u64,
+    newdirfd: u64,
+    newdirfd_cage: u64,
+    newpath_ptr: u64,
+    newpath_cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    renameat_common(
+        SYS_RENAMEAT as u32,
+        cageid,
+        olddirfd,
+        olddirfd_cage,
+        oldpath_ptr,
+        oldpath_cage,
+        newdirfd,
+        newdirfd_cage,
+        newpath_ptr,
+        newpath_cage,
+        arg5,
+        arg5cage,
+        arg6,
+        arg6cage,
+    )
+}
+
+extern "C" fn renameat2_handler(
+    cageid: u64,
+    olddirfd: u64,
+    olddirfd_cage: u64,
+    oldpath_ptr: u64,
+    oldpath_cage: u64,
+    newdirfd: u64,
+    newdirfd_cage: u64,
+    newpath_ptr: u64,
+    newpath_cage: u64,
+    flags: u64,
+    flags_cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    renameat_common(
+        SYS_RENAMEAT2 as u32,
+        cageid,
+        olddirfd,
+        olddirfd_cage,
+        oldpath_ptr,
+        oldpath_cage,
+        newdirfd,
+        newdirfd_cage,
+        newpath_ptr,
+        newpath_cage,
+        flags,
+        flags_cage,
+        arg6,
+        arg6cage,
+    )
+}
+
+fn renameat_common(
+    syscall_no: u32,
+    cageid: u64,
+    olddirfd: u64,
+    olddirfd_cage: u64,
+    oldpath_ptr: u64,
+    oldpath_cage: u64,
+    newdirfd: u64,
+    newdirfd_cage: u64,
+    newpath_ptr: u64,
+    newpath_cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let thiscage = getcageid();
+    let (rewritten_olddirfd, oldpath) =
+        match rewrite_at_path(cageid, olddirfd, oldpath_ptr, oldpath_cage) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+    let (rewritten_newdirfd, newpath) =
+        match rewrite_at_path(cageid, newdirfd, newpath_ptr, newpath_cage) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+
+    make_syscall_from_grate(
+        syscall_no,
+        olddirfd_cage,
+        [
+            rewritten_olddirfd,
+            oldpath.as_ptr() as u64,
+            rewritten_newdirfd,
+            newpath.as_ptr() as u64,
+            arg5,
+            arg6,
+        ],
+        [
+            olddirfd_cage,
+            thiscage | GRATE_MEMORY_FLAG,
+            newdirfd_cage,
+            thiscage | GRATE_MEMORY_FLAG,
+            arg5cage,
+            arg6cage,
+        ],
+    )
 }
 
 // -----------------------------------------------------------------------------
@@ -718,16 +1221,30 @@ fn main() {
         .register(SYS_OPEN, open_handler)
         .register(SYS_EXECVE, execve_handler)
         .register(SYS_XSTAT, stat_handler)
+        .register(SYS_NEWFSTATAT, fstatat_handler)
+        .register(SYS_STATX, statx_handler)
         .register(SYS_ACCESS, access_handler)
+        .register(SYS_FACCESSAT, faccessat_handler)
         .register(SYS_STATFS, statfs_handler)
         .register(SYS_MKDIR, mkdir_handler)
         .register(SYS_RMDIR, rmdir_handler)
         .register(SYS_UNLINK, unlink_handler)
         .register(SYS_UNLINKAT, unlinkat_handler)
         .register(SYS_RENAME, rename_handler)
+        .register(SYS_RENAMEAT, renameat_handler)
+        .register(SYS_RENAMEAT2, renameat2_handler)
         .register(SYS_LINK, link_handler)
+        .register(SYS_SYMLINK, symlink_handler)
+        .register(SYS_SYMLINKAT, symlinkat_handler)
         .register(SYS_CHMOD, chmod_handler)
+        .register(SYS_FCHMODAT, fchmodat_handler)
+        .register(SYS_CHOWN, chown_handler)
+        .register(SYS_LCHOWN, lchown_handler)
+        .register(SYS_FCHOWNAT, fchownat_handler)
         .register(SYS_TRUNCATE, truncate_handler)
+        .register(SYS_SETXATTR, setxattr_handler)
+        .register(SYS_LISTXATTR, listxattr_handler)
+        .register(SYS_UTIMENSAT, utimensat_handler)
         .register(SYS_CHDIR, chdir_handler)
         .register(SYS_FCHDIR, fchdir_handler)
         .register(SYS_GETCWD, getcwd_handler)

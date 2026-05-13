@@ -30,6 +30,9 @@ const MAP_FIXED: i32 = 0x10;
 
 /// fdtables fdkind for IMFS file descriptors.
 pub const IMFS_FDKIND: u32 = 1;
+const IMFS_F_GETFD: i32 = 1;
+const IMFS_F_SETFD: i32 = 2;
+const IMFS_FD_CLOEXEC: i32 = 1;
 
 /// Global IMFS state.
 pub static IMFS: Mutex<Option<ImfsState>> = Mutex::new(None);
@@ -48,8 +51,30 @@ pub struct FDInfo {
     offset: i64,
 }
 
+/// Lind-compatible statfs data layout.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct FsData {
+    pub f_type: u64,
+    pub f_bsize: u64,
+    pub f_blocks: u64,
+    pub f_bfree: u64,
+    pub f_bavail: u64,
+    pub f_files: u64,
+    pub f_ffiles: u64,
+    pub f_fsid: u64,
+    pub f_namelen: u64,
+    pub f_frsize: u64,
+    pub f_spare: [u8; 32],
+}
+
 const DIRENT64_FIXED_SIZE: usize = 8 + 8 + 2 + 1;
 const IMFS_BLOCK_SIZE: i32 = 512;
+const LIND_AT_FDCWD: i32 = -100;
+const IMFS_STATFS_MAGIC: u64 = 0x494d_4653; // "IMFS"
+const IMFS_STATFS_BLOCK_SIZE: u64 = 4096;
+const IMFS_STATFS_TOTAL_BLOCKS: u64 = 1024 * 1024;
+const IMFS_STATFS_NAME_MAX: u64 = 254;
 
 /// The complete IMFS state.
 pub struct ImfsState {
@@ -212,20 +237,75 @@ impl ImfsState {
 
     /// Mark a node slot as free and return it to the free list for reuse.
     fn reclaim_node(&mut self, idx: usize) {
-        // If this was a RegMapped node, release its host mapping
-        // before clobbering the variant — otherwise the SYS_MMAP'd
-        // pages leak.  free_mapped_backing is a no-op for any other
-        // variant.
-        if matches!(self.nodes[idx].info, NodeInfo::RegMapped { .. }) {
-            self.free_mapped_backing(idx);
-        }
-        // Plain Reg nodes' chunk chains should already have been
-        // reclaimed by the caller (truncate / unlink).  We don't
-        // walk the chain here; doing so could double-free.
+        let chunk_head = match &mut self.nodes[idx].info {
+            NodeInfo::Reg { head, tail } => {
+                let old_head = *head;
+                *head = None;
+                *tail = None;
+                old_head
+            }
+            NodeInfo::RegMapped { .. } => {
+                self.free_mapped_backing(idx);
+                None
+            }
+            _ => None,
+        };
+        self.reclaim_chunk_chain(chunk_head);
 
         self.nodes[idx].node_type = NodeType::Free;
         self.nodes[idx].info = NodeInfo::Free;
         self.node_free_list.push(idx);
+    }
+
+    fn link_count(&self, node_idx: usize) -> u32 {
+        match &self.nodes[node_idx].info {
+            NodeInfo::Dir { children } => {
+                let child_dirs = children
+                    .iter()
+                    .filter(|entry| entry.name != "." && entry.name != "..")
+                    .filter(|entry| self.nodes[entry.node_idx].node_type == NodeType::Dir)
+                    .count() as u32;
+                2 + child_dirs
+            }
+            _ => self
+                .nodes
+                .iter()
+                .filter_map(|node| match &node.info {
+                    NodeInfo::Dir { children } => Some(children),
+                    _ => None,
+                })
+                .flat_map(|children| children.iter())
+                .filter(|entry| {
+                    entry.node_idx == node_idx
+                        || matches!(
+                            &self.nodes[entry.node_idx].info,
+                            NodeInfo::Lnk { target } if *target == node_idx
+                        )
+                })
+                .count() as u32,
+        }
+    }
+
+    fn unlink_node(&mut self, node_idx: usize) {
+        if let NodeInfo::Lnk { target } = &self.nodes[node_idx].info {
+            let target = *target;
+            self.update_ctime(target);
+            if self.link_count(target) == 0 {
+                self.nodes[target].doomed = true;
+                if self.nodes[target].in_use == 0 {
+                    self.reclaim_node(target);
+                }
+            }
+            self.reclaim_node(node_idx);
+            return;
+        }
+
+        if self.link_count(node_idx) == 0 {
+            self.nodes[node_idx].doomed = true;
+            if self.nodes[node_idx].in_use == 0 {
+                self.reclaim_node(node_idx);
+            }
+        }
     }
 
     // =====================================================================
@@ -324,12 +404,18 @@ impl ImfsState {
             0,
             thiscage,
             thiscage,
-            0, 0,                                              // addr: NULL
-            new_cap as u64, 0,                                 // len
-            (PROT_READ | PROT_WRITE) as u64, 0,                // prot
-            (MAP_ANON | MAP_SHARED) as u64, 0,                 // flags
-            u64::MAX, 0,                                       // fd = -1
-            0, 0,                                              // offset
+            0,
+            0, // addr: NULL
+            new_cap as u64,
+            0, // len
+            (PROT_READ | PROT_WRITE) as u64,
+            0, // prot
+            (MAP_ANON | MAP_SHARED) as u64,
+            0, // flags
+            u64::MAX,
+            0, // fd = -1
+            0,
+            0, // offset
             0,
         );
         // mmap returns a wasm32 user-space address which can have bit
@@ -368,9 +454,18 @@ impl ImfsState {
                 0,
                 thiscage,
                 thiscage,
-                current_host, 0,
-                current_cap as u64, 0,
-                0, 0, 0, 0, 0, 0, 0, 0,
+                current_host,
+                0,
+                current_cap as u64,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
                 0,
             );
         }
@@ -422,12 +517,18 @@ impl ImfsState {
             0,
             thiscage,
             thiscage,
-            0, 0,
-            cap as u64, 0,
-            (PROT_READ | PROT_WRITE) as u64, 0,
-            (MAP_ANON | MAP_SHARED) as u64, 0,
-            u64::MAX, 0,
-            0, 0,
+            0,
+            0,
+            cap as u64,
+            0,
+            (PROT_READ | PROT_WRITE) as u64,
+            0,
+            (MAP_ANON | MAP_SHARED) as u64,
+            0,
+            u64::MAX,
+            0,
+            0,
+            0,
             0,
         );
         // See ensure_mapped_backing for why we accept large negative
@@ -447,11 +548,7 @@ impl ImfsState {
                 let dst = (host_addr as *mut u8).wrapping_add(dst_offset);
                 // SAFETY: dst_offset + used <= total_size <= cap.
                 unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        self.chunks[ci].data.as_ptr(),
-                        dst,
-                        used,
-                    );
+                    core::ptr::copy_nonoverlapping(self.chunks[ci].data.as_ptr(), dst, used);
                 }
                 dst_offset += used;
             }
@@ -507,9 +604,18 @@ impl ImfsState {
                 0,
                 thiscage,
                 thiscage,
-                host, 0,
-                cap as u64, 0,
-                0, 0, 0, 0, 0, 0, 0, 0,
+                host,
+                0,
+                cap as u64,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
                 0,
             );
         }
@@ -636,7 +742,7 @@ impl ImfsState {
             return Ok(self.normalize_path_for_cage(cage_id, path));
         }
 
-        if dirfd == libc::AT_FDCWD {
+        if dirfd == LIND_AT_FDCWD {
             return Ok(self.normalize_path_for_cage(cage_id, path));
         }
 
@@ -669,7 +775,7 @@ impl ImfsState {
             st_dev: 1,
             st_ino: node_idx as u64,
             st_mode: node.mode,
-            st_nlink: 1,
+            st_nlink: self.link_count(node_idx),
             st_uid: 0, //node.owner,
             st_gid: 0, //node.group,
             st_rdev: 0,
@@ -679,6 +785,28 @@ impl ImfsState {
             st_atim: node.atime.as_stat_pair(),
             st_mtim: node.mtime.as_stat_pair(),
             st_ctim: node.ctime.as_stat_pair(),
+        };
+    }
+
+    fn fill_statfs(&self, statbuf: &mut FsData) {
+        let used_bytes: u64 = self.nodes.iter().map(|node| node.total_size as u64).sum();
+        let used_blocks = used_bytes.div_ceil(IMFS_STATFS_BLOCK_SIZE);
+        let free_blocks = IMFS_STATFS_TOTAL_BLOCKS.saturating_sub(used_blocks);
+        let free_nodes =
+            (MAX_NODES.saturating_sub(self.nodes.len()) + self.node_free_list.len()) as u64;
+
+        *statbuf = FsData {
+            f_type: IMFS_STATFS_MAGIC,
+            f_bsize: IMFS_STATFS_BLOCK_SIZE,
+            f_blocks: IMFS_STATFS_TOTAL_BLOCKS,
+            f_bfree: free_blocks,
+            f_bavail: free_blocks,
+            f_files: MAX_NODES as u64,
+            f_ffiles: free_nodes,
+            f_fsid: 0,
+            f_namelen: IMFS_STATFS_NAME_MAX,
+            f_frsize: IMFS_STATFS_BLOCK_SIZE,
+            f_spare: [0; 32],
         };
     }
 
@@ -712,7 +840,7 @@ impl ImfsState {
             ) && (flags & O_TRUNC) != 0
                 && (flags & O_ACCMODE) != O_RDONLY
             {
-                self.nodes[idx].total_size = 0;
+                self.truncate_node(idx, 0);
                 self.update_mtime(idx);
                 self.update_ctime(idx);
             }
@@ -792,9 +920,12 @@ impl ImfsState {
         if let Some((owner_cage, owner_uaddr)) = self.find_active_mapping(node_idx) {
             let thiscage = getcageid();
             let _ = copy_data_between_cages(
-                thiscage, thiscage,
-                owner_uaddr + offset as u64, owner_cage,
-                buf.as_mut_ptr() as u64, thiscage,
+                thiscage,
+                thiscage,
+                owner_uaddr + offset as u64,
+                owner_cage,
+                buf.as_mut_ptr() as u64,
+                thiscage,
                 count as u64,
                 0,
             );
@@ -853,9 +984,12 @@ impl ImfsState {
             let end = offset + buf.len();
             let thiscage = getcageid();
             let _ = copy_data_between_cages(
-                thiscage, thiscage,
-                buf.as_ptr() as u64, thiscage,
-                owner_uaddr + offset as u64, owner_cage,
+                thiscage,
+                thiscage,
+                buf.as_ptr() as u64,
+                thiscage,
+                owner_uaddr + offset as u64,
+                owner_cage,
                 buf.len() as u64,
                 0,
             );
@@ -877,6 +1011,7 @@ impl ImfsState {
             if local_offset < CHUNK_SIZE {
                 break;
             }
+            self.chunks[ci].used = CHUNK_SIZE;
             local_offset -= CHUNK_SIZE;
             chunk_idx = self.chunks[ci].next;
         }
@@ -963,9 +1098,12 @@ impl ImfsState {
                 let zeros = vec![0u8; zero_len];
                 let thiscage = getcageid();
                 let _ = copy_data_between_cages(
-                    thiscage, thiscage,
-                    zeros.as_ptr() as u64, thiscage,
-                    owner_uaddr + new_size as u64, owner_cage,
+                    thiscage,
+                    thiscage,
+                    zeros.as_ptr() as u64,
+                    thiscage,
+                    owner_uaddr + new_size as u64,
+                    owner_cage,
                     zero_len as u64,
                     0,
                 );
@@ -1073,6 +1211,144 @@ impl ImfsState {
         );
     }
 
+    pub fn dup(&mut self, cage_id: u64, oldfd: u64) -> i32 {
+        let entry = match fdtables::translate_virtual_fd(cage_id, oldfd) {
+            Ok(entry) => entry,
+            Err(_) => return -9,
+        };
+
+        let fd_info = match self.fd_info.get(&(cage_id, oldfd)).cloned() {
+            Some(info) => info,
+            None => return -9,
+        };
+
+        let node_idx = entry.underfd as usize;
+        if node_idx >= self.nodes.len() {
+            return -9;
+        }
+
+        if let NodeInfo::Pip {
+            readers, writers, ..
+        } = &mut self.nodes[node_idx].info
+        {
+            let flags = fd_info.lock().unwrap().flags as i32;
+            match flags & O_ACCMODE {
+                O_WRONLY => *writers += 1,
+                _ => *readers += 1,
+            }
+        }
+
+        match fdtables::get_unused_virtual_fd(cage_id, IMFS_FDKIND, entry.underfd, false, 0) {
+            Ok(newfd) => {
+                self.nodes[node_idx].in_use += 1;
+                self.fd_info.insert((cage_id, newfd), fd_info);
+                newfd as i32
+            }
+            Err(_) => -24,
+        }
+    }
+
+    pub fn dup2(&mut self, cage_id: u64, oldfd: u64, newfd: u64, cloexec: bool) -> i32 {
+        let entry = match fdtables::translate_virtual_fd(cage_id, oldfd) {
+            Ok(entry) => entry,
+            Err(_) => return -9,
+        };
+
+        let fd_info = match self.fd_info.get(&(cage_id, oldfd)).cloned() {
+            Some(info) => info,
+            None => return -9,
+        };
+
+        if oldfd == newfd {
+            return newfd as i32;
+        }
+
+        let node_idx = entry.underfd as usize;
+        if node_idx >= self.nodes.len() {
+            return -9;
+        }
+
+        if fdtables::translate_virtual_fd(cage_id, newfd).is_ok() {
+            let close_ret = self.close(cage_id, newfd);
+            if close_ret != 0 {
+                return close_ret;
+            }
+        }
+
+        match fdtables::get_specific_virtual_fd(
+            cage_id,
+            newfd,
+            IMFS_FDKIND,
+            entry.underfd,
+            cloexec,
+            0,
+        ) {
+            Ok(_) => {
+                self.nodes[node_idx].in_use += 1;
+                if let NodeInfo::Pip {
+                    readers, writers, ..
+                } = &mut self.nodes[node_idx].info
+                {
+                    let flags = fd_info.lock().unwrap().flags as i32;
+                    match flags & O_ACCMODE {
+                        O_WRONLY => *writers += 1,
+                        _ => *readers += 1,
+                    }
+                }
+                self.fd_info.insert((cage_id, newfd), fd_info);
+                newfd as i32
+            }
+            Err(_) => -24,
+        }
+    }
+
+    fn dup_from_startfd(&mut self, cage_id: u64, oldfd: u64, startfd: i32, cloexec: bool) -> i32 {
+        if startfd < 0 {
+            return -22;
+        }
+
+        let entry = match fdtables::translate_virtual_fd(cage_id, oldfd) {
+            Ok(entry) => entry,
+            Err(_) => return -9,
+        };
+
+        let fd_info = match self.fd_info.get(&(cage_id, oldfd)).cloned() {
+            Some(info) => info,
+            None => return -9,
+        };
+
+        let node_idx = entry.underfd as usize;
+        if node_idx >= self.nodes.len() {
+            return -9;
+        }
+
+        match fdtables::get_unused_virtual_fd_from_startfd(
+            cage_id,
+            IMFS_FDKIND,
+            entry.underfd,
+            cloexec,
+            0,
+            startfd as u64,
+        ) {
+            Ok(newfd) => {
+                self.nodes[node_idx].in_use += 1;
+                if let NodeInfo::Pip {
+                    readers, writers, ..
+                } = &mut self.nodes[node_idx].info
+                {
+                    let flags = fd_info.lock().unwrap().flags as i32;
+                    match flags & O_ACCMODE {
+                        O_WRONLY => *writers += 1,
+                        _ => *readers += 1,
+                    }
+                }
+                self.fd_info.insert((cage_id, newfd), fd_info);
+                newfd as i32
+            }
+            Err(_) => -24,
+        }
+    }
+
     // =====================================================================
     //  Public filesystem operations
     //
@@ -1115,12 +1391,49 @@ impl ImfsState {
     /// chdir
     pub fn chdir(&mut self, cage_id: u64, path: &str) -> i32 {
         let norm_path = self.normalize_path_for_cage(cage_id, path);
-        if let Some(cwd) = self.cwd_info.get_mut(&cage_id) {
-            *cwd = norm_path.to_string();
-            0
-        } else {
-            -1
+        let node_idx = match self.resolve_path(&norm_path, true) {
+            Ok(idx) => idx,
+            Err(e) => return e,
+        };
+
+        if self.nodes[node_idx].node_type != NodeType::Dir {
+            return -20; // ENOTDIR
         }
+
+        self.cwd_info.insert(cage_id, norm_path);
+        0
+    }
+
+    /// fchdir: change current working directory using an open directory fd.
+    pub fn fchdir(&mut self, cage_id: u64, fd: u64) -> i32 {
+        let entry = match fdtables::translate_virtual_fd(cage_id, fd) {
+            Ok(entry) => entry,
+            Err(_) => return -9, // EBADF
+        };
+
+        let mut node_idx = entry.underfd as usize;
+
+        if node_idx >= self.nodes.len() {
+            return -9; // EBADF
+        }
+
+        // Follow link nodes until reaching the actual target.
+        while let NodeInfo::Lnk { target } = &self.nodes[node_idx].info {
+            node_idx = *target;
+
+            if node_idx >= self.nodes.len() {
+                return -9; // EBADF
+            }
+        }
+
+        if self.nodes[node_idx].node_type != NodeType::Dir {
+            return -20; // ENOTDIR
+        }
+
+        let cwd = self.absolute_path_for_node(node_idx);
+        self.cwd_info.insert(cage_id, cwd);
+
+        0
     }
 
     pub fn getcwd(&self, cage_id: u64) -> Result<String, i32> {
@@ -1129,6 +1442,18 @@ impl ImfsState {
 
     pub fn access(&mut self, cage_id: u64, path: &str, mode: i32) -> i32 {
         let norm_path = self.normalize_path_for_cage(cage_id, path);
+        self.access_resolved_path(&norm_path, mode)
+    }
+
+    pub fn accessat(&mut self, cage_id: u64, dirfd: i32, path: &str, mode: i32) -> i32 {
+        let norm_path = match self.normalize_path_at(cage_id, dirfd, path) {
+            Ok(path) => path,
+            Err(e) => return e,
+        };
+        self.access_resolved_path(&norm_path, mode)
+    }
+
+    fn access_resolved_path(&mut self, norm_path: &str, mode: i32) -> i32 {
         let node_idx = match self.resolve_path(&norm_path, true) {
             Ok(idx) => idx,
             Err(e) => return e,
@@ -1155,7 +1480,29 @@ impl ImfsState {
     /// xstat
     pub fn stat(&mut self, cage_id: u64, path: &str, statbuf: &mut stat) -> i32 {
         let norm_path = self.normalize_path_for_cage(cage_id, path);
+        self.stat_resolved_path(&norm_path, statbuf)
+    }
 
+    pub fn statfs(&mut self, cage_id: u64, path: &str, statbuf: &mut FsData) -> i32 {
+        let norm_path = self.normalize_path_for_cage(cage_id, path);
+        match self.resolve_path(&norm_path, true) {
+            Ok(_) => {
+                self.fill_statfs(statbuf);
+                0
+            }
+            Err(e) => e,
+        }
+    }
+
+    pub fn statat(&mut self, cage_id: u64, dirfd: i32, path: &str, statbuf: &mut stat) -> i32 {
+        let norm_path = match self.normalize_path_at(cage_id, dirfd, path) {
+            Ok(path) => path,
+            Err(e) => return e,
+        };
+        self.stat_resolved_path(&norm_path, statbuf)
+    }
+
+    fn stat_resolved_path(&mut self, norm_path: &str, statbuf: &mut stat) -> i32 {
         let node_idx = match self.resolve_path(&norm_path, true) {
             Ok(idx) => idx,
             Err(e) => return e,
@@ -1178,9 +1525,22 @@ impl ImfsState {
         0
     }
 
+    pub fn fstatfs(&mut self, cage_id: u64, fd: u64, statbuf: &mut FsData) -> i32 {
+        if let Err(e) = self.get_node_and_flags(cage_id, fd) {
+            return e;
+        }
+
+        self.fill_statfs(statbuf);
+        0
+    }
+
     /// rmdir: remove an empty directory.
     pub fn rmdir(&mut self, cage_id: u64, path: &str) -> i32 {
         let norm_path = self.normalize_path_for_cage(cage_id, path);
+        self.rmdir_resolved_path(&norm_path)
+    }
+
+    fn rmdir_resolved_path(&mut self, norm_path: &str) -> i32 {
         let node_idx = match self.resolve_path(&norm_path, true) {
             Ok(idx) => idx,
             Err(e) => return e,
@@ -1207,11 +1567,7 @@ impl ImfsState {
         self.update_mtime(parent_idx);
         self.update_ctime(parent_idx);
         self.update_ctime(node_idx);
-        self.nodes[node_idx].doomed = true;
-
-        if self.nodes[node_idx].in_use == 0 {
-            self.reclaim_node(node_idx);
-        }
+        self.unlink_node(node_idx);
 
         0
     }
@@ -1237,7 +1593,6 @@ impl ImfsState {
             let node_idx = entry.underfd as usize;
             if node_idx < self.nodes.len() {
                 self.nodes[node_idx].in_use = self.nodes[node_idx].in_use.saturating_sub(1);
-
                 if self.nodes[node_idx].doomed && self.nodes[node_idx].in_use == 0 {
                     self.reclaim_node(node_idx);
                 }
@@ -1262,8 +1617,6 @@ impl ImfsState {
             Err(e) => return e,
         };
 
-        // Return EBADF for reads on non regular files.
-        // TODO: Implement pipe reads.
         match &self.nodes[node_idx].info {
             NodeInfo::Reg { head: _, tail: _ } => {}
             _ => return -9,
@@ -1289,6 +1642,10 @@ impl ImfsState {
 
     /// pread: read at a specific offset without changing the fd offset.
     pub fn pread(&mut self, cage_id: u64, fd: u64, buf: &mut [u8], offset: i64) -> i32 {
+        if offset < 0 {
+            return -22; // EINVAL
+        }
+
         // Look up fd in fdtables — get node index and flags.
         let (node_idx, flags) = match self.get_node_and_flags(cage_id, fd) {
             Ok((n, f)) => (n, f),
@@ -1321,8 +1678,6 @@ impl ImfsState {
             Err(e) => return e,
         };
 
-        // Return EBADF for writes on non regular files.
-        // TODO: Implement pipe reads.
         match &self.nodes[node_idx].info {
             NodeInfo::Reg { head: _, tail: _ } => {}
             _ => return -9,
@@ -1351,6 +1706,10 @@ impl ImfsState {
 
     /// pwrite: write at a specific offset without changing the fd offset.
     pub fn pwrite(&mut self, cage_id: u64, fd: u64, buf: &[u8], offset: i64) -> i32 {
+        if offset < 0 {
+            return -22; // EINVAL
+        }
+
         // Look up fd in fdtables — get node index and flags.
         let (node_idx, flags) = match self.get_node_and_flags(cage_id, fd) {
             Ok((n, f)) => (n, f),
@@ -1402,16 +1761,39 @@ impl ImfsState {
             _ => return -22,
         };
 
+        if new_offset < 0 {
+            return -22;
+        }
+
         self.set_offset(cage_id, fd, new_offset);
 
         new_offset as i32
     }
 
     /// fcntl: only F_GETFL implemented — returns flags from fdtables perfdinfo.
-    pub fn fcntl(&self, cage_id: u64, fd: u64, op: i32, _arg: i32) -> i32 {
+    pub fn fcntl(&mut self, cage_id: u64, fd: u64, op: i32, arg: i32) -> i32 {
         match op {
+            F_DUPFD => self.dup_from_startfd(cage_id, fd, arg, false),
+            F_DUPFD_CLOEXEC => self.dup_from_startfd(cage_id, fd, arg, true),
+            IMFS_F_GETFD => match fdtables::translate_virtual_fd(cage_id, fd) {
+                Ok(entry) => {
+                    if entry.should_cloexec {
+                        IMFS_FD_CLOEXEC
+                    } else {
+                        0
+                    }
+                }
+                Err(_) => -9,
+            },
+            IMFS_F_SETFD => match fdtables::set_cloexec(cage_id, fd, arg & IMFS_FD_CLOEXEC != 0) {
+                Ok(_) => 0,
+                Err(_) => -9,
+            },
             F_GETFL => {
-                let fd_info = self.fd_info.get(&(cage_id, fd)).unwrap().lock().unwrap();
+                let Some(fd_info) = self.fd_info.get(&(cage_id, fd)) else {
+                    return -9;
+                };
+                let fd_info = fd_info.lock().unwrap();
 
                 fd_info.flags as i32
             }
@@ -1481,6 +1863,28 @@ impl ImfsState {
     /// unlink: remove a non-directory path entry.
     pub fn unlink(&mut self, cage_id: u64, path: &str) -> i32 {
         let norm_path = self.normalize_path_for_cage(cage_id, path);
+        self.unlink_resolved_path(&norm_path)
+    }
+
+    pub fn unlinkat(&mut self, cage_id: u64, dirfd: i32, path: &str, flags: i32) -> i32 {
+        let supported_flags = libc::AT_REMOVEDIR;
+        if flags & !supported_flags != 0 {
+            return -22; // EINVAL
+        }
+
+        let norm_path = match self.normalize_path_at(cage_id, dirfd, path) {
+            Ok(path) => path,
+            Err(e) => return e,
+        };
+
+        if flags & libc::AT_REMOVEDIR != 0 {
+            self.rmdir_resolved_path(&norm_path)
+        } else {
+            self.unlink_resolved_path(&norm_path)
+        }
+    }
+
+    fn unlink_resolved_path(&mut self, norm_path: &str) -> i32 {
         if norm_path == "/" {
             return -1; // EPERM
         }
@@ -1570,6 +1974,30 @@ impl ImfsState {
 
     pub fn rename(&mut self, cage_id: u64, oldpath: &str, newpath: &str) -> i32 {
         let norm_oldpath = self.normalize_path_for_cage(cage_id, oldpath);
+        let norm_newpath = self.normalize_path_for_cage(cage_id, newpath);
+        self.rename_resolved_paths(&norm_oldpath, &norm_newpath)
+    }
+
+    pub fn renameat(
+        &mut self,
+        cage_id: u64,
+        olddirfd: i32,
+        oldpath: &str,
+        newdirfd: i32,
+        newpath: &str,
+    ) -> i32 {
+        let norm_oldpath = match self.normalize_path_at(cage_id, olddirfd, oldpath) {
+            Ok(path) => path,
+            Err(e) => return e,
+        };
+        let norm_newpath = match self.normalize_path_at(cage_id, newdirfd, newpath) {
+            Ok(path) => path,
+            Err(e) => return e,
+        };
+        self.rename_resolved_paths(&norm_oldpath, &norm_newpath)
+    }
+
+    fn rename_resolved_paths(&mut self, norm_oldpath: &str, norm_newpath: &str) -> i32 {
         if norm_oldpath == "/" {
             return -1; // EPERM
         }
@@ -1587,7 +2015,6 @@ impl ImfsState {
             return -1; // EPERM
         }
 
-        let norm_newpath = self.normalize_path_for_cage(cage_id, newpath);
         if norm_newpath == "/" {
             return -1; // EPERM
         }
@@ -1606,7 +2033,7 @@ impl ImfsState {
         }
 
         if self.nodes[old_idx].node_type == NodeType::Dir
-            && norm_newpath.starts_with(&(norm_oldpath.clone() + "/"))
+            && norm_newpath.starts_with(&format!("{}/", norm_oldpath.trim_end_matches('/')))
         {
             return -22; // EINVAL
         }
@@ -1625,11 +2052,7 @@ impl ImfsState {
                 self.update_mtime(new_parent_idx);
                 self.update_ctime(new_parent_idx);
                 self.update_ctime(existing_idx);
-                self.nodes[existing_idx].doomed = true;
-
-                if self.nodes[existing_idx].in_use == 0 {
-                    self.reclaim_node(existing_idx);
-                }
+                self.unlink_node(existing_idx);
             }
             Err(-2) => {}
             Err(e) => return e,
@@ -1652,6 +2075,18 @@ impl ImfsState {
     /// chmod: update only permission bits and preserve the file type bits.
     pub fn chmod(&mut self, cage_id: u64, path: &str, mode: u32) -> i32 {
         let norm_path = self.normalize_path_for_cage(cage_id, path);
+        self.chmod_resolved_path(&norm_path, mode)
+    }
+
+    pub fn chmodat(&mut self, cage_id: u64, dirfd: i32, path: &str, mode: u32) -> i32 {
+        let norm_path = match self.normalize_path_at(cage_id, dirfd, path) {
+            Ok(path) => path,
+            Err(e) => return e,
+        };
+        self.chmod_resolved_path(&norm_path, mode)
+    }
+
+    fn chmod_resolved_path(&mut self, norm_path: &str, mode: u32) -> i32 {
         let node_idx = match self.resolve_path(&norm_path, true) {
             Ok(idx) => idx,
             Err(e) => return e,
@@ -1660,6 +2095,55 @@ impl ImfsState {
         self.nodes[node_idx].mode = (self.nodes[node_idx].mode & !0o777) | (mode & 0o777);
         self.update_ctime(node_idx);
 
+        0
+    }
+
+    pub fn chown(&mut self, cage_id: u64, path: &str) -> i32 {
+        let norm_path = self.normalize_path_for_cage(cage_id, path);
+        match self.resolve_path(&norm_path, true) {
+            Ok(_) => 0,
+            Err(e) => e,
+        }
+    }
+
+    pub fn chownat(&mut self, cage_id: u64, dirfd: i32, path: &str) -> i32 {
+        let norm_path = match self.normalize_path_at(cage_id, dirfd, path) {
+            Ok(path) => path,
+            Err(e) => return e,
+        };
+        match self.resolve_path(&norm_path, true) {
+            Ok(_) => 0,
+            Err(e) => e,
+        }
+    }
+
+    pub fn utimensat(&mut self, cage_id: u64, dirfd: i32, path: Option<&str>) -> i32 {
+        let node_idx = match path {
+            Some(path) => {
+                let norm_path = match self.normalize_path_at(cage_id, dirfd, path) {
+                    Ok(path) => path,
+                    Err(e) => return e,
+                };
+                match self.resolve_path(&norm_path, true) {
+                    Ok(idx) => idx,
+                    Err(e) => return e,
+                }
+            }
+            None => {
+                let Ok(entry) = fdtables::translate_virtual_fd(cage_id, dirfd as u64) else {
+                    return -9;
+                };
+                entry.underfd as usize
+            }
+        };
+
+        if node_idx >= self.nodes.len() {
+            return -9;
+        }
+
+        self.update_atime(node_idx);
+        self.update_mtime(node_idx);
+        self.update_ctime(node_idx);
         0
     }
 
@@ -1785,14 +2269,22 @@ impl ImfsState {
         let thiscage = getcageid();
         let cage_flags = MAP_ANON | MAP_SHARED;
         let ret = make_threei_call(
-            SYS_MMAP as u32, 0,
-            thiscage, cage_id,
-            0, 0,                                       // addr: NULL hint
-            len as u64, 0,
-            prot as u64, 0,
-            cage_flags as u64, 0,
-            u64::MAX, 0,                                // fd = -1
-            0, 0,                                       // offset = 0
+            SYS_MMAP as u32,
+            0,
+            thiscage,
+            cage_id,
+            0,
+            0, // addr: NULL hint
+            len as u64,
+            0,
+            prot as u64,
+            0,
+            cage_flags as u64,
+            0,
+            u64::MAX,
+            0, // fd = -1
+            0,
+            0, // offset = 0
             0,
         );
         // mmap returns wasm uaddrs which can have bit 31 set.  Real
@@ -1808,23 +2300,25 @@ impl ImfsState {
 
         // Seed the new region with the file's current bytes (chunks).
         let total_size = self.nodes[node_idx].total_size;
-        let copy_len = total_size
-            .saturating_sub(offset as usize)
-            .min(len);
+        let copy_len = total_size.saturating_sub(offset as usize).min(len);
         if copy_len > 0 {
             let mut tmp = vec![0u8; copy_len];
             let _ = self.read_chunks_unmapped(node_idx, offset as usize, &mut tmp);
             let _ = copy_data_between_cages(
-                thiscage, cage_id,
-                tmp.as_ptr() as u64, thiscage,
-                mapped, cage_id,
+                thiscage,
+                cage_id,
+                tmp.as_ptr() as u64,
+                thiscage,
+                mapped,
+                cage_id,
                 copy_len as u64,
                 0,
             );
         }
 
         // Record the mapping.  Routes future fd I/O through it.
-        self.mmap_tracking.insert((cage_id, mapped), (node_idx, len));
+        self.mmap_tracking
+            .insert((cage_id, mapped), (node_idx, len));
 
         mapped as i32
     }
@@ -1885,7 +2379,11 @@ impl ImfsState {
         self.mmap_tracking
             .iter()
             .find_map(|(&(cage, uaddr), &(nidx, _len))| {
-                if nidx == node_idx { Some((cage, uaddr)) } else { None }
+                if nidx == node_idx {
+                    Some((cage, uaddr))
+                } else {
+                    None
+                }
             })
     }
 
@@ -1933,9 +2431,18 @@ impl ImfsState {
             0,
             thiscage,
             cage_id,
-            addr, 0,
-            len as u64, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
+            addr,
+            0,
+            len as u64,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
             0,
         );
 
@@ -1958,9 +2465,12 @@ impl ImfsState {
         let thiscage = getcageid();
         let mut tmp = vec![0u8; copy_len];
         let _ = copy_data_between_cages(
-            thiscage, thiscage,
-            uaddr, cage,
-            tmp.as_mut_ptr() as u64, thiscage,
+            thiscage,
+            thiscage,
+            uaddr,
+            cage,
+            tmp.as_mut_ptr() as u64,
+            thiscage,
             copy_len as u64,
             0,
         );

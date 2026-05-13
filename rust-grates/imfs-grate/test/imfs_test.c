@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 /* imfs_test.c — Test binary for the Rust IMFS grate.
  *
  * This is a cage binary that exercises the IMFS through standard POSIX
@@ -10,6 +12,7 @@
  * Each test prints PASS/FAIL. Exit code 0 if all tests pass, 1 otherwise.
  */
 #include <sys/stat.h>
+#include <sys/statfs.h>
 #include <sys/wait.h>
 #include <sys/mman.h>
 #include <stdio.h>
@@ -61,6 +64,15 @@ static void test_basic_rw(void) {
 
 	int ret = close(fd);
 	CHECK("close succeeds", ret == 0);
+
+	fd = open("/test_basic", O_WRONLY | O_TRUNC);
+	CHECK("open /test_basic with O_TRUNC", fd >= 0);
+	if (fd >= 0) {
+		struct stat st;
+		CHECK("fstat after O_TRUNC", fstat(fd, &st) == 0);
+		CHECK("O_TRUNC sets size to 0", st.st_size == 0);
+		close(fd);
+	}
 }
 
 /*  Test 2: Open nonexistent file without O_CREAT  */
@@ -132,6 +144,9 @@ static void test_lseek(void) {
 	pos = lseek(fd, -3, SEEK_END);
 	CHECK("SEEK_END -3 = 7", pos == 7);
 
+	pos = lseek(fd, -20, SEEK_SET);
+	CHECK("negative SEEK_SET fails", pos == -1 && errno == EINVAL);
+
 	/* Read from position 7: should get "789". */
 	char buf[4] = {0};
 	ssize_t nr = read(fd, buf, 3);
@@ -171,6 +186,9 @@ static void test_pread_pwrite(void) {
 	pos = lseek(fd, 0, SEEK_CUR);
 	CHECK("fd offset unchanged after pread", pos == 10);
 
+	CHECK("pread negative offset fails", pread(fd, buf, 1, -1) == -1 && errno == EINVAL);
+	CHECK("pwrite negative offset fails", pwrite(fd, "Z", 1, -1) == -1 && errno == EINVAL);
+
 	close(fd);
 }
 
@@ -181,6 +199,20 @@ static void test_mkdir(void) {
 
 	int ret = mkdir("/mydir", 0755);
 	CHECK("mkdir /mydir", ret == 0);
+
+	struct stat st;
+	CHECK("stat /mydir after mkdir", stat("/mydir", &st) == 0);
+	CHECK("new directory link count is 2", st.st_nlink == 2);
+
+	ret = mkdir("/mydir/subdir", 0755);
+	CHECK("mkdir /mydir/subdir", ret == 0);
+	CHECK("stat /mydir after child mkdir", stat("/mydir", &st) == 0);
+	CHECK("parent directory link count includes child directory", st.st_nlink == 3);
+	CHECK("stat /mydir/subdir after mkdir", stat("/mydir/subdir", &st) == 0);
+	CHECK("child directory link count is 2", st.st_nlink == 2);
+	CHECK("rmdir /mydir/subdir", rmdir("/mydir/subdir") == 0);
+	CHECK("stat /mydir after child rmdir", stat("/mydir", &st) == 0);
+	CHECK("parent directory link count drops after rmdir", st.st_nlink == 2);
 
 	/* Create a file inside the directory. */
 	int fd = open("/mydir/file.txt", O_CREAT | O_WRONLY, 0644);
@@ -204,6 +236,9 @@ static void test_mkdir(void) {
 	/* mkdir on existing path should fail. */
 	ret = mkdir("/mydir", 0755);
 	CHECK("mkdir on existing dir fails", ret != 0);
+
+	CHECK("chdir nonexistent path fails", chdir("/missing_chdir_dir") != 0);
+	CHECK("chdir regular file fails", chdir("/mydir/file.txt") != 0);
 }
 
 /*  Test 7: unlink  */
@@ -242,6 +277,25 @@ static void test_fcntl(void) {
 
 	int flags = fcntl(fd, F_GETFL);
 	CHECK("fcntl F_GETFL returns O_RDWR", (flags & O_ACCMODE) == O_RDWR);
+
+	int fdflags = fcntl(fd, F_GETFD);
+	CHECK("fcntl F_GETFD starts clear", fdflags == 0);
+
+	CHECK("fcntl F_SETFD sets FD_CLOEXEC", fcntl(fd, F_SETFD, FD_CLOEXEC) == 0);
+	fdflags = fcntl(fd, F_GETFD);
+	CHECK("fcntl F_GETFD reports FD_CLOEXEC", (fdflags & FD_CLOEXEC) != 0);
+
+	CHECK("fcntl F_SETFD clears FD_CLOEXEC", fcntl(fd, F_SETFD, 0) == 0);
+	fdflags = fcntl(fd, F_GETFD);
+	CHECK("fcntl F_GETFD reports clear", fdflags == 0);
+
+	int dupfd = fcntl(fd, F_DUPFD, 20);
+	CHECK("fcntl F_DUPFD returns fd at least requested minimum", dupfd >= 20);
+	if (dupfd >= 0) {
+		CHECK("fcntl duplicated fd has same access mode",
+		      (fcntl(dupfd, F_GETFL) & O_ACCMODE) == O_RDWR);
+		close(dupfd);
+	}
 
 	close(fd);
 }
@@ -293,6 +347,34 @@ static void test_read_eof(void) {
 	char buf[16];
 	ssize_t nr = read(fd, buf, sizeof(buf));
 	CHECK("read past EOF returns 0", nr == 0);
+
+	close(fd);
+}
+
+static void test_sparse_write(void) {
+	printf("\n[test_sparse_write]\n");
+
+	int fd = open("/test_sparse", O_CREAT | O_RDWR, 0644);
+	CHECK("create /test_sparse", fd >= 0);
+	if (fd < 0)
+		return;
+
+	CHECK("seed sparse file", write(fd, "abc", 3) == 3);
+	CHECK("seek beyond multiple chunks", lseek(fd, 3000, SEEK_SET) == 3000);
+	CHECK("write after sparse seek", write(fd, "Z", 1) == 1);
+
+	struct stat st;
+	CHECK("fstat sparse file", fstat(fd, &st) == 0);
+	CHECK("sparse write extends size", st.st_size == 3001);
+
+	char buf[3001];
+	memset(buf, 'X', sizeof(buf));
+	CHECK("seek to start of sparse file", lseek(fd, 0, SEEK_SET) == 0);
+	CHECK("read full sparse file", read(fd, buf, sizeof(buf)) == 3001);
+	CHECK("prefix data preserved", memcmp(buf, "abc", 3) == 0);
+	CHECK("early sparse hole reads as zero", buf[3] == '\0');
+	CHECK("late sparse hole reads as zero", buf[2999] == '\0');
+	CHECK("sparse data byte preserved", buf[3000] == 'Z');
 
 	close(fd);
 }
@@ -353,7 +435,10 @@ static void test_link_rw(void) {
 	int ret = write(fd, buf, 6);
 	close(fd);
 
-	link("file1", "file2");
+	struct stat st;
+	CHECK("initial hard link count is 1", stat("file1", &st) == 0 && st.st_nlink == 1);
+	CHECK("link file1 to file2", link("file1", "file2") == 0);
+	CHECK("hard link count after link is 2", stat("file1", &st) == 0 && st.st_nlink == 2);
 
 	fd = open("file2", O_RDONLY, 0666);
 
@@ -374,8 +459,93 @@ static void test_link_rw(void) {
 
 	CHECK("Write linked file.", strcmp(buf, read_buf) == 0);
 
-	unlink("file1");
-	unlink("file2");
+	CHECK("unlink file1", unlink("file1") == 0);
+	CHECK("remaining hard link count is 1", stat("file2", &st) == 0 && st.st_nlink == 1);
+	CHECK("unlink file2", unlink("file2") == 0);
+}
+
+static void test_at_metadata_syscalls(void) {
+	printf("\n[test_at_metadata_syscalls]\n");
+
+	int ret = mkdir("/atdir", 0755);
+	CHECK("mkdir /atdir for *at tests", ret == 0);
+
+	int dirfd = open("/atdir", O_RDONLY | O_DIRECTORY);
+	CHECK("open /atdir as dirfd", dirfd >= 0);
+	if (dirfd < 0)
+		return;
+
+	int fd = openat(dirfd, "file", O_CREAT | O_RDWR, 0644);
+	CHECK("openat creates file relative to dirfd", fd >= 0);
+	if (fd >= 0) {
+		CHECK("write openat file", write(fd, "atdata", 6) == 6);
+		close(fd);
+	}
+
+	CHECK("faccessat sees relative file",
+	      faccessat(dirfd, "file", F_OK, 0) == 0);
+
+	struct stat st;
+	memset(&st, 0, sizeof(st));
+	CHECK("fstatat sees relative file",
+	      fstatat(dirfd, "file", &st, 0) == 0);
+	CHECK("fstatat reports regular file", S_ISREG(st.st_mode));
+
+	CHECK("fchmodat updates mode",
+	      fchmodat(dirfd, "file", 0600, 0) == 0);
+	memset(&st, 0, sizeof(st));
+	CHECK("fstatat after fchmodat",
+	      fstatat(dirfd, "file", &st, 0) == 0);
+	CHECK("mode after fchmodat is 0600", (st.st_mode & 0777) == 0600);
+
+	CHECK("chown existing path succeeds",
+	      chown("/atdir/file", getuid(), getgid()) == 0);
+	CHECK("lchown existing path succeeds",
+	      lchown("/atdir/file", getuid(), getgid()) == 0);
+	CHECK("fchownat existing path succeeds",
+	      fchownat(dirfd, "file", getuid(), getgid(), 0) == 0);
+
+	CHECK("utimensat relative path succeeds",
+	      utimensat(dirfd, "file", NULL, 0) == 0);
+
+	CHECK("renameat relative path succeeds",
+	      renameat(dirfd, "file", dirfd, "file2") == 0);
+	CHECK("old name gone after renameat",
+	      faccessat(dirfd, "file", F_OK, 0) != 0);
+	CHECK("new name exists after renameat",
+	      faccessat(dirfd, "file2", F_OK, 0) == 0);
+
+	CHECK("unlinkat removes relative file",
+	      unlinkat(dirfd, "file2", 0) == 0);
+	CHECK("file gone after unlinkat",
+	      faccessat(dirfd, "file2", F_OK, 0) != 0);
+
+	close(dirfd);
+	CHECK("rmdir removes empty *at test dir", rmdir("/atdir") == 0);
+}
+
+static void test_statfs(void) {
+	printf("\n[test_statfs]\n");
+
+	struct statfs sfs;
+	int ret = statfs("/", &sfs);
+	CHECK("statfs root succeeds", ret == 0);
+	CHECK("statfs reports block size", ret == 0 && sfs.f_bsize > 0);
+	CHECK("statfs reports blocks", ret == 0 && sfs.f_blocks > 0);
+	CHECK("statfs reports name length", ret == 0 && sfs.f_namelen > 0);
+
+	int fd = open("/test_statfs_file", O_CREAT | O_RDWR, 0644);
+	CHECK("create /test_statfs_file", fd >= 0);
+	if (fd >= 0) {
+		memset(&sfs, 0, sizeof(sfs));
+		ret = fstatfs(fd, &sfs);
+		CHECK("fstatfs file succeeds", ret == 0);
+		CHECK("fstatfs reports block size", ret == 0 && sfs.f_bsize > 0);
+		close(fd);
+	}
+
+	ret = statfs("/missing_statfs_path", &sfs);
+	CHECK("statfs nonexistent path fails", ret != 0);
 }
 
 /*  Test N: mmap basic round-trip.
@@ -568,11 +738,14 @@ int main(void) {
 	test_fcntl();
 	test_large_write();
 	test_read_eof();
+	test_sparse_write();
 	test_stdout_passthrough();
 	test_fork();
 	test_wrong_write();
 	test_link_rw();
+	test_at_metadata_syscalls();
 	test_lseek();
+	test_statfs();
 	test_mmap_basic();
 	test_mmap_truncate_shrink_zeros();
 	test_mmap_shared_fork();
