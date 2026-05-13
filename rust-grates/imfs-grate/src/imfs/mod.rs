@@ -1035,91 +1035,13 @@ impl ImfsState {
         self.open_resolved_path(cage_id, &norm_path, flags, mode)
     }
 
-    pub fn pipe(&mut self, cage_id: u64, cloexec: bool) -> Result<(u64, u64), i32> {
-        let pipe_idx = self.create_node("pipe", NodeType::Pip, 0o666);
-        self.nodes[pipe_idx].in_use = 2;
-        if let NodeInfo::Pip {
-            readers, writers, ..
-        } = &mut self.nodes[pipe_idx].info
-        {
-            *readers = 1;
-            *writers = 1;
-        }
-
-        let readfd = match fdtables::get_unused_virtual_fd(
-            cage_id,
-            IMFS_FDKIND,
-            pipe_idx as u64,
-            cloexec,
-            0,
-        ) {
-            Ok(fd) => fd,
-            Err(_) => {
-                self.reclaim_node(pipe_idx);
-                return Err(-24);
-            }
-        };
-
-        let writefd = match fdtables::get_unused_virtual_fd(
-            cage_id,
-            IMFS_FDKIND,
-            pipe_idx as u64,
-            cloexec,
-            0,
-        ) {
-            Ok(fd) => fd,
-            Err(_) => {
-                let _ = fdtables::close_virtualfd(cage_id, readfd);
-                self.reclaim_node(pipe_idx);
-                return Err(-24);
-            }
-        };
-
-        self.fd_info.insert(
-            (cage_id, readfd),
-            Arc::new(Mutex::new(FDInfo {
-                flags: O_RDONLY as u64,
-                offset: 0,
-            })),
-        );
-        self.fd_info.insert(
-            (cage_id, writefd),
-            Arc::new(Mutex::new(FDInfo {
-                flags: O_WRONLY as u64,
-                offset: 0,
-            })),
-        );
-
-        Ok((readfd, writefd))
-    }
-
     /// close: close an fd via fdtables and clean up the offset.
     pub fn close(&mut self, cage_id: u64, fd: u64) -> i32 {
         // Look up the node before closing so we can decrement in_use.
         if let Ok(entry) = fdtables::translate_virtual_fd(cage_id, fd) {
             let node_idx = entry.underfd as usize;
             if node_idx < self.nodes.len() {
-                if let Some(fd_info) = self.fd_info.get(&(cage_id, fd)).cloned() {
-                    if let NodeInfo::Pip {
-                        readers, writers, ..
-                    } = &mut self.nodes[node_idx].info
-                    {
-                        let flags = fd_info.lock().unwrap().flags as i32;
-                        match flags & O_ACCMODE {
-                            O_WRONLY => *writers = writers.saturating_sub(1),
-                            _ => *readers = readers.saturating_sub(1),
-                        }
-                    }
-                }
                 self.nodes[node_idx].in_use = self.nodes[node_idx].in_use.saturating_sub(1);
-
-                if self.nodes[node_idx].node_type == NodeType::Pip
-                    && self.nodes[node_idx].in_use == 0
-                {
-                    self.reclaim_node(node_idx);
-                } else if self.nodes[node_idx].doomed && self.nodes[node_idx].in_use == 0 {
-                    self.reclaim_node(node_idx);
-                }
             }
         }
 
@@ -1143,35 +1065,6 @@ impl ImfsState {
 
         match &self.nodes[node_idx].info {
             NodeInfo::Reg { head: _, tail: _ } => {}
-            NodeInfo::Pip { .. } => {
-                if (flags & O_ACCMODE) == O_WRONLY {
-                    return -9;
-                }
-                let (n, became_empty) = match &mut self.nodes[node_idx].info {
-                    NodeInfo::Pip { data, writers, .. } => {
-                        if data.is_empty() {
-                            if *writers == 0 {
-                                (0usize, false)
-                            } else {
-                                return -11;
-                            }
-                        } else {
-                            let n = buf.len().min(data.len());
-                            buf[..n].copy_from_slice(&data[..n]);
-                            data.drain(..n);
-                            (n, data.is_empty())
-                        }
-                    }
-                    _ => unreachable!(),
-                };
-                if n > 0 {
-                    self.update_atime(node_idx);
-                    if became_empty {
-                        self.update_mtime(node_idx);
-                    }
-                }
-                return n as i32;
-            }
             _ => return -9,
         };
 
@@ -1229,25 +1122,6 @@ impl ImfsState {
 
         match &self.nodes[node_idx].info {
             NodeInfo::Reg { head: _, tail: _ } => {}
-            NodeInfo::Pip { .. } => {
-                if (flags & O_ACCMODE) == O_RDONLY {
-                    return -9;
-                }
-                match &mut self.nodes[node_idx].info {
-                    NodeInfo::Pip { data, readers, .. } => {
-                        if *readers == 0 {
-                            return -32;
-                        }
-                        data.extend_from_slice(buf);
-                    }
-                    _ => unreachable!(),
-                }
-                if !buf.is_empty() {
-                    self.update_mtime(node_idx);
-                    self.update_ctime(node_idx);
-                }
-                return buf.len() as i32;
-            }
             _ => return -9,
         };
 
