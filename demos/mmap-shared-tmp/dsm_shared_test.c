@@ -225,10 +225,15 @@ static int unlink_live_mapping_round_trip(void) {
     return 0;
 }
 
-/* Child body: open the segment by name, mmap it independently of the
- * inherited mapping, write the marker at the given offset, exit. */
-static void child_body(const char *mark, size_t mark_len, off_t off) {
+/* Child body: drop the inherited parent mapping/fd, then open the segment
+ * by name and mmap it independently. */
+static void child_body(const char *mark, size_t mark_len, off_t off,
+                       void *inherited_addr, int inherited_fd) {
     TRACE("child: entry");
+    TRACE("child: before dropping inherited mapping");
+    if (munmap(inherited_addr, SEG_SIZE) != 0) _exit(9);
+    close(inherited_fd);
+
     TRACE("child: before open");
     int fd = open(SEG_PATH, O_RDWR);
     if (fd < 0) _exit(10);
@@ -288,13 +293,13 @@ int main(void) {
     pids[0] = fork();
     TRACE("parent: after fork child A");
     if (pids[0] == 0) {
-        child_body(MARK_A, sizeof(MARK_A) - 1, OFF_CHILD_A);
+        child_body(MARK_A, sizeof(MARK_A) - 1, OFF_CHILD_A, addr, fd);
     }
     TRACE("parent: before fork child B");
     pids[1] = fork();
     TRACE("parent: after fork child B");
     if (pids[1] == 0) {
-        child_body(MARK_B, sizeof(MARK_B) - 1, OFF_CHILD_B);
+        child_body(MARK_B, sizeof(MARK_B) - 1, OFF_CHILD_B, addr, fd);
     }
 
     /* 4. Wait for both children. */

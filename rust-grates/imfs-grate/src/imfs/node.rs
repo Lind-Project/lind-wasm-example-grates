@@ -65,7 +65,7 @@ pub enum NodeInfo {
         head: Option<usize>,
         tail: Option<usize>,
     },
-    /// Regular file backed by a single contiguous host page range.
+    /// Regular file backed by a single contiguous mmap-capable file object.
     ///
     /// Distinct from `Reg`: the storage isn't a chunk chain in the
     /// grate's arena, it's an actual host mmap'd region.  Created
@@ -73,16 +73,11 @@ pub enum NodeInfo {
     /// path-based config like `/pg_dynshmem/*`, or anything that
     /// matches a "needs mmap" rule in the routing layer).
     ///
-    /// The mapping is allocated by the imfs grate via
-    /// `SYS_MMAP(NULL, capacity, PROT_READ|PROT_WRITE,
-    ///           MAP_ANONYMOUS|MAP_SHARED, -1, 0)` so the backing is
-    /// real host kernel pages.  When a cage `mmap`s the file, the
-    /// grate routes the call back through
-    /// `SYS_MMAP(host_addr, len, prot,
-    ///           MAP_ANONYMOUS|MAP_SHARED|MAP_FIXED, -1, 0)` so the
-    /// cage's vmmap aliases those same host pages — meaning multiple
-    /// cages mapping the same file share writes (real MAP_SHARED
-    /// semantics, not a per-cage copy).
+    /// The backing file descriptor is internal to IMFS.  When a cage
+    /// `mmap`s the file, IMFS temporarily registers that backing in
+    /// the target cage's fdtable and asks RawPOSIX for a file-backed
+    /// `MAP_SHARED` mapping.  Every cage mapping the same RegMapped
+    /// node therefore maps the same kernel-backed pages.
     ///
     /// `host_addr`: base of the host mapping (0 if not yet allocated).
     /// `capacity`: size of the mapping in bytes; the file's logical
@@ -94,6 +89,7 @@ pub enum NodeInfo {
         host_addr: u64,
         capacity: usize,
         mmap_refs: u32,
+        backing_vfd: u64,
     },
     /// Directory: list of child entries.
     Dir { children: Vec<DirEntry> },
@@ -162,6 +158,7 @@ impl Node {
                 host_addr: 0,
                 capacity: 0,
                 mmap_refs: 0,
+                backing_vfd: u64::MAX,
             },
             NodeType::Dir => NodeInfo::Dir {
                 children: Vec::new(),
