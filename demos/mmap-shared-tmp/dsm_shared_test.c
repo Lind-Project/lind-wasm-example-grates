@@ -50,33 +50,49 @@ static int tests_passed = 0;
     tests_run++; \
     if (expr) { printf("  PASS: %s\n", name); tests_passed++; } \
     else { printf("  FAIL: %s (errno=%d %s)\n", name, errno, strerror(errno)); } \
+    fflush(stdout); \
+} while (0)
+
+#define TRACE(msg) do { \
+    printf("  TRACE: %s\n", msg); \
+    fflush(stdout); \
 } while (0)
 
 static int basic_mmap_round_trip(void) {
+    TRACE("basic: before open");
     int fd = open(BASIC_PATH, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    TRACE("basic: after open");
     CHECK("basic: create " BASIC_PATH, fd >= 0);
     if (fd < 0) return -1;
 
+    TRACE("basic: before ftruncate");
     CHECK("basic: ftruncate to one page", ftruncate(fd, SEG_SIZE) == 0);
 
+    TRACE("basic: before mmap");
     void *addr = mmap(NULL, SEG_SIZE, PROT_READ | PROT_WRITE,
                       MAP_SHARED, fd, 0);
+    TRACE("basic: after mmap");
     CHECK("basic: mmap MAP_SHARED", addr != MAP_FAILED);
     if (addr == MAP_FAILED) {
         close(fd);
         return -1;
     }
 
+    TRACE("basic: before mapping write");
     memcpy(addr, "hello mmap world", 16);
     ((char *)addr)[100] = 'Z';
 
     char buf[128] = {0};
+    TRACE("basic: before lseek");
     CHECK("basic: lseek back to start", lseek(fd, 0, SEEK_SET) == 0);
+    TRACE("basic: before read");
     ssize_t nr = read(fd, buf, sizeof(buf));
+    TRACE("basic: after read");
     CHECK("basic: read sees mmap writes", nr >= 101 &&
           memcmp(buf, "hello mmap world", 16) == 0 &&
           buf[100] == 'Z');
 
+    TRACE("basic: before munmap");
     CHECK("basic: munmap", munmap(addr, SEG_SIZE) == 0);
     close(fd);
     unlink(BASIC_PATH);
@@ -100,6 +116,9 @@ static void child_body(const char *mark, size_t mark_len, off_t off) {
 }
 
 int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+
     printf("=== DSM shared-mmap demo (parent + 2 children) ===\n");
 
     mkdir("/tmp", 0755);
