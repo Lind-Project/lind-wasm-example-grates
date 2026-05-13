@@ -240,6 +240,9 @@ fn fd_translation_handler_impl(
 
     let mut origin_pollfds_ptr: u64 = 0;
     let mut pollfd_cageid: u64 = 0;
+    let mut pollfds: Vec<libc::pollfd> = Vec::new();
+    let mut pollfd_original_fds: Vec<i32> = Vec::new();
+    let mut pollfd_bytes: u64 = 0;
 
     let mut should_select = false;
     let mut select_cageid = 0;
@@ -309,7 +312,7 @@ fn fd_translation_handler_impl(
 
                         let cmd = args[1] as i32;
 
-                        if cmd & F_DUPFD != 0 || cmd & F_DUPFD_CLOEXEC != 0 {
+                        if cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC {
                             should_create_vfd = true;
                             should_cloexec |= cmd == F_DUPFD_CLOEXEC;
                         }
@@ -339,42 +342,47 @@ fn fd_translation_handler_impl(
                 should_poll = true;
                 origin_pollfds_ptr = args[spec.index];
                 pollfd_cageid = argcages[spec.index];
-                let mut pollfds_ptr: *mut libc::pollfd = std::ptr::null_mut();
-                
-                let ret = copy_data_between_cages(
-                    this_grateid, pollfd_cageid,
-                    origin_pollfds_ptr, pollfd_cageid,
-                    pollfds_ptr as u64, this_grateid,
-                    4096, 1,
-                );
-                
-                let nfds = args[spec.index + 1] as libc::nfds_t;
 
-                if !pollfds_ptr.is_null() {
-                    for i in 0..nfds {
-                        unsafe {
-                            let pollfd_ptr = pollfds_ptr.add(i as usize);
-                            let kernel_fd = (*pollfd_ptr).fd;
+                let nfds = args[spec.index + 1] as usize;
+                if nfds != 0 {
+                    pollfds = vec![libc::pollfd { fd: -1, events: 0, revents: 0 }; nfds];
+                    pollfd_bytes = (nfds * std::mem::size_of::<libc::pollfd>()) as u64;
 
-                            // Per POSIX/Linux poll semantics, negative fd means ignored.
-                            // Do not translate it.
-                            if kernel_fd < 0 {
-                                continue;
+                    match copy_data_between_cages(
+                        this_grateid, pollfd_cageid,
+                        origin_pollfds_ptr, pollfd_cageid,
+                        pollfds.as_mut_ptr() as u64, this_grateid,
+                        pollfd_bytes, 0,
+                    ) {
+                        Ok(_) => {}
+                        Err(e) => panic!("[fd translate] copy pollfds from cage failed: {:?}", e),
+                    }
+
+                    pollfd_original_fds = pollfds.iter().map(|pollfd| pollfd.fd).collect();
+
+                    for pollfd in pollfds.iter_mut() {
+                        let grate_fd = pollfd.fd;
+
+                        // Per POSIX/Linux poll semantics, negative fd means ignored.
+                        // Do not translate it.
+                        if grate_fd < 0 {
+                            continue;
+                        }
+
+                        match translate_fd_arg(pollfd_cageid, grate_fd as u64, FdArgKind::Fd) {
+                            Ok(underfd) => {
+                                pollfd.fd = underfd as i32;
                             }
 
-                            match translate_fd_arg(pollfd_cageid, kernel_fd as u64, FdArgKind::Fd) {
-                                Ok(underfd) => {
-                                    (*pollfd_ptr).fd = underfd as i32;
-                                }
-
-                                Err(errno_ret) => {
-                                    return -(errno_ret as i32);
-                                }
+                            Err(errno_ret) => {
+                                return -(errno_ret as i32);
                             }
                         }
                     }
-                }
 
+                    args[spec.index] = pollfds.as_mut_ptr() as u64;
+                    argcages[spec.index] = this_grateid | ARG_TRANSLATE_FLAG;
+                }
             }
 
             FdArgKind::EPFD => {
@@ -609,7 +617,21 @@ fn fd_translation_handler_impl(
     }
 
     if should_poll {
-        args[0] = origin_pollfds_ptr as u64;
+        if pollfd_bytes != 0 {
+            for (pollfd, original_fd) in pollfds.iter_mut().zip(pollfd_original_fds.iter()) {
+                pollfd.fd = *original_fd;
+            }
+
+            match copy_data_between_cages(
+                this_grateid, pollfd_cageid,
+                pollfds.as_ptr() as u64, this_grateid,
+                origin_pollfds_ptr, pollfd_cageid,
+                pollfd_bytes, 0,
+            ) {
+                Ok(_) => {}
+                Err(e) => panic!("[fd translate] copy pollfds back to cage failed: {:?}", e),
+            }
+        }
     }
 
     if should_select {
