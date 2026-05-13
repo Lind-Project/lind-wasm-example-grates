@@ -434,10 +434,11 @@ pub extern "C" fn ns_mmap_handler(
      * Do not route based on fd in that case, because fd may be -1.
      */
     let is_anonymous = (arg4 & MAP_ANON as u64) != 0;
+    let caller_cage = if is_anonymous { arg2cage } else { arg5cage };
 
     let mut fd = arg5;
     if !is_anonymous {
-        let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, fd) {
+        let old_fd_entry = match fdtables::translate_virtual_fd(caller_cage, fd) {
             Ok(entry) => entry,
             Err(_) => {
                 return -(EBADF as i32);
@@ -449,18 +450,18 @@ pub extern "C" fn ns_mmap_handler(
         args[4] = old_fd_entry.underfd; // replace virtual fd with underfd for the syscall
         
         if perfdinfo != 0 {
-            let ret = match helpers::get_route(arg1cage, SYS_MMAP) {
-                Some(alt) => helpers::do_syscall(arg1cage, alt, &args, &arg_cages),
-                None => helpers::do_clamp_syscall(arg1cage, SYS_MMAP, &args, &arg_cages),
+            let ret = match helpers::get_route(caller_cage, SYS_MMAP) {
+                Some(alt) => helpers::do_syscall(caller_cage, alt, &args, &arg_cages),
+                None => helpers::do_clamp_syscall(caller_cage, SYS_MMAP, &args, &arg_cages),
             };
-            if ret >= 0 {
-                helpers::record_clamped_mmap(arg1cage, ret as u64, arg2);
+            if ret >= 0 || ret <= -256 {
+                helpers::record_clamped_mmap(caller_cage, ret as u32 as u64, arg2);
             }
             return ret;
         }
     }
 
-    let ret = helpers::do_syscall(arg1cage, SYS_MMAP, &args, &arg_cages);
+    let ret = helpers::do_syscall(caller_cage, SYS_MMAP, &args, &arg_cages);
 
     if ret != -1 && !is_anonymous {
         args[4] = fd; // restore original fd in args
@@ -491,23 +492,31 @@ pub extern "C" fn ns_munmap_handler(
 ) -> i32 {
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+    let caller_cage = arg2cage;
 
-    let is_clamped_mapping = helpers::is_clamped_mmap(arg1cage, arg1, arg2);
+    let is_clamped_mapping = helpers::is_clamped_mmap(caller_cage, arg1, arg2);
 
-    if is_clamped_mapping {
-        let ret = match helpers::get_route(arg1cage, SYS_MUNMAP) {
-            Some(alt) => helpers::do_syscall(arg1cage, alt, &args, &arg_cages),
-            None => helpers::do_clamp_syscall(arg1cage, SYS_MUNMAP, &args, &arg_cages),
-        };
+    if let Some(alt) = helpers::get_route(caller_cage, SYS_MUNMAP) {
+        let ret = helpers::do_syscall(caller_cage, alt, &args, &arg_cages);
 
-        if ret == 0 {
-            helpers::remove_clamped_mmap(arg1cage, arg1, arg2);
+        if ret == 0 && is_clamped_mapping {
+            helpers::remove_clamped_mmap(caller_cage, arg1, arg2);
         }
 
         return ret;
     }
 
-    helpers::do_syscall(arg1cage, SYS_MUNMAP, &args, &arg_cages)
+    if is_clamped_mapping {
+        let ret = helpers::do_clamp_syscall(caller_cage, SYS_MUNMAP, &args, &arg_cages);
+
+        if ret == 0 {
+            helpers::remove_clamped_mmap(caller_cage, arg1, arg2);
+        }
+
+        return ret;
+    }
+
+    helpers::do_syscall(caller_cage, SYS_MUNMAP, &args, &arg_cages)
 }
 
 pub extern "C" fn ns_fcntl_handler(

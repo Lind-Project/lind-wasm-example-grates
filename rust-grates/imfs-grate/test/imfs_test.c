@@ -788,6 +788,38 @@ static void test_mmap_fd_io_outside_live_mapping(void) {
 	unlink("/mmap_outside_live");
 }
 
+/*  Test N+5: unlink and close while mmap is still live.
+ *
+ *  A doomed mapped file must not be reclaimed until the final munmap
+ *  releases mmap_refs. This mirrors postgres DSM cleanup paths where
+ *  descriptors and names can disappear before the mapping itself.
+ */
+
+static void test_mmap_unlink_close_while_live(void) {
+	printf("\n[test_mmap_unlink_close_while_live]\n");
+
+	const size_t MAP_SZ = 4096;
+
+	int fd = open("/mmap_unlink_live", O_CREAT | O_RDWR, 0644);
+	CHECK("open /mmap_unlink_live", fd >= 0);
+	if (fd < 0) return;
+
+	CHECK("ftruncate unlink-live file", ftruncate(fd, MAP_SZ) == 0);
+
+	void *addr =
+	    mmap(NULL, MAP_SZ, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	CHECK("mmap unlink-live file", addr != MAP_FAILED);
+	if (addr == MAP_FAILED) { close(fd); unlink("/mmap_unlink_live"); return; }
+
+	memcpy(addr, "mapped after unlink", 19);
+
+	CHECK("unlink while mmap is live", unlink("/mmap_unlink_live") == 0);
+	CHECK("close while mmap is live", close(fd) == 0);
+	CHECK("live mapping remains readable after unlink and close",
+	      memcmp(addr, "mapped after unlink", 19) == 0);
+	CHECK("munmap after unlink and close", munmap(addr, MAP_SZ) == 0);
+}
+
 /*  Main  */
 
 int main(void) {
@@ -816,6 +848,7 @@ int main(void) {
 	test_mmap_shared_fork();
 	test_mmap_refcount_release();
 	test_mmap_fd_io_outside_live_mapping();
+	test_mmap_unlink_close_while_live();
 
 	printf("\n=== results: %d/%d passed ===\n", tests_passed, tests_run);
 	return (tests_passed == tests_run) ? 0 : 1;

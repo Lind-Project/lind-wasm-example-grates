@@ -252,6 +252,19 @@ impl ImfsState {
         self.node_free_list.push(idx);
     }
 
+    fn node_mmap_refs(&self, idx: usize) -> u32 {
+        match &self.nodes[idx].info {
+            NodeInfo::RegMapped { mmap_refs, .. } => *mmap_refs,
+            _ => 0,
+        }
+    }
+
+    fn try_reclaim_doomed_node(&mut self, idx: usize) {
+        if self.nodes[idx].doomed && self.nodes[idx].in_use == 0 && self.node_mmap_refs(idx) == 0 {
+            self.reclaim_node(idx);
+        }
+    }
+
     fn link_count(&self, node_idx: usize) -> u32 {
         match &self.nodes[node_idx].info {
             NodeInfo::Dir { children } => {
@@ -287,9 +300,7 @@ impl ImfsState {
             self.update_ctime(target);
             if self.link_count(target) == 0 {
                 self.nodes[target].doomed = true;
-                if self.nodes[target].in_use == 0 {
-                    self.reclaim_node(target);
-                }
+                self.try_reclaim_doomed_node(target);
             }
             self.reclaim_node(node_idx);
             return;
@@ -297,9 +308,7 @@ impl ImfsState {
 
         if self.link_count(node_idx) == 0 {
             self.nodes[node_idx].doomed = true;
-            if self.nodes[node_idx].in_use == 0 {
-                self.reclaim_node(node_idx);
-            }
+            self.try_reclaim_doomed_node(node_idx);
         }
     }
 
@@ -1650,9 +1659,7 @@ impl ImfsState {
             let node_idx = entry.underfd as usize;
             if node_idx < self.nodes.len() {
                 self.nodes[node_idx].in_use = self.nodes[node_idx].in_use.saturating_sub(1);
-                if self.nodes[node_idx].doomed && self.nodes[node_idx].in_use == 0 {
-                    self.reclaim_node(node_idx);
-                }
+                self.try_reclaim_doomed_node(node_idx);
             }
         }
 
@@ -1802,7 +1809,7 @@ impl ImfsState {
 
         // Only valid for regular files,
         match &self.nodes[node_idx].info {
-            NodeInfo::Reg { .. } => {}
+            NodeInfo::Reg { .. } | NodeInfo::RegMapped { .. } => {}
             NodeInfo::Pip { .. } => return -29, // EISPIPE
             NodeInfo::Dir { .. } => return offset as i32, // On directory lseeks, we return offset
             // immediately.
@@ -1970,9 +1977,7 @@ impl ImfsState {
         self.update_ctime(node_idx);
         self.nodes[node_idx].doomed = true;
 
-        if self.nodes[node_idx].in_use == 0 {
-            self.reclaim_node(node_idx);
-        }
+        self.try_reclaim_doomed_node(node_idx);
 
         0
     }
@@ -2516,6 +2521,7 @@ impl ImfsState {
             if !still_mapped {
                 self.sync_mapping_to_storage(node_idx, cage_id, tracked_addr, map_len, map_offset);
             }
+            self.try_reclaim_doomed_node(node_idx);
         }
 
         // Always forward to RawPOSIX so the cage's vmmap entry is
@@ -2669,6 +2675,7 @@ impl ImfsState {
             if self.find_active_mapping(node_idx).is_none() {
                 self.sync_mapping_to_storage(node_idx, cage_id, uaddr, len, file_offset);
             }
+            self.try_reclaim_doomed_node(node_idx);
         }
 
         // Clean up the per-cage cwd and any leftover fd offsets too.

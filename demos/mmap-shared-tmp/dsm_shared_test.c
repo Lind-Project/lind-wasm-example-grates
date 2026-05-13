@@ -37,6 +37,7 @@
 #define BASIC_PATH  "/tmp/mmap_basic"
 #define REMAP_PATH  "/tmp/mmap_remap"
 #define OUTSIDE_PATH "/tmp/mmap_outside_live"
+#define UNLINK_LIVE_PATH "/tmp/mmap_unlink_live"
 #define SEG_SIZE    4096
 #define OUTSIDE_FILE_SIZE 65536
 #define OUTSIDE_OFF 32768
@@ -190,6 +191,40 @@ static int fd_io_outside_live_mapping_round_trip(void) {
     return 0;
 }
 
+static int unlink_live_mapping_round_trip(void) {
+    TRACE("unlink-live: before open");
+    int fd = open(UNLINK_LIVE_PATH, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    TRACE("unlink-live: after open");
+    CHECK("unlink-live: create " UNLINK_LIVE_PATH, fd >= 0);
+    if (fd < 0) return -1;
+
+    TRACE("unlink-live: before ftruncate");
+    CHECK("unlink-live: ftruncate to one page", ftruncate(fd, SEG_SIZE) == 0);
+
+    TRACE("unlink-live: before mmap");
+    void *addr = mmap(NULL, SEG_SIZE, PROT_READ | PROT_WRITE,
+                      MAP_SHARED, fd, 0);
+    TRACE("unlink-live: after mmap");
+    CHECK("unlink-live: mmap MAP_SHARED", addr != MAP_FAILED);
+    if (addr == MAP_FAILED) {
+        close(fd);
+        unlink(UNLINK_LIVE_PATH);
+        return -1;
+    }
+
+    memcpy(addr, "mapped after unlink", 19);
+
+    TRACE("unlink-live: before unlink");
+    CHECK("unlink-live: unlink while mapped", unlink(UNLINK_LIVE_PATH) == 0);
+    TRACE("unlink-live: before close");
+    CHECK("unlink-live: close while mapped", close(fd) == 0);
+    CHECK("unlink-live: mapping remains readable",
+          memcmp(addr, "mapped after unlink", 19) == 0);
+    TRACE("unlink-live: before munmap");
+    CHECK("unlink-live: munmap after unlink and close", munmap(addr, SEG_SIZE) == 0);
+    return 0;
+}
+
 /* Child body: open the segment by name, mmap it independently of the
  * inherited mapping, write the marker at the given offset, exit. */
 static void child_body(const char *mark, size_t mark_len, off_t off) {
@@ -227,6 +262,7 @@ int main(void) {
     basic_mmap_round_trip();
     remap_after_munmap_round_trip();
     fd_io_outside_live_mapping_round_trip();
+    unlink_live_mapping_round_trip();
 
     /* 1. Parent creates the segment. */
     int fd = open(SEG_PATH, O_CREAT | O_RDWR | O_TRUNC, 0644);
