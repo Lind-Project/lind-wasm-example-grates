@@ -36,7 +36,10 @@
 #define SEG_PATH    "/tmp/dsm_segment"
 #define BASIC_PATH  "/tmp/mmap_basic"
 #define REMAP_PATH  "/tmp/mmap_remap"
+#define OUTSIDE_PATH "/tmp/mmap_outside_live"
 #define SEG_SIZE    4096
+#define OUTSIDE_FILE_SIZE 65536
+#define OUTSIDE_OFF 32768
 #define OFF_PARENT  0
 #define OFF_CHILD_A 1024
 #define OFF_CHILD_B 2048
@@ -140,6 +143,53 @@ static int remap_after_munmap_round_trip(void) {
     return 0;
 }
 
+static int fd_io_outside_live_mapping_round_trip(void) {
+    TRACE("outside: before open");
+    int fd = open(OUTSIDE_PATH, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    TRACE("outside: after open");
+    CHECK("outside: create " OUTSIDE_PATH, fd >= 0);
+    if (fd < 0) return -1;
+
+    TRACE("outside: before ftruncate");
+    CHECK("outside: ftruncate large file", ftruncate(fd, OUTSIDE_FILE_SIZE) == 0);
+
+    TRACE("outside: before small mmap");
+    void *addr = mmap(NULL, SEG_SIZE, PROT_READ | PROT_WRITE,
+                      MAP_SHARED, fd, 0);
+    TRACE("outside: after small mmap");
+    CHECK("outside: mmap first page", addr != MAP_FAILED);
+    if (addr == MAP_FAILED) {
+        close(fd);
+        return -1;
+    }
+
+    memcpy(addr, "live mapping", 12);
+
+    char write_buf[8192];
+    char read_buf[8192];
+    memset(write_buf, 'Q', sizeof(write_buf));
+    memset(read_buf, 0, sizeof(read_buf));
+
+    TRACE("outside: before pwrite beyond mmap");
+    ssize_t nw = pwrite(fd, write_buf, sizeof(write_buf), OUTSIDE_OFF);
+    TRACE("outside: after pwrite beyond mmap");
+    CHECK("outside: pwrite beyond live mmap", nw == (ssize_t)sizeof(write_buf));
+
+    TRACE("outside: before pread beyond mmap");
+    ssize_t nr = pread(fd, read_buf, sizeof(read_buf), OUTSIDE_OFF);
+    TRACE("outside: after pread beyond mmap");
+    CHECK("outside: pread beyond live mmap", nr == (ssize_t)sizeof(read_buf));
+    CHECK("outside: pread sees fd write",
+          memcmp(read_buf, write_buf, sizeof(write_buf)) == 0);
+    CHECK("outside: live mapping still valid",
+          memcmp(addr, "live mapping", 12) == 0);
+
+    CHECK("outside: munmap", munmap(addr, SEG_SIZE) == 0);
+    close(fd);
+    unlink(OUTSIDE_PATH);
+    return 0;
+}
+
 /* Child body: open the segment by name, mmap it independently of the
  * inherited mapping, write the marker at the given offset, exit. */
 static void child_body(const char *mark, size_t mark_len, off_t off) {
@@ -176,6 +226,7 @@ int main(void) {
 
     basic_mmap_round_trip();
     remap_after_munmap_round_trip();
+    fd_io_outside_live_mapping_round_trip();
 
     /* 1. Parent creates the segment. */
     int fd = open(SEG_PATH, O_CREAT | O_RDWR | O_TRUNC, 0644);

@@ -90,11 +90,12 @@ pub struct ImfsState {
     /// Live cage-side mappings of RegMapped files.
     ///
     /// Keyed on `(cage_id, cage_vaddr)` because that's what `munmap`
-    /// receives.  Value is `(node_idx, len)` so we know which
-    /// `mmap_refs` to decrement and how much to forward to RawPOSIX
-    /// for the actual unmap.  Entries are inserted by the mmap
-    /// handler and removed by munmap; nothing else touches them.
-    pub mmap_tracking: HashMap<(u64, u64), (usize, usize)>,
+    /// receives.  Value is `(node_idx, len, file_offset)` so we know
+    /// which `mmap_refs` to decrement, which byte range the cage view
+    /// covers, and how much to forward to RawPOSIX for the actual
+    /// unmap.  Entries are inserted by the mmap handler and removed by
+    /// munmap; fork and exit only clone/drop entries.
+    pub mmap_tracking: HashMap<(u64, u64), (usize, usize, usize)>,
 }
 
 /// Initialize the global IMFS. Called once at startup.
@@ -908,26 +909,37 @@ impl ImfsState {
 
         let count = buf.len().min(node.total_size - offset);
 
-        // If any cage has the node mmap'd, the mapping holds the live
-        // bytes (chunks are stale until munmap syncs them back).  Pull
-        // through copy_data_between_cages from the mapping owner.
-        if let Some((owner_cage, owner_uaddr)) = self.find_active_mapping(node_idx) {
-            let thiscage = getcageid();
-            let _ = copy_data_between_cages(
-                thiscage,
-                thiscage,
-                owner_uaddr + offset as u64,
-                owner_cage,
-                buf.as_mut_ptr() as u64,
-                thiscage,
-                count as u64,
-                0,
-            );
-            return count;
-        }
+        let read = match &node.info {
+            NodeInfo::Reg { head, .. } => {
+                let mut chunk_idx = *head;
+                let mut local_offset = offset;
 
-        let head = match &node.info {
-            NodeInfo::Reg { head, .. } => *head,
+                // Skip chunks before the read offset.
+                while let Some(ci) = chunk_idx {
+                    if local_offset < CHUNK_SIZE {
+                        break;
+                    }
+                    local_offset -= CHUNK_SIZE;
+                    chunk_idx = self.chunks[ci].next;
+                }
+
+                let mut read = 0;
+                while read < count {
+                    let ci = match chunk_idx {
+                        Some(ci) => ci,
+                        None => break,
+                    };
+                    let available = self.chunks[ci].used.saturating_sub(local_offset);
+                    let to_copy = (count - read).min(available);
+                    buf[read..read + to_copy].copy_from_slice(
+                        &self.chunks[ci].data[local_offset..local_offset + to_copy],
+                    );
+                    read += to_copy;
+                    local_offset = 0;
+                    chunk_idx = self.chunks[ci].next;
+                }
+                read
+            }
             NodeInfo::RegMapped {
                 host_addr,
                 capacity,
@@ -946,36 +958,32 @@ impl ImfsState {
                         readable,
                     );
                 }
-                return readable;
+                readable
             }
             _ => return 0,
         };
 
-        let mut chunk_idx = head;
-        let mut local_offset = offset;
-
-        // Skip chunks before the read offset.
-        while let Some(ci) = chunk_idx {
-            if local_offset < CHUNK_SIZE {
-                break;
-            }
-            local_offset -= CHUNK_SIZE;
-            chunk_idx = self.chunks[ci].next;
-        }
-
-        let mut read = 0;
-        while read < count {
-            let ci = match chunk_idx {
-                Some(ci) => ci,
-                None => break,
-            };
-            let available = self.chunks[ci].used.saturating_sub(local_offset);
-            let to_copy = (count - read).min(available);
-            buf[read..read + to_copy]
-                .copy_from_slice(&self.chunks[ci].data[local_offset..local_offset + to_copy]);
-            read += to_copy;
-            local_offset = 0;
-            chunk_idx = self.chunks[ci].next;
+        // Overlay bytes from live cage mappings only for the file range
+        // those mappings actually cover.  Mapping writes are synced back
+        // to backing storage on munmap/exit, so while a mapping is live
+        // it is the freshest source for its own covered byte range.
+        let thiscage = getcageid();
+        for (owner_cage, owner_uaddr, _map_len, map_offset, start, end) in
+            self.active_mapping_overlaps(node_idx, offset, read)
+        {
+            let buf_offset = start - offset;
+            let map_delta = start - map_offset;
+            let copy_len = end - start;
+            let _ = copy_data_between_cages(
+                thiscage,
+                thiscage,
+                owner_uaddr + map_delta as u64,
+                owner_cage,
+                buf.as_mut_ptr().wrapping_add(buf_offset) as u64,
+                thiscage,
+                copy_len as u64,
+                0,
+            );
         }
 
         read
@@ -987,29 +995,6 @@ impl ImfsState {
     fn write_to_node(&mut self, node_idx: usize, offset: usize, buf: &[u8]) -> usize {
         if buf.is_empty() {
             return 0;
-        }
-
-        // If any cage has the node mmap'd, push the bytes into the
-        // mapping so the cage's pointer-read view sees them
-        // immediately (POSIX requires fd writes to be visible to
-        // MAP_SHARED readers).  Chunks stay stale until munmap.
-        if let Some((owner_cage, owner_uaddr)) = self.find_active_mapping(node_idx) {
-            let end = offset + buf.len();
-            let thiscage = getcageid();
-            let _ = copy_data_between_cages(
-                thiscage,
-                thiscage,
-                buf.as_ptr() as u64,
-                thiscage,
-                owner_uaddr + offset as u64,
-                owner_cage,
-                buf.len() as u64,
-                0,
-            );
-            if end > self.nodes[node_idx].total_size {
-                self.nodes[node_idx].total_size = end;
-            }
-            return buf.len();
         }
 
         if matches!(self.nodes[node_idx].info, NodeInfo::RegMapped { .. }) {
@@ -1036,6 +1021,7 @@ impl ImfsState {
             if end > self.nodes[node_idx].total_size {
                 self.nodes[node_idx].total_size = end;
             }
+            self.mirror_write_to_active_mappings(node_idx, offset, buf);
             return buf.len();
         }
 
@@ -1117,6 +1103,10 @@ impl ImfsState {
             self.nodes[node_idx].total_size = offset + written;
         }
 
+        if written > 0 {
+            self.mirror_write_to_active_mappings(node_idx, offset, &buf[..written]);
+        }
+
         written
     }
 
@@ -1124,31 +1114,6 @@ impl ImfsState {
         let old_size = self.nodes[node_idx].total_size;
 
         if new_size == old_size {
-            return;
-        }
-
-        // If a cage currently has the node mmap'd, the mapping holds
-        // the live bytes.  On shrink, zero the bytes between the new
-        // EOF and the old EOF in the mapping — Linux SIGBUSes on
-        // accesses past a shrunken file via its mapping, we degrade
-        // to zeros, which is what the test expects.
-        if let Some((owner_cage, owner_uaddr)) = self.find_active_mapping(node_idx) {
-            if new_size < old_size {
-                let zero_len = old_size - new_size;
-                let zeros = vec![0u8; zero_len];
-                let thiscage = getcageid();
-                let _ = copy_data_between_cages(
-                    thiscage,
-                    thiscage,
-                    zeros.as_ptr() as u64,
-                    thiscage,
-                    owner_uaddr + new_size as u64,
-                    owner_cage,
-                    zero_len as u64,
-                    0,
-                );
-            }
-            self.nodes[node_idx].total_size = new_size;
             return;
         }
 
@@ -1194,6 +1159,12 @@ impl ImfsState {
             }
 
             self.nodes[node_idx].total_size = new_size;
+
+            if new_size < old_size {
+                let zero_len = old_size - new_size;
+                let zeros = vec![0u8; zero_len];
+                self.mirror_write_to_active_mappings(node_idx, new_size, &zeros);
+            }
             return;
         }
 
@@ -1458,7 +1429,7 @@ impl ImfsState {
         // the child can recognize the inherited mapping and hand back
         // the same uaddr instead of forwarding a fresh anonymous mmap
         // that would land on a non-shared region.
-        let inherited: Vec<((u64, u64), (usize, usize))> = self
+        let inherited: Vec<((u64, u64), (usize, usize, usize))> = self
             .mmap_tracking
             .iter()
             .filter(|((c, _), _)| *c == parent_cage)
@@ -2340,13 +2311,16 @@ impl ImfsState {
         // the caller's memcpy lands on the same kernel pages everyone
         // else sees.  Postgres-DSM "worker attaches to existing
         // segment by name" pattern.
-        let inherited = self.mmap_tracking.iter().find_map(|(&(c, u), &(n, _))| {
-            if c == cage_id && n == node_idx {
-                Some(u)
-            } else {
-                None
-            }
-        });
+        let inherited = self
+            .mmap_tracking
+            .iter()
+            .find_map(|(&(c, u), &(n, _len, _offset))| {
+                if c == cage_id && n == node_idx {
+                    Some(u)
+                } else {
+                    None
+                }
+            });
         if let Some(uaddr) = inherited {
             return uaddr as i32;
         }
@@ -2418,7 +2392,7 @@ impl ImfsState {
 
         // Record the mapping.  Routes future fd I/O through it.
         self.mmap_tracking
-            .insert((cage_id, mapped), (node_idx, len));
+            .insert((cage_id, mapped), (node_idx, len, offset as usize));
         self.increment_mmap_ref(node_idx);
 
         mapped as i32
@@ -2433,13 +2407,63 @@ impl ImfsState {
     fn find_active_mapping(&self, node_idx: usize) -> Option<(u64, u64)> {
         self.mmap_tracking
             .iter()
-            .find_map(|(&(cage, uaddr), &(nidx, _len))| {
+            .find_map(|(&(cage, uaddr), &(nidx, _len, _offset))| {
                 if nidx == node_idx {
                     Some((cage, uaddr))
                 } else {
                     None
                 }
             })
+    }
+
+    fn active_mapping_overlaps(
+        &self,
+        node_idx: usize,
+        offset: usize,
+        len: usize,
+    ) -> Vec<(u64, u64, usize, usize, usize, usize)> {
+        let end = offset.saturating_add(len);
+        self.mmap_tracking
+            .iter()
+            .filter_map(|(&(cage, uaddr), &(nidx, map_len, map_offset))| {
+                if nidx != node_idx {
+                    return None;
+                }
+                let map_end = map_offset.saturating_add(map_len);
+                let start = offset.max(map_offset);
+                let overlap_end = end.min(map_end);
+                if start < overlap_end {
+                    Some((cage, uaddr, map_len, map_offset, start, overlap_end))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn mirror_write_to_active_mappings(&self, node_idx: usize, offset: usize, buf: &[u8]) {
+        if buf.is_empty() {
+            return;
+        }
+
+        let thiscage = getcageid();
+        for (owner_cage, owner_uaddr, _map_len, map_offset, start, end) in
+            self.active_mapping_overlaps(node_idx, offset, buf.len())
+        {
+            let buf_offset = start - offset;
+            let map_delta = start - map_offset;
+            let copy_len = end - start;
+            let _ = copy_data_between_cages(
+                thiscage,
+                owner_cage,
+                buf.as_ptr().wrapping_add(buf_offset) as u64,
+                thiscage,
+                owner_uaddr + map_delta as u64,
+                owner_cage,
+                copy_len as u64,
+                0,
+            );
+        }
     }
 
     fn increment_mmap_ref(&mut self, node_idx: usize) {
@@ -2474,7 +2498,7 @@ impl ImfsState {
             let candidate = self
                 .mmap_tracking
                 .iter()
-                .find(|((c, _), (_, l))| *c == cage_id && *l == len)
+                .find(|((c, _), (_, l, _))| *c == cage_id && *l == len)
                 .map(|(k, _)| *k);
             if let Some(k) = candidate {
                 tracked_addr = k.1;
@@ -2486,11 +2510,11 @@ impl ImfsState {
         // last live mapping for the node, copy its bytes back into the
         // file's persistent storage so future fd reads and later mmaps
         // see whatever the cage wrote through the pointer view.
-        if let Some((node_idx, _)) = tracked {
+        if let Some((node_idx, map_len, map_offset)) = tracked {
             self.decrement_mmap_ref(node_idx);
             let still_mapped = self.find_active_mapping(node_idx).is_some();
             if !still_mapped {
-                self.sync_mapping_to_storage(node_idx, cage_id, tracked_addr, len);
+                self.sync_mapping_to_storage(node_idx, cage_id, tracked_addr, map_len, map_offset);
             }
         }
 
@@ -2528,9 +2552,16 @@ impl ImfsState {
     /// backing storage.  Called on the last munmap of a node to make
     /// persistent file state reflect whatever the cage wrote through
     /// its mapping.
-    fn sync_mapping_to_storage(&mut self, node_idx: usize, cage: u64, uaddr: u64, len: usize) {
+    fn sync_mapping_to_storage(
+        &mut self,
+        node_idx: usize,
+        cage: u64,
+        uaddr: u64,
+        len: usize,
+        file_offset: usize,
+    ) {
         let size = self.nodes[node_idx].total_size;
-        let copy_len = size.min(len);
+        let copy_len = size.saturating_sub(file_offset).min(len);
         if copy_len == 0 {
             return;
         }
@@ -2556,11 +2587,18 @@ impl ImfsState {
             if *host_addr == 0 {
                 return;
             }
-            let writable = copy_len.min(*capacity);
+            if file_offset >= *capacity {
+                return;
+            }
+            let writable = copy_len.min(*capacity - file_offset);
             // SAFETY: host_addr points to the RegMapped backing and `writable`
             // is bounded by its capacity.
             unsafe {
-                core::ptr::copy_nonoverlapping(tmp.as_ptr(), *host_addr as *mut u8, writable);
+                core::ptr::copy_nonoverlapping(
+                    tmp.as_ptr(),
+                    (*host_addr as *mut u8).add(file_offset),
+                    writable,
+                );
             }
             return;
         }
@@ -2574,7 +2612,14 @@ impl ImfsState {
             _ => return,
         };
         let mut copied = 0;
-        let mut local_offset = 0;
+        let mut local_offset = file_offset;
+        while let Some(ci) = chunk_idx {
+            if local_offset < CHUNK_SIZE {
+                break;
+            }
+            local_offset -= CHUNK_SIZE;
+            chunk_idx = self.chunks[ci].next;
+        }
         while copied < copy_len {
             let ci = match chunk_idx {
                 Some(ci) => ci,
@@ -2604,12 +2649,12 @@ impl ImfsState {
     /// and if a removed mapping was the last mapping for a node, we
     /// make a best-effort sync before forwarding the exit syscall.
     pub fn cage_exit(&mut self, cage_id: u64) {
-        let removed: Vec<(u64, usize, usize)> = self
+        let removed: Vec<(u64, usize, usize, usize)> = self
             .mmap_tracking
             .iter()
-            .filter_map(|(&(cage, uaddr), &(node_idx, len))| {
+            .filter_map(|(&(cage, uaddr), &(node_idx, len, file_offset))| {
                 if cage == cage_id {
-                    Some((uaddr, node_idx, len))
+                    Some((uaddr, node_idx, len, file_offset))
                 } else {
                     None
                 }
@@ -2619,10 +2664,10 @@ impl ImfsState {
         self.mmap_tracking
             .retain(|(cage, _addr), _| *cage != cage_id);
 
-        for (uaddr, node_idx, len) in removed {
+        for (uaddr, node_idx, len, file_offset) in removed {
             self.decrement_mmap_ref(node_idx);
             if self.find_active_mapping(node_idx).is_none() {
-                self.sync_mapping_to_storage(node_idx, cage_id, uaddr, len);
+                self.sync_mapping_to_storage(node_idx, cage_id, uaddr, len, file_offset);
             }
         }
 

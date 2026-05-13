@@ -740,6 +740,54 @@ static void test_mmap_refcount_release(void) {
 	unlink("/mmap_refs");
 }
 
+/*  Test N+4: fd I/O outside a live mmap.
+ *
+ *  PostgreSQL can keep a small mapping live while later fd reads/writes
+ *  touch byte ranges outside that mapping. IMFS must mirror only the
+ *  overlapping part of a live mmap; it must not treat the mapping as if
+ *  it covers the whole file.
+ */
+
+static void test_mmap_fd_io_outside_live_mapping(void) {
+	printf("\n[test_mmap_fd_io_outside_live_mapping]\n");
+
+	const size_t MAP_SZ = 4096;
+	const size_t FILE_SZ = 65536;
+	const off_t OUTSIDE_OFF = 32768;
+	char write_buf[8192];
+	char read_buf[8192];
+
+	memset(write_buf, 'Q', sizeof(write_buf));
+	memset(read_buf, 0, sizeof(read_buf));
+
+	int fd = open("/mmap_outside_live", O_CREAT | O_RDWR, 0644);
+	CHECK("open /mmap_outside_live", fd >= 0);
+	if (fd < 0) return;
+
+	CHECK("ftruncate large file", ftruncate(fd, FILE_SZ) == 0);
+
+	void *addr =
+	    mmap(NULL, MAP_SZ, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	CHECK("mmap small live range", addr != MAP_FAILED);
+	if (addr == MAP_FAILED) { close(fd); return; }
+
+	memcpy(addr, "live mapping", 12);
+
+	ssize_t nw = pwrite(fd, write_buf, sizeof(write_buf), OUTSIDE_OFF);
+	CHECK("pwrite outside live mmap range", nw == (ssize_t)sizeof(write_buf));
+
+	ssize_t nr = pread(fd, read_buf, sizeof(read_buf), OUTSIDE_OFF);
+	CHECK("pread outside live mmap range", nr == (ssize_t)sizeof(read_buf));
+	CHECK("pread sees outside fd write",
+	      memcmp(read_buf, write_buf, sizeof(write_buf)) == 0);
+	CHECK("live mapping remains valid",
+	      memcmp(addr, "live mapping", 12) == 0);
+
+	CHECK("munmap outside-live test", munmap(addr, MAP_SZ) == 0);
+	close(fd);
+	unlink("/mmap_outside_live");
+}
+
 /*  Main  */
 
 int main(void) {
@@ -767,6 +815,7 @@ int main(void) {
 	test_mmap_truncate_shrink_zeros();
 	test_mmap_shared_fork();
 	test_mmap_refcount_release();
+	test_mmap_fd_io_outside_live_mapping();
 
 	printf("\n=== results: %d/%d passed ===\n", tests_passed, tests_run);
 	return (tests_passed == tests_run) ? 0 : 1;
