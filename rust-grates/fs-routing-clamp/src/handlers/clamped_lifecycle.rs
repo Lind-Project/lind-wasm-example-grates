@@ -10,7 +10,6 @@ use crate::helpers::{self, FS_CALLS};
 use crate::log;
 
 use std::collections::HashSet;
-use std::slice;
 
 // =====================================================================
 //  1. LIFECYCLE HANDLERS
@@ -154,18 +153,10 @@ pub extern "C" fn exec_handler(
 
     // Read the exec path from the cage's memory to check for %}.
     if let Some(path) = helpers::read_path_from_cage(arg1, arg1cage) {
-        eprintln!(
-            "[popen-trace|fsrouting exec] cage={} path={}",
-            arg1cage, path
-        );
         if path == "%}" {
             // This cage is going to be the target cage, register the fs-clamped routing syscalls
             // to this cage_id.
-            let register_ret = register_target_handlers(arg1cage);
-            eprintln!(
-                "[popen-trace|fsrouting exec] registered target handlers cage={} ret={}",
-                arg1cage, register_ret
-            );
+            register_target_handlers(arg1cage);
 
             helpers::deregister_clamped_cage(arg1cage);
 
@@ -266,29 +257,10 @@ pub extern "C" fn fork_handler(
 ) -> i32 {
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
-    let mut flags = 0u64;
-    let _ = copy_data_between_cages(
-        getcageid(),
-        arg1cage,
-        arg1,
-        arg1cage,
-        &mut flags as *mut u64 as u64,
-        getcageid(),
-        8,
-        0,
-    );
     let is_thread = is_thread_clone(arg1, arg1cage);
-    eprintln!(
-        "[popen-trace|fsrouting lifecycle_clone] parent={} flags=0x{:x} is_thread={}",
-        arg1cage, flags, is_thread
-    );
 
     // Forward the fork to the runtime. Returns child cage ID to parent, 0 to child.
     let child_cage_id = helpers::do_syscall(arg1cage, SYS_CLONE, &args, &arg_cages) as u64;
-    eprintln!(
-        "[popen-trace|fsrouting lifecycle_clone] parent={} child={}",
-        arg1cage, child_cage_id
-    );
 
     if !is_thread {
         // Copy fdtables — child always needs an entry for inner grates
@@ -301,10 +273,6 @@ pub extern "C" fn fork_handler(
         }
 
         helpers::clone_cage_cwd(arg1cage, child_cage_id);
-        eprintln!(
-            "[popen-trace|fsrouting lifecycle_clone] cloned fd/routes/cwd parent={} child={}",
-            arg1cage, child_cage_id
-        );
     }
 
     child_cage_id as i32

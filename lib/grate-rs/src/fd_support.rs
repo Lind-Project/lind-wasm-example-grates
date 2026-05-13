@@ -570,16 +570,6 @@ fn fd_translation_handler_impl(
             fdtables::get_unused_virtual_fd(origin_pipe_cageid, FDKIND_KERNEL, ksv_1 as u64, should_cloexec, 0).unwrap();
         let vsv_2 =
             fdtables::get_unused_virtual_fd(origin_pipe_cageid, FDKIND_KERNEL, ksv_2 as u64, should_cloexec, 0).unwrap();
-        eprintln!(
-            "[popen-trace|fd_support pipe] syscall={} cage={} under_fds=[{},{}] virtual_fds=[{},{}] cloexec={}",
-            syscall_num,
-            origin_pipe_cageid,
-            ksv_1,
-            ksv_2,
-            vsv_1,
-            vsv_2,
-            should_cloexec
-        );
         
         let fds: [i32; 2] = [vsv_1 as i32, vsv_2 as i32];
         

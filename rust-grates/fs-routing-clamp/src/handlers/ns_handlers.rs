@@ -184,12 +184,6 @@ macro_rules! fd_route_handler {
             let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
                 Ok(entry) => entry,
                 Err(_) => {
-                    if $sysno == SYS_READ {
-                        eprintln!(
-                            "[popen-trace|fsrouting ns_read] cage={} fd={} translate=EBADF",
-                            arg1cage, arg1
-                        );
-                    }
                     // println!(
                     //     "[ns_handlers|{}] cageid={} fd={} invalid virtual fd, ret=EBADF",
                     //     stringify!($name),
@@ -201,12 +195,6 @@ macro_rules! fd_route_handler {
             };
 
             let perfdinfo = old_fd_entry.perfdinfo != 0;
-            if $sysno == SYS_READ {
-                eprintln!(
-                    "[popen-trace|fsrouting ns_read] cage={} fd={} underfd={} perfdinfo={}",
-                    arg1cage, arg1, old_fd_entry.underfd, old_fd_entry.perfdinfo
-                );
-            }
 
             args[0] = old_fd_entry.underfd; // replace virtual fd with underfd for the syscall
             
@@ -217,12 +205,6 @@ macro_rules! fd_route_handler {
                     // Clamp entry grate has a handler for this call, invoke that.
                     Some(alt) => {
                         let ret = helpers::do_syscall(arg1cage, alt, &args, &arg_cages);
-                        if $sysno == SYS_READ {
-                            eprintln!(
-                                "[popen-trace|fsrouting ns_read] cage={} fd={} routed=alt({}) ret={}",
-                                arg1cage, arg1, alt, ret
-                            );
-                        }
                         // println!(
                         //     "[ns_handlers|{}] cageid={} fd={} underfd={} clamped=clamped grate routed_to=clamped grate ret={}",
                         //     stringify!($name),
@@ -237,12 +219,6 @@ macro_rules! fd_route_handler {
                     // selfcage_id=entrycage
                     None => {
                         let ret = helpers::do_clamp_syscall(arg1cage, $sysno, &args, &arg_cages);
-                        if $sysno == SYS_READ {
-                            eprintln!(
-                                "[popen-trace|fsrouting ns_read] cage={} fd={} routed=clamp-default ret={}",
-                                arg1cage, arg1, ret
-                            );
-                        }
                         // println!(
                         //     "[ns_handlers|{}] cageid={} fd={} underfd={} clamped=clamped grate routed_to=kernel ret={}",
                         //     stringify!($name),
@@ -257,12 +233,6 @@ macro_rules! fd_route_handler {
             }
 
             let ret = helpers::do_syscall(arg1cage, $sysno, &args, &arg_cages);
-            if $sysno == SYS_READ {
-                eprintln!(
-                    "[popen-trace|fsrouting ns_read] cage={} fd={} routed=kernel ret={}",
-                    arg1cage, arg1, ret
-                );
-            }
 
             // println!(
             //     "[ns_handlers|{}] cageid={} fd={} underfd={} clamped={} routed_to={} ret={}",
@@ -458,10 +428,6 @@ pub extern "C" fn ns_mmap_handler(
 ) -> i32 {
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
-    eprintln!(
-        "[popen-trace|fsrouting ns_mmap] cage={} addr=0x{:x} len={} flags=0x{:x} fd={}",
-        arg1cage, arg1, arg2, arg4, arg5 as i64
-    );
 
     /*
      * MAP_ANONYMOUS means fd is ignored.
@@ -1220,27 +1186,8 @@ pub extern "C" fn ns_clone_handler(
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
     let nr = helpers::get_route(arg1cage, SYS_CLONE).unwrap_or(SYS_CLONE);
-    let mut flags = 0u64;
-    let _ = copy_data_between_cages(
-        getcageid(),
-        arg1cage,
-        arg1,
-        arg1cage,
-        &mut flags as *mut u64 as u64,
-        getcageid(),
-        8,
-        0,
-    );
     let is_thread = is_thread_clone(arg1, arg1cage);
-    eprintln!(
-        "[popen-trace|fsrouting ns_clone] parent={} flags=0x{:x} is_thread={} route_nr={}",
-        arg1cage, flags, is_thread, nr
-    );
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
-    eprintln!(
-        "[popen-trace|fsrouting ns_clone] parent={} route_nr={} ret={}",
-        arg1cage, nr, ret
-    );
 
     if ret <= 0 {
         return ret;
@@ -1253,10 +1200,6 @@ pub extern "C" fn ns_clone_handler(
         // fork_handler to avoid double-init when inner grates also handle fork.
         helpers::clone_cage_routes(arg1cage, child_cage_id);
         helpers::clone_cage_cwd(arg1cage, child_cage_id);
-        eprintln!(
-            "[popen-trace|fsrouting ns_clone] cloned route/cwd parent={} child={}",
-            arg1cage, child_cage_id
-        );
     }
 
     ret
