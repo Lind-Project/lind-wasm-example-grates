@@ -25,6 +25,20 @@ CONFIG="$SCRIPT_DIR/grates_test.toml"
 LIND_WASM_ROOT="${LIND_WASM_ROOT:-$HOME/lind-wasm}"
 LINDFS="${LINDFS:-$LIND_WASM_ROOT/lindfs}"
 DEFAULT_TIMEOUT="${TIMEOUT:-60}"
+RUST_PROFILE="${PROFILE:-release}"
+RUST_PROFILE_ARGS=()
+
+case "$RUST_PROFILE" in
+    release)
+        RUST_PROFILE_ARGS=(--release)
+        ;;
+    debug)
+        ;;
+    *)
+        echo "ERROR: unsupported PROFILE=$RUST_PROFILE (expected release or debug)" >&2
+        exit 2
+        ;;
+esac
 
 # Colors
 RED='\033[0;31m'
@@ -171,10 +185,10 @@ build_rust_grate() {
             return 1
         fi
     elif [[ -f "$grate_dir/Cargo.toml" ]]; then
-        echo "  Building Rust grate: $dir (cargo lind_compile)"
-        if ! (cd "$grate_dir" && cargo lind_compile --output-dir grates) > /dev/null 2>&1; then
+        echo "  Building Rust grate: $dir (cargo lind_compile, profile: $RUST_PROFILE)"
+        if ! (cd "$grate_dir" && cargo lind_compile "${RUST_PROFILE_ARGS[@]}" --output-dir grates) > /dev/null 2>&1; then
             echo "    Build failed. Re-running with output:"
-            (cd "$grate_dir" && cargo lind_compile --output-dir grates) 2>&1 | sed 's/^/    /'
+            (cd "$grate_dir" && cargo lind_compile "${RUST_PROFILE_ARGS[@]}" --output-dir grates) 2>&1 | sed 's/^/    /'
             return 1
         fi
     else
