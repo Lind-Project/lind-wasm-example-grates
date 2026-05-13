@@ -325,8 +325,6 @@ fn fd_translation_handler_impl(
                 should_pipe = true;
                 origin_pipe_ptr = args[spec.index];
                 origin_pipe_cageid = argcages[spec.index];
-                args[spec.index] = kernel_pipe_vector.as_ptr() as u64;
-                argcages[spec.index] = this_grateid | ARG_TRANSLATE_FLAG;
             }
 
             FdArgKind::SOCKPAIR => {
@@ -556,6 +554,16 @@ fn fd_translation_handler_impl(
     }
 
     if should_pipe {
+        match copy_data_between_cages(
+            this_grateid, origin_pipe_cageid,
+            origin_pipe_ptr, origin_pipe_cageid,
+            kernel_pipe_vector.as_mut_ptr() as u64, this_grateid,
+            8, 0, // 2 x i32 = 8 bytes
+        ) {
+            Ok(_) => {}
+            Err(e) => panic!("[fd translate] copy pipe fds from cage failed: {:?}", e),
+        }
+
         let ksv_1 = kernel_pipe_vector[0];
         let ksv_2 = kernel_pipe_vector[1];
         let vsv_1 =
