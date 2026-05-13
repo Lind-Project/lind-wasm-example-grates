@@ -65,8 +65,11 @@ pub enum NodeInfo {
     /// Symbolic/hard link: index of the target node.
     Lnk { target: usize },
     /// Pipe (limited implementation).
-    #[allow(unused)]
-    Pip { data: Vec<u8>, offset: usize },
+    Pip {
+        data: Vec<u8>,
+        readers: u32,
+        writers: u32,
+    },
     /// Free slot.
     Free,
 }
@@ -121,8 +124,9 @@ impl Node {
             },
             NodeType::Lnk => NodeInfo::Lnk { target: 0 },
             NodeType::Pip => NodeInfo::Pip {
-                data: vec![0u8; CHUNK_SIZE],
-                offset: 0,
+                data: Vec::new(),
+                readers: 0,
+                writers: 0,
             },
             NodeType::Free => NodeInfo::Free,
         };

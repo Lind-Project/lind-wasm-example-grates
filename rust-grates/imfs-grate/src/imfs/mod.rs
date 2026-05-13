@@ -758,6 +758,97 @@ impl ImfsState {
         );
     }
 
+    pub fn dup(&mut self, cage_id: u64, oldfd: u64) -> i32 {
+        let entry = match fdtables::translate_virtual_fd(cage_id, oldfd) {
+            Ok(entry) => entry,
+            Err(_) => return -9,
+        };
+
+        let fd_info = match self.fd_info.get(&(cage_id, oldfd)).cloned() {
+            Some(info) => info,
+            None => return -9,
+        };
+
+        let node_idx = entry.underfd as usize;
+        if node_idx >= self.nodes.len() {
+            return -9;
+        }
+
+        if let NodeInfo::Pip {
+            readers, writers, ..
+        } = &mut self.nodes[node_idx].info
+        {
+            let flags = fd_info.lock().unwrap().flags as i32;
+            match flags & O_ACCMODE {
+                O_WRONLY => *writers += 1,
+                _ => *readers += 1,
+            }
+        }
+
+        match fdtables::get_unused_virtual_fd(cage_id, IMFS_FDKIND, entry.underfd, false, 0) {
+            Ok(newfd) => {
+                self.nodes[node_idx].in_use += 1;
+                self.fd_info.insert((cage_id, newfd), fd_info);
+                newfd as i32
+            }
+            Err(_) => -24,
+        }
+    }
+
+    pub fn dup2(&mut self, cage_id: u64, oldfd: u64, newfd: u64, cloexec: bool) -> i32 {
+        let entry = match fdtables::translate_virtual_fd(cage_id, oldfd) {
+            Ok(entry) => entry,
+            Err(_) => return -9,
+        };
+
+        let fd_info = match self.fd_info.get(&(cage_id, oldfd)).cloned() {
+            Some(info) => info,
+            None => return -9,
+        };
+
+        if oldfd == newfd {
+            return newfd as i32;
+        }
+
+        let node_idx = entry.underfd as usize;
+        if node_idx >= self.nodes.len() {
+            return -9;
+        }
+
+        if fdtables::translate_virtual_fd(cage_id, newfd).is_ok() {
+            let close_ret = self.close(cage_id, newfd);
+            if close_ret != 0 {
+                return close_ret;
+            }
+        }
+
+        match fdtables::get_specific_virtual_fd(
+            cage_id,
+            newfd,
+            IMFS_FDKIND,
+            entry.underfd,
+            cloexec,
+            0,
+        ) {
+            Ok(_) => {
+                self.nodes[node_idx].in_use += 1;
+                if let NodeInfo::Pip {
+                    readers, writers, ..
+                } = &mut self.nodes[node_idx].info
+                {
+                    let flags = fd_info.lock().unwrap().flags as i32;
+                    match flags & O_ACCMODE {
+                        O_WRONLY => *writers += 1,
+                        _ => *readers += 1,
+                    }
+                }
+                self.fd_info.insert((cage_id, newfd), fd_info);
+                newfd as i32
+            }
+            Err(_) => -24,
+        }
+    }
+
     // =====================================================================
     //  Public filesystem operations
     //
@@ -951,7 +1042,6 @@ impl ImfsState {
             let node_idx = entry.underfd as usize;
             if node_idx < self.nodes.len() {
                 self.nodes[node_idx].in_use = self.nodes[node_idx].in_use.saturating_sub(1);
-
                 if self.nodes[node_idx].doomed && self.nodes[node_idx].in_use == 0 {
                     self.reclaim_node(node_idx);
                 }
@@ -976,8 +1066,6 @@ impl ImfsState {
             Err(e) => return e,
         };
 
-        // Return EBADF for reads on non regular files.
-        // TODO: Implement pipe reads.
         match &self.nodes[node_idx].info {
             NodeInfo::Reg { head: _, tail: _ } => {}
             _ => return -9,
@@ -1035,8 +1123,6 @@ impl ImfsState {
             Err(e) => return e,
         };
 
-        // Return EBADF for writes on non regular files.
-        // TODO: Implement pipe reads.
         match &self.nodes[node_idx].info {
             NodeInfo::Reg { head: _, tail: _ } => {}
             _ => return -9,
