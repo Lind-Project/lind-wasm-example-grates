@@ -661,6 +661,7 @@ impl ImfsState {
             if local_offset < CHUNK_SIZE {
                 break;
             }
+            self.chunks[ci].used = CHUNK_SIZE;
             local_offset -= CHUNK_SIZE;
             chunk_idx = self.chunks[ci].next;
         }
@@ -688,6 +689,13 @@ impl ImfsState {
                     new_ci
                 }
             };
+
+            if local_offset >= CHUNK_SIZE {
+                self.chunks[ci].used = CHUNK_SIZE;
+                local_offset -= CHUNK_SIZE;
+                chunk_idx = self.chunks[ci].next;
+                continue;
+            }
 
             let space = CHUNK_SIZE - local_offset;
             let to_copy = (buf.len() - written).min(space);
