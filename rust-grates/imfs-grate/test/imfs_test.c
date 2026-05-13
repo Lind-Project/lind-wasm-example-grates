@@ -548,6 +548,22 @@ static void test_statfs(void) {
 	CHECK("statfs nonexistent path fails", ret != 0);
 }
 
+static void test_sync_syscalls(void) {
+	printf("\n[test_sync_syscalls]\n");
+
+	int fd = open("/test_sync_syscalls", O_CREAT | O_RDWR, 0644);
+	CHECK("create /test_sync_syscalls", fd >= 0);
+	if (fd < 0)
+		return;
+
+	CHECK("write sync test data", write(fd, "wal", 3) == 3);
+	CHECK("fsync succeeds", fsync(fd) == 0);
+	CHECK("fdatasync succeeds", fdatasync(fd) == 0);
+
+	close(fd);
+	unlink("/test_sync_syscalls");
+}
+
 /*  Test N: mmap basic round-trip.
  *
  *  Postgres' dyn-shm pattern: open → ftruncate → mmap → use.  This
@@ -746,6 +762,7 @@ int main(void) {
 	test_at_metadata_syscalls();
 	test_lseek();
 	test_statfs();
+	test_sync_syscalls();
 	test_mmap_basic();
 	test_mmap_truncate_shrink_zeros();
 	test_mmap_shared_fork();

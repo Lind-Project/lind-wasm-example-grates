@@ -106,7 +106,7 @@ fn main() {
         .register(SYS_READV, handlers::readv_handler)
         .register(SYS_WRITEV, handlers::writev_handler)
         .register(SYS_FSYNC, handlers::fsync_handler)
-        .register(SYS_FDATASYNC, handlers::enosys_handler)
+        .register(SYS_FDATASYNC, handlers::fsync_handler)
         .register(SYS_STATFS, handlers::statfs_handler)
         .register(SYS_FSTATFS, handlers::fstatfs_handler)
         .register(SYS_SYNC_FILE_RANGE, handlers::enosys_handler)
