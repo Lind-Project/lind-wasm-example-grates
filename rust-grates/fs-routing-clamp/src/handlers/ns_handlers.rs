@@ -494,18 +494,11 @@ pub extern "C" fn ns_munmap_handler(
 
     let is_clamped_mapping = helpers::is_clamped_mmap(arg1cage, arg1, arg2);
 
-    if let Some(alt) = helpers::get_route(arg1cage, SYS_MUNMAP) {
-        let ret = helpers::do_syscall(arg1cage, alt, &args, &arg_cages);
-
-        if ret == 0 {
-            helpers::remove_clamped_mmap(arg1cage, arg1, arg2);
-        }
-
-        return ret;
-    }
-
     if is_clamped_mapping {
-        let ret = helpers::do_clamp_syscall(arg1cage, SYS_MUNMAP, &args, &arg_cages);
+        let ret = match helpers::get_route(arg1cage, SYS_MUNMAP) {
+            Some(alt) => helpers::do_syscall(arg1cage, alt, &args, &arg_cages),
+            None => helpers::do_clamp_syscall(arg1cage, SYS_MUNMAP, &args, &arg_cages),
+        };
 
         if ret == 0 {
             helpers::remove_clamped_mmap(arg1cage, arg1, arg2);

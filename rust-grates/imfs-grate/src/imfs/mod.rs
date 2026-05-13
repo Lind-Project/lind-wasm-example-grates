@@ -18,15 +18,9 @@ use grate_rs::ffi::stat;
 use node::*;
 
 use grate_rs::constants::fs::*;
-use grate_rs::constants::lind::GRATE_MEMORY_FLAG;
 use grate_rs::constants::mman::{MAP_ANON, MAP_SHARED, PROT_READ, PROT_WRITE};
 use grate_rs::constants::{SYS_MMAP, SYS_MUNMAP};
 use grate_rs::{copy_data_between_cages, getcageid, make_threei_call};
-
-/// Linux `MAP_FIXED`.  Not (yet) re-exported from
-/// `grate_rs::constants::mman`; defined locally to keep the imfs
-/// mmap path self-contained.
-const MAP_FIXED: i32 = 0x10;
 
 /// fdtables fdkind for IMFS file descriptors.
 pub const IMFS_FDKIND: u32 = 1;
@@ -902,10 +896,10 @@ impl ImfsState {
     //  Internal chunk read/write
     // =====================================================================
 
-    /// Read bytes from a regular file's chunk chain starting at the given byte offset.
-    /// Walks the linked list of chunks, skipping past the offset, then copies data
-    /// into buf. Returns the number of bytes actually read (may be less than buf.len()
-    /// if EOF is reached).
+    /// Read bytes from a regular file starting at the given byte offset.
+    /// For plain `Reg` nodes this walks the chunk chain; for `RegMapped`
+    /// nodes with no active cage mapping it reads the host backing directly.
+    /// Returns the number of bytes actually read.
     fn read_from_node(&self, node_idx: usize, offset: usize, buf: &mut [u8]) -> usize {
         let node = &self.nodes[node_idx];
         if offset >= node.total_size {
@@ -934,6 +928,26 @@ impl ImfsState {
 
         let head = match &node.info {
             NodeInfo::Reg { head, .. } => *head,
+            NodeInfo::RegMapped {
+                host_addr,
+                capacity,
+                ..
+            } => {
+                if *host_addr == 0 || offset >= *capacity {
+                    return 0;
+                }
+                let readable = count.min(capacity.saturating_sub(offset));
+                // SAFETY: the RegMapped host backing is an owned readable
+                // mapping of at least `capacity` bytes.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        (*host_addr as *const u8).add(offset),
+                        buf.as_mut_ptr(),
+                        readable,
+                    );
+                }
+                return readable;
+            }
             _ => return 0,
         };
 
@@ -967,10 +981,9 @@ impl ImfsState {
         read
     }
 
-    /// Write bytes to a regular file's chunk chain starting at the given byte offset.
-    /// Allocates new chunks as needed when writing past the end. Zero-fills any holes
-    /// between the chunk's current used size and the write offset. Updates the node's
-    /// total_size if the write extends the file. Returns the number of bytes written.
+    /// Write bytes to a regular file starting at the given byte offset.
+    /// Plain `Reg` nodes use chunk storage; `RegMapped` nodes with no active
+    /// cage mapping write into the host backing directly.
     fn write_to_node(&mut self, node_idx: usize, offset: usize, buf: &[u8]) -> usize {
         if buf.is_empty() {
             return 0;
@@ -993,6 +1006,33 @@ impl ImfsState {
                 buf.len() as u64,
                 0,
             );
+            if end > self.nodes[node_idx].total_size {
+                self.nodes[node_idx].total_size = end;
+            }
+            return buf.len();
+        }
+
+        if matches!(self.nodes[node_idx].info, NodeInfo::RegMapped { .. }) {
+            let end = offset + buf.len();
+            if self.ensure_mapped_backing(node_idx, end).is_err() {
+                return 0;
+            }
+            let host_addr = match &self.nodes[node_idx].info {
+                NodeInfo::RegMapped { host_addr, .. } => *host_addr,
+                _ => return 0,
+            };
+            if host_addr == 0 {
+                return 0;
+            }
+            // SAFETY: ensure_mapped_backing guarantees the host mapping covers
+            // `offset..end`; `buf` is valid for `buf.len()` bytes.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    buf.as_ptr(),
+                    (host_addr as *mut u8).add(offset),
+                    buf.len(),
+                );
+            }
             if end > self.nodes[node_idx].total_size {
                 self.nodes[node_idx].total_size = end;
             }
@@ -1108,6 +1148,51 @@ impl ImfsState {
                     0,
                 );
             }
+            self.nodes[node_idx].total_size = new_size;
+            return;
+        }
+
+        if matches!(self.nodes[node_idx].info, NodeInfo::RegMapped { .. }) {
+            if new_size > old_size {
+                if self.ensure_mapped_backing(node_idx, new_size).is_err() {
+                    return;
+                }
+            }
+
+            let (host_addr, capacity) = match &self.nodes[node_idx].info {
+                NodeInfo::RegMapped {
+                    host_addr,
+                    capacity,
+                    ..
+                } => (*host_addr, *capacity),
+                _ => return,
+            };
+
+            if host_addr != 0 {
+                if new_size > old_size {
+                    let zero_len = new_size - old_size;
+                    if old_size < capacity {
+                        let zero_len = zero_len.min(capacity - old_size);
+                        // SAFETY: old_size..old_size+zero_len is inside the
+                        // RegMapped host backing.
+                        unsafe {
+                            core::ptr::write_bytes(
+                                (host_addr as *mut u8).add(old_size),
+                                0,
+                                zero_len,
+                            );
+                        }
+                    }
+                } else if new_size < old_size && new_size < capacity {
+                    let zero_len = (old_size - new_size).min(capacity - new_size);
+                    // SAFETY: new_size..new_size+zero_len is inside the
+                    // RegMapped host backing.
+                    unsafe {
+                        core::ptr::write_bytes((host_addr as *mut u8).add(new_size), 0, zero_len);
+                    }
+                }
+            }
+
             self.nodes[node_idx].total_size = new_size;
             return;
         }
@@ -1381,6 +1466,7 @@ impl ImfsState {
             .collect();
         for ((_, uaddr), value) in inherited {
             self.mmap_tracking.insert((child_cage, uaddr), value);
+            self.increment_mmap_ref(value.0);
         }
 
         if let Some(cwd) = self.cwd_info.get(&parent_cage).cloned() {
@@ -2241,6 +2327,10 @@ impl ImfsState {
         if node_idx >= self.nodes.len() {
             return -9; // EBADF
         }
+        match self.nodes[node_idx].node_type {
+            NodeType::Reg | NodeType::RegMapped => {}
+            _ => return -(grate_rs::constants::error::ENODEV as i32),
+        }
 
         // If this cage already has an mmap tracked for this node (e.g.
         // inherited from a fork parent), hand back the same uaddr.
@@ -2259,6 +2349,16 @@ impl ImfsState {
         });
         if let Some(uaddr) = inherited {
             return uaddr as i32;
+        }
+
+        if self.promote_to_mapped(node_idx).is_err() {
+            return -(grate_rs::constants::error::ENOMEM as i32);
+        }
+        if self
+            .ensure_mapped_backing(node_idx, (offset as usize).saturating_add(len))
+            .is_err()
+        {
+            return -(grate_rs::constants::error::EBUSY as i32);
         }
 
         // Forward to RawPOSIX as MAP_ANON | MAP_SHARED (no MAP_FIXED,
@@ -2298,12 +2398,12 @@ impl ImfsState {
             Err(_) => return -(grate_rs::constants::error::ENOMEM as i32),
         };
 
-        // Seed the new region with the file's current bytes (chunks).
+        // Seed the new region with the file's current bytes.
         let total_size = self.nodes[node_idx].total_size;
         let copy_len = total_size.saturating_sub(offset as usize).min(len);
         if copy_len > 0 {
             let mut tmp = vec![0u8; copy_len];
-            let _ = self.read_chunks_unmapped(node_idx, offset as usize, &mut tmp);
+            let _ = self.read_from_node(node_idx, offset as usize, &mut tmp);
             let _ = copy_data_between_cages(
                 thiscage,
                 cage_id,
@@ -2319,54 +2419,9 @@ impl ImfsState {
         // Record the mapping.  Routes future fd I/O through it.
         self.mmap_tracking
             .insert((cage_id, mapped), (node_idx, len));
+        self.increment_mmap_ref(node_idx);
 
         mapped as i32
-    }
-
-    /// Read bytes from the chunk chain directly, bypassing the mapping
-    /// lookup in `read_from_node`.  Used only by `mmap` to seed the
-    /// cage's fresh mapping with the file's current bytes — the
-    /// mmap_tracking entry doesn't exist yet at that point, so the
-    /// regular `read_from_node` would still hit chunks anyway, but
-    /// having a dedicated path avoids the per-call lookup overhead
-    /// and documents the intent.
-    fn read_chunks_unmapped(&self, node_idx: usize, offset: usize, buf: &mut [u8]) -> usize {
-        let node = &self.nodes[node_idx];
-        if offset >= node.total_size {
-            return 0;
-        }
-        let count = buf.len().min(node.total_size - offset);
-
-        let head = match &node.info {
-            NodeInfo::Reg { head, .. } => *head,
-            _ => return 0,
-        };
-
-        let mut chunk_idx = head;
-        let mut local_offset = offset;
-        while let Some(ci) = chunk_idx {
-            if local_offset < CHUNK_SIZE {
-                break;
-            }
-            local_offset -= CHUNK_SIZE;
-            chunk_idx = self.chunks[ci].next;
-        }
-
-        let mut read = 0;
-        while read < count {
-            let ci = match chunk_idx {
-                Some(ci) => ci,
-                None => break,
-            };
-            let available = self.chunks[ci].used.saturating_sub(local_offset);
-            let to_copy = (count - read).min(available);
-            buf[read..read + to_copy]
-                .copy_from_slice(&self.chunks[ci].data[local_offset..local_offset + to_copy]);
-            read += to_copy;
-            local_offset = 0;
-            chunk_idx = self.chunks[ci].next;
-        }
-        read
     }
 
     /// Find any live mmap for `node_idx`, returning `(cage, uaddr)`.
@@ -2385,6 +2440,19 @@ impl ImfsState {
                     None
                 }
             })
+    }
+
+    fn increment_mmap_ref(&mut self, node_idx: usize) {
+        if let NodeInfo::RegMapped { mmap_refs, .. } = &mut self.nodes[node_idx].info {
+            *mmap_refs = mmap_refs.saturating_add(1);
+        }
+    }
+
+    fn decrement_mmap_ref(&mut self, node_idx: usize) {
+        if let NodeInfo::RegMapped { mmap_refs, .. } = &mut self.nodes[node_idx].info {
+            debug_assert!(*mmap_refs > 0, "mmap_refs underflow for node {}", node_idx);
+            *mmap_refs = mmap_refs.saturating_sub(1);
+        }
     }
 
     /// munmap: drop a cage-side mapping previously created by
@@ -2414,14 +2482,15 @@ impl ImfsState {
             }
         }
 
-        // If we owned this mapping AND it was the last live mapping
-        // for the node, copy its bytes back into chunks so the file's
-        // persistent state catches up with whatever the cage wrote
-        // through the pointer view.
+        // If we owned this mapping, drop its live ref.  If it was the
+        // last live mapping for the node, copy its bytes back into the
+        // file's persistent storage so future fd reads and later mmaps
+        // see whatever the cage wrote through the pointer view.
         if let Some((node_idx, _)) = tracked {
+            self.decrement_mmap_ref(node_idx);
             let still_mapped = self.find_active_mapping(node_idx).is_some();
             if !still_mapped {
-                self.sync_mapping_to_chunks(node_idx, cage_id, tracked_addr, len);
+                self.sync_mapping_to_storage(node_idx, cage_id, tracked_addr, len);
             }
         }
 
@@ -2456,9 +2525,10 @@ impl ImfsState {
     }
 
     /// Copy `len` bytes from `(cage, uaddr)` back into `node_idx`'s
-    /// chunk chain.  Called on the last munmap of a node to make the
-    /// chunks reflect whatever the cage wrote through its mapping.
-    fn sync_mapping_to_chunks(&mut self, node_idx: usize, cage: u64, uaddr: u64, len: usize) {
+    /// backing storage.  Called on the last munmap of a node to make
+    /// persistent file state reflect whatever the cage wrote through
+    /// its mapping.
+    fn sync_mapping_to_storage(&mut self, node_idx: usize, cage: u64, uaddr: u64, len: usize) {
         let size = self.nodes[node_idx].total_size;
         let copy_len = size.min(len);
         if copy_len == 0 {
@@ -2476,6 +2546,24 @@ impl ImfsState {
             copy_len as u64,
             0,
         );
+
+        if let NodeInfo::RegMapped {
+            host_addr,
+            capacity,
+            ..
+        } = &self.nodes[node_idx].info
+        {
+            if *host_addr == 0 {
+                return;
+            }
+            let writable = copy_len.min(*capacity);
+            // SAFETY: host_addr points to the RegMapped backing and `writable`
+            // is bounded by its capacity.
+            unsafe {
+                core::ptr::copy_nonoverlapping(tmp.as_ptr(), *host_addr as *mut u8, writable);
+            }
+            return;
+        }
 
         // Walk chunks and overwrite their bytes.  We can't go through
         // `write_to_node` because it would short-circuit back into the
@@ -2511,21 +2599,32 @@ impl ImfsState {
     /// node's `mmap_refs` stuck at a positive value, which would
     /// otherwise pin the host region and reject any future grow.
     ///
-    /// We don't forward `SYS_MUNMAP` here — the cage is gone, its
-    /// vmmap entries have already been torn down by RawPOSIX as
-    /// part of cage exit.  We only need to update our own
-    /// bookkeeping.
+    /// We don't forward `SYS_MUNMAP` here; the exit path is about to
+    /// tear down the cage's vmmap.  We only update IMFS bookkeeping,
+    /// and if a removed mapping was the last mapping for a node, we
+    /// make a best-effort sync before forwarding the exit syscall.
     pub fn cage_exit(&mut self, cage_id: u64) {
-        // Drop any tracking entries this cage owned.  We deliberately
-        // don't try to sync the cage's mapping back to chunks here:
-        // by the time exit_handler fires, the cage may have already
-        // torn down its address space, so a copy_data_between_cages
-        // read from those uaddrs would be invalid (and the runtime
-        // would log a noisy "range invalid" for our best-effort
-        // attempt).  Any cage that wants its mapping bytes to survive
-        // must explicitly munmap — which we do sync.
+        let removed: Vec<(u64, usize, usize)> = self
+            .mmap_tracking
+            .iter()
+            .filter_map(|(&(cage, uaddr), &(node_idx, len))| {
+                if cage == cage_id {
+                    Some((uaddr, node_idx, len))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         self.mmap_tracking
             .retain(|(cage, _addr), _| *cage != cage_id);
+
+        for (uaddr, node_idx, len) in removed {
+            self.decrement_mmap_ref(node_idx);
+            if self.find_active_mapping(node_idx).is_none() {
+                self.sync_mapping_to_storage(node_idx, cage_id, uaddr, len);
+            }
+        }
 
         // Clean up the per-cage cwd and any leftover fd offsets too.
         self.cwd_info.remove(&cage_id);
