@@ -405,8 +405,15 @@ impl ImfsState {
         }
     }
 
+    fn ensure_fdtable_cage(cage_id: u64) {
+        if !fdtables::check_cage_exists(cage_id) {
+            fdtables::init_empty_cage(cage_id);
+        }
+    }
+
     fn create_backing_vfd(&mut self, node_idx: usize) -> Result<u64, i32> {
         let thiscage = getcageid();
+        Self::ensure_fdtable_cage(thiscage);
 
         for _ in 0..16 {
             let suffix = self.backing_counter;
@@ -437,6 +444,13 @@ impl ImfsState {
             if unlink_ret < 0 {
                 self.close_backing_vfd(fd as u64);
                 return Err((-unlink_ret) as i32);
+            }
+
+            if fdtables::get_specific_virtual_fd(thiscage, fd as u64, 0, fd as u64, false, 0)
+                .is_err()
+            {
+                self.close_backing_vfd(fd as u64);
+                return Err(grate_rs::constants::error::EBADF);
             }
             return Ok(fd as u64);
         }
@@ -482,6 +496,9 @@ impl ImfsState {
             [backing_vfd, 0, 0, 0, 0, 0],
             [thiscage, 0, 0, 0, 0, 0],
         );
+        if fdtables::check_cage_exists(thiscage) {
+            let _ = fdtables::close_virtualfd(thiscage, backing_vfd);
+        }
     }
 
     fn mmap_backing_in_cage(
@@ -494,6 +511,9 @@ impl ImfsState {
         offset: u64,
     ) -> Result<u64, i32> {
         let thiscage = getcageid();
+        if !fdtables::check_cage_exists(cage_id) {
+            return Err(grate_rs::constants::error::EBADF);
+        }
         let backing_entry = fdtables::translate_virtual_fd(thiscage, backing_vfd)
             .map_err(|_| grate_rs::constants::error::EBADF)?;
         let temp_fd = fdtables::get_unused_virtual_fd(
