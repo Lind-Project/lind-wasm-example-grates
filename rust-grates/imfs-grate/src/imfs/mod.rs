@@ -1682,7 +1682,7 @@ impl ImfsState {
         };
 
         match &self.nodes[node_idx].info {
-            NodeInfo::Reg { head: _, tail: _ } => {}
+            NodeInfo::Reg { .. } | NodeInfo::RegMapped { .. } => {}
             _ => return -9,
         };
 
@@ -1719,7 +1719,7 @@ impl ImfsState {
         // Return EBADF for reads on non regular files.
         // TODO: Implement pipe reads.
         match &self.nodes[node_idx].info {
-            NodeInfo::Reg { head: _, tail: _ } => {}
+            NodeInfo::Reg { .. } | NodeInfo::RegMapped { .. } => {}
             _ => return -9,
         };
 
@@ -1743,7 +1743,7 @@ impl ImfsState {
         };
 
         match &self.nodes[node_idx].info {
-            NodeInfo::Reg { head: _, tail: _ } => {}
+            NodeInfo::Reg { .. } | NodeInfo::RegMapped { .. } => {}
             _ => return -9,
         };
 
@@ -1783,7 +1783,7 @@ impl ImfsState {
         // Return EBADF for writes on non regular files.
         // TODO: Implement pipe reads.
         match &self.nodes[node_idx].info {
-            NodeInfo::Reg { head: _, tail: _ } => {}
+            NodeInfo::Reg { .. } | NodeInfo::RegMapped { .. } => {}
             _ => return -9,
         };
 
