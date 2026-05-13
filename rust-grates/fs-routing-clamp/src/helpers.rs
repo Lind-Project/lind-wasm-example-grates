@@ -8,8 +8,8 @@
 
 use grate_rs::constants::*;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use grate_rs::{GrateError, copy_data_between_cages, make_threei_call};
 
@@ -499,11 +499,7 @@ pub fn is_clamped_mmap(cageid: u64, addr: u64, len: u64) -> bool {
     let maps = clamped_mmaps().lock().unwrap();
 
     maps.get(&cageid)
-        .map(|ranges| {
-            ranges
-                .iter()
-                .any(|r| addr < r.end && end > r.start)
-        })
+        .map(|ranges| ranges.iter().any(|r| addr < r.end && end > r.start))
         .unwrap_or(false)
 }
 
