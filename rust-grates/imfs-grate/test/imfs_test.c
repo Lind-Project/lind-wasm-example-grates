@@ -559,6 +559,7 @@ static void test_sync_syscalls(void) {
 	CHECK("write sync test data", write(fd, "wal", 3) == 3);
 	CHECK("fsync succeeds", fsync(fd) == 0);
 	CHECK("fdatasync succeeds", fdatasync(fd) == 0);
+	CHECK("sync_file_range succeeds", sync_file_range(fd, 0, 3, 0) == 0);
 
 	close(fd);
 	unlink("/test_sync_syscalls");

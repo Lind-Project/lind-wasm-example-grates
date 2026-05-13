@@ -109,7 +109,7 @@ fn main() {
         .register(SYS_FDATASYNC, handlers::fsync_handler)
         .register(SYS_STATFS, handlers::statfs_handler)
         .register(SYS_FSTATFS, handlers::fstatfs_handler)
-        .register(SYS_SYNC_FILE_RANGE, handlers::enosys_handler)
+        .register(SYS_SYNC_FILE_RANGE, handlers::sync_file_range_handler)
         .register(SYS_UTIMENSAT, handlers::utimensat_handler)
         .register(SYS_MMAP, handlers::mmap_handler)
         .register(SYS_MUNMAP, handlers::munmap_handler)

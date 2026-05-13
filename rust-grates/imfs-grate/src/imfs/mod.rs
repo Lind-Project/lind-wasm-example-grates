@@ -1800,6 +1800,19 @@ impl ImfsState {
         n as i32
     }
 
+    /// sync_file_range: IMFS is memory-resident, so dirty byte flushing is a no-op.
+    pub fn sync_file_range(&mut self, cage_id: u64, fd: u64) -> i32 {
+        let (node_idx, _) = match self.get_node_and_flags(cage_id, fd) {
+            Ok((n, f)) => (n, f),
+            Err(e) => return e,
+        };
+
+        match self.nodes[node_idx].node_type {
+            NodeType::Reg | NodeType::RegMapped => 0,
+            _ => -22, // EINVAL
+        }
+    }
+
     /// lseek: reposition the fd offset.
     pub fn lseek(&mut self, cage_id: u64, fd: u64, offset: i64, whence: i32) -> i32 {
         let (node_idx, _) = match self.get_node_and_flags(cage_id, fd) {

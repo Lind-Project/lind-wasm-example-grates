@@ -1597,6 +1597,24 @@ pub extern "C" fn fsync_handler(
     0
 }
 
+pub extern "C" fn sync_file_range_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    _arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    imfs::with_imfs(|state| state.sync_file_range(arg1cage, arg1))
+}
+
 pub extern "C" fn utimensat_handler(
     _cageid: u64,
     arg1: u64,
