@@ -1042,6 +1042,9 @@ impl ImfsState {
             let node_idx = entry.underfd as usize;
             if node_idx < self.nodes.len() {
                 self.nodes[node_idx].in_use = self.nodes[node_idx].in_use.saturating_sub(1);
+                if self.nodes[node_idx].doomed && self.nodes[node_idx].in_use == 0 {
+                    self.reclaim_node(node_idx);
+                }
             }
         }
 
