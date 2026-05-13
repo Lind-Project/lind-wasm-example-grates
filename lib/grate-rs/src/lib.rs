@@ -8,17 +8,20 @@
 // Use and publicly export constants and grate-rs related ffi shims.
 pub mod constants;
 pub mod ffi;
+pub mod fd_support;
 
 use core::ffi::{c_char, c_int, c_void};
 use std::ffi::{CString, c_uint};
 use std::ptr;
+use std::collections::HashSet;
 
 use crate::constants::lind::ELINDAPIABORTED;
 use crate::constants::mman::*;
 use crate::ffi::{
-    clean_exit, cp_data_impl, execv, fork, getpid_impl, make_syscall_impl, mmap, munmap,
-    register_handler_impl, sem_destroy, sem_init, sem_post, sem_t, sem_wait, waitpid,
+    clean_exit, cp_data_impl, cp_handler_impl, execv, fork, getpid_impl, make_syscall_impl, mmap,
+    munmap, register_handler_impl, sem_destroy, sem_init, sem_post, sem_t, sem_wait, waitpid,
 };
+use crate::fd_support::FD_HANDLER_TABLE;
 
 /// Error types that can occur during grate execution.
 #[derive(Debug)]
@@ -29,6 +32,8 @@ pub enum GrateError {
     HandlerRegistrationError(i32),
     /// Error returned by `copy_data_between_cages`.
     CopyDataError(i32),
+    /// Error returned by `copy_handler_table_to_cage`.
+    CopyHandlerError(i32),
     /// Make syscall error
     MakeSyscallError(i32),
 }
@@ -148,6 +153,32 @@ pub unsafe fn mmap_shared<T>() -> &'static mut T {
 // Wrap raw FFI calls in Rust-friendly signatures to keep unsafe usage localized
 // and expose idiomatic `Result`-based APIs to crate users.
 
+/// Register default fd handlers for all fd-related syscalls except those in the provided exception list.
+pub fn register_default_fd_handlers_except(
+    cageid: u64,
+    grateid: u64,
+    except_syscalls: Option<HashSet<u64>>,
+) -> Result<(), GrateError> {
+    for &(syscall_nr, handler) in FD_HANDLER_TABLE {
+        if except_syscalls.as_ref().map_or(false, |s| s.contains(&syscall_nr)) {
+            continue;
+        }
+
+        let fn_ptr_addr = handler as *const () as usize as u64;
+        
+        let ret = unsafe {
+            register_handler_impl(cageid, syscall_nr, grateid, fn_ptr_addr)
+        };
+
+        match ret {
+            0 => {}
+            _ => return Err(GrateError::HandlerRegistrationError(ret)),
+        }
+    }
+
+    Ok(())
+}
+
 /// Register Handler for a syscall for a source cage to the the target grate.
 pub fn register_handler(
     cageid: u64,
@@ -185,6 +216,17 @@ pub fn copy_data_between_cages(
     // 3i::copy_data_between_cages returns ELINDAPIABORTED for every error.
     match ret as u64 {
         ELINDAPIABORTED => Err(GrateError::CopyDataError(ELINDAPIABORTED as i32)),
+        _ => Ok(()),
+    }
+}
+
+/// Copy data between two cages.
+pub fn copy_handler_table_to_cage(srccage: u64, targetcage: u64) -> Result<(), GrateError> {
+    let ret = unsafe { cp_handler_impl(srccage, targetcage) };
+
+    // 3i::copy_handler_table_to_cage returns ELINDAPIABORTED for every error.
+    match ret as u64 {
+        ELINDAPIABORTED => Err(GrateError::CopyHandlerError(ELINDAPIABORTED as i32)),
         _ => Ok(()),
     }
 }
@@ -242,6 +284,40 @@ pub fn getcageid() -> u64 {
     unsafe { getpid_impl() as u64 }
 }
 
+/// Check whether a SYS_CLONE call is a thread creation (not a process fork).
+///
+/// In Lind, `arg1` of SYS_CLONE is a pointer to `struct clone_args` in the
+/// calling cage's memory. The `flags` field is the first u64 in the struct.
+///
+/// We check `CLONE_THREAD` rather than `CLONE_VM` because `posix_spawn`
+/// (used by libc `popen`, `system`, etc.) issues
+/// `clone(CLONE_VM | CLONE_VFORK | SIGCHLD)` — vfork-style — which sets
+/// `CLONE_VM` but is NOT a thread.  Treating it as a thread skips the
+/// per-cage state setup grates need to do for the spawned process,
+/// breaking pipes/fdtables for popen children.
+///
+/// Real threads (pthread_create) set `CLONE_THREAD`; vfork-style spawns
+/// do not.  `CLONE_FILES` would be an equivalent check (threads share
+/// the fd table, vfork-spawns don't).
+///
+/// Grates should only skip per-cage state copy on actual thread clones,
+/// not on vfork-style process spawns.
+pub fn is_thread_clone(clone_args_ptr: u64, clone_args_cage: u64) -> bool {
+    let grate_cage = getcageid();
+    let mut flags: u64 = 0;
+    let _ = copy_data_between_cages(
+        grate_cage,
+        clone_args_cage,
+        clone_args_ptr,
+        clone_args_cage,
+        &mut flags as *mut u64 as u64,
+        grate_cage,
+        8,
+        0,
+    );
+    (flags & constants::process::CLONE_THREAD) != 0
+}
+
 /// Dispatch function required by 3i to invoke registered syscall handlers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pass_fptr_to_wt(
@@ -290,11 +366,25 @@ pub unsafe extern "C" fn pass_fptr_to_wt(
 }
 
 pub type GrateTeardownCallback = Box<dyn Fn(Result<i32, GrateError>)>;
+pub type PreExecCallback = Box<dyn Fn(i32)>;
+
+pub enum FdTranslatePolicy {
+    Disabled,
+    EnabledExcept(Option<HashSet<u64>>), // If None, all fd related syscalls are translated.
+}
+
+impl Default for FdTranslatePolicy {
+    fn default() -> Self {
+        FdTranslatePolicy::Disabled
+    }
+}
 
 /// A builder for creating grates with customizable lifecycle hooks
 pub struct GrateBuilder {
     handlers: Vec<(u64, SyscallHandler)>,
+    fd_translate_policy: FdTranslatePolicy,
     teardown: Option<GrateTeardownCallback>,
+    preexec: Option<PreExecCallback>,
 }
 
 impl GrateBuilder {
@@ -302,13 +392,23 @@ impl GrateBuilder {
     pub fn new() -> Self {
         Self {
             handlers: Vec::new(),
+            fd_translate_policy: FdTranslatePolicy::default(),
             teardown: None,
+            preexec: None,
         }
     }
 
     /// Register a syscall handler
     pub fn register(mut self, syscall_nr: u64, handler: SyscallHandler) -> Self {
         self.handlers.push((syscall_nr, handler));
+        self
+    }
+
+    pub fn enable_fd_translate_policy(mut self, exception_list: Option<Vec<u64>>) -> Self {
+        self.fd_translate_policy = match exception_list {
+            Some(list) => FdTranslatePolicy::EnabledExcept(Some(list.into_iter().collect())),
+            None => FdTranslatePolicy::EnabledExcept(None),
+        };
         self
     }
 
@@ -321,17 +421,30 @@ impl GrateBuilder {
         self
     }
 
+    /// Register a pre-exec callback function. Run after fork, but before exec.
+    pub fn preexec<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(i32) + 'static,
+    {
+        self.preexec = Some(Box::new(callback));
+        self
+    }
+
     /// Run a GrateTeardownCallback with the Result from `run`
     /// - This is a terminal function.
     /// - Must always be called from the parent grate.
     fn run_teardown(callback: Option<GrateTeardownCallback>, result: Result<i32, GrateError>) -> ! {
+        let exit_code = match &result {
+            Ok(status) => (*status >> 8) & 0xff, // WEXITSTATUS
+            Err(_) => 1,
+        };
         match callback {
             Some(f) => {
                 f(result);
-                clean_exit(0);
+                clean_exit(exit_code);
             }
             None => {
-                clean_exit(0);
+                clean_exit(exit_code);
             }
         }
     }
@@ -396,12 +509,32 @@ impl GrateBuilder {
             cageid => {
                 // Parent cage - grate handler.
 
+                // Set up fd translation policy based on builder configuration.
+                match &self.fd_translate_policy {
+                    FdTranslatePolicy::Disabled => {}
+                    FdTranslatePolicy::EnabledExcept(exceptions) => {
+                        match register_default_fd_handlers_except(
+                            cageid as u64,
+                            grateid as u64,
+                            exceptions.clone(),
+                        ) {
+                            Ok(_) => {}
+                            Err(ret) => GrateBuilder::run_teardown(teardown, Err(ret)),
+                        }
+                    }
+                };
+
                 // Register handlers with 3i.
                 for (syscall_nr, handler) in &self.handlers {
                     match register_handler(cageid as u64, *syscall_nr, grateid as u64, *handler) {
                         Ok(_) => {}
                         Err(ret) => GrateBuilder::run_teardown(teardown, Err(ret)),
                     };
+                }
+
+                // Call the pre-exec hook if specified.
+                if let Some(callback) = self.preexec.take() {
+                    callback(cageid);
                 }
 
                 // Indicate to the child that it can begin execution.

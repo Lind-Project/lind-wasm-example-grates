@@ -20,6 +20,33 @@ pub struct sem_t {
     __size: [c_char; 16],
 }
 
+// Lind-compatible stat struct.
+#[repr(C)]
+#[derive(Eq, PartialEq, Default, Debug)]
+pub struct stat {
+    pub st_dev: u64,
+    pub st_ino: u64,
+    pub st_mode: u32,
+    pub st_nlink: u32,
+    pub st_uid: u32,
+    pub st_gid: u32,
+    pub st_rdev: u64,
+    pub st_size: u64,
+    pub st_blksize: i32,
+    pub st_blocks: u32,
+    pub st_atim: [u64; 2],
+    pub st_mtim: [u64; 2],
+    pub st_ctim: [u64; 2],
+}
+
+// Lind-compatible iovec struct for x86_64 guests.
+#[repr(C)]
+#[derive(Copy, Clone, Default, Debug)]
+pub struct iovec {
+    pub iov_base: u64,
+    pub iov_len: u64,
+}
+
 /// Flush stdio streams and terminate the process.
 ///
 /// This helper is shared by both the public library logic (`lib.rs`) and
@@ -54,6 +81,9 @@ unsafe extern "C" {
         len: u64,
         copytype: u64,
     ) -> c_int;
+
+    #[link_name = "copy_handler_table_to_cage"]
+    pub(crate) fn cp_handler_impl(srccage: u64, targetcage: u64) -> c_int;
 
     #[link_name = "make_threei_call"]
     pub(crate) fn make_syscall_impl(
@@ -101,4 +131,7 @@ unsafe extern "C" {
     pub fn sem_destroy(sem: *mut sem_t) -> c_int;
     pub fn sem_post(sem: *mut sem_t) -> c_int;
     pub fn sem_wait(sem: *mut sem_t) -> c_int;
+
+    // Stat
+    pub fn stat(path: *const c_char, buf: *mut stat) -> c_int;
 }

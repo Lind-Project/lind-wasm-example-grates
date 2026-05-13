@@ -13,6 +13,16 @@ pub const O_EXCL: i32 = 0o200;
 pub const O_TRUNC: i32 = 0o1000;
 pub const O_APPEND: i32 = 0o2000;
 pub const O_DIRECTORY: i32 = 0o200000;
+pub const O_CLOEXEC: i32 = 0o2000000; // Close on exec
+
+pub const DT_UNKNOWN: u8 = 0;
+pub const DT_FIFO: u8 = 1;
+pub const DT_CHR: u8 = 2;
+pub const DT_DIR: u8 = 4;
+pub const DT_BLK: u8 = 6;
+pub const DT_REG: u8 = 8;
+pub const DT_LNK: u8 = 10;
+pub const DT_SOCK: u8 = 12;
 
 pub const SEEK_SET: i32 = 0;
 pub const SEEK_CUR: i32 = 1;
@@ -22,3 +32,14 @@ pub const F_GETFL: i32 = 3;
 
 pub const S_IRUSR: u32 = 0o400;
 pub const S_IWUSR: u32 = 0o200;
+pub const S_IXUSR: u32 = 0o100;
+
+pub const S_IFDIR: u32 = 0o4_0000;
+
+pub const F_OK: i32 = 0;
+pub const R_OK: i32 = 4;
+pub const W_OK: i32 = 2;
+pub const X_OK: i32 = 1;
+
+pub const F_DUPFD: i32 = 0;
+pub const F_DUPFD_CLOEXEC: i32 = 1030;

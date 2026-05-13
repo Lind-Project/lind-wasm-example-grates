@@ -1,0 +1,227 @@
+# Grate test suite configuration.
+#
+# Each [[grate]] entry defines a grate to build and test.
+#
+# Fields:
+#   name      - display name
+#   dir       - directory under c-grates/ or rust-grates/ (determined by type)
+#   type      - "rust" or "c"
+#   binary    - (optional) cwasm filename in lindfs (without .cwasm)
+#               defaults to name
+#   tests     - list of test entries
+#   skip      - (optional) skip this grate entirely
+#
+# Test fields:
+#   test_src   - C source file to compile (relative to grate dir)
+#   grate_args - (optional) extra args between grate and test binary
+#   files      - (optional) extra files to copy into lindfs
+#   lindfs_dir - (optional) also copy test cwasm into this lindfs subdirectory
+#   timeout    - (optional) timeout in seconds (default: 60)
+#   skip       - (optional) skip this test
+
+# ── Geteuid (C) ─────────────────────────────────────────────────────
+
+[[grate]]
+name = "geteuid-grate"
+dir = "geteuid-grate"
+type = "c"
+binary = "geteuid-grate"
+
+[[grate.tests]]
+test_src = "test/geteuid.c"
+
+# ── Strace (Rust) ───────────────────────────────────────────────────
+
+[[grate]]
+name = "strace-grate"
+dir = "strace-grate"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/strace_test.c"
+
+# ── Strace (C) ──────────────────────────────────────────────────────
+
+[[grate]]
+name = "strace-grate"
+dir = "strace-grate"
+type = "c"
+binary = "strace-grate"
+
+[[grate.tests]]
+test_src = "test/strace_test.c"
+
+# ── IMFS (C) ────────────────────────────────────────────────────────
+
+[[grate]]
+name = "imfs-grate"
+dir = "imfs-grate"
+type = "c"
+binary = "imfs-grate"
+
+[[grate.tests]]
+test_src = "test/imfs-test.c"
+
+# ── IMFS (Rust) ─────────────────────────────────────────────────────
+
+[[grate]]
+name = "imfs-grate"
+dir = "imfs-grate"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/imfs_test.c"
+
+# ── Readonly (Rust) ─────────────────────────────────────────────────
+
+[[grate]]
+name = "readonly-grate"
+dir = "readonly-grate"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/readonly-grate-test.c"
+
+# ── Seccomp (C) — whitelist config ──────────────────────────────────
+
+[[grate]]
+name = "seccomp-grate"
+dir = "seccomp-grate"
+type = "c"
+binary = "seccomp-grate"
+
+[[grate.tests]]
+test_src = "test/seccomp_chmod_test.c"
+grate_args = ["seccomp_whitelist_test.conf"]
+files = ["policies/seccomp_whitelist_test.conf"]
+
+[[grate.tests]]
+test_src = "test/seccomp_chmod_test.c"
+grate_args = ["seccomp_blacklist_test.conf"]
+files = ["policies/seccomp_blacklist_test.conf"]
+
+# ── Chroot (Rust) ───────────────────────────────────────────────────
+
+[[grate]]
+name = "chroot-grate"
+dir = "chroot-grate"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/chroot-test.c"
+grate_args = ["--chroot-dir", "/tmp"]
+lindfs_dir = "tmp"
+
+# ── Resource (Rust) ─────────────────────────────────────────────────
+
+[[grate]]
+name = "resource-grate"
+dir = "resource-grate"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/resource_test.c"
+grate_args = ["test_resources.cfg"]
+files = ["test/test_resources.cfg"]
+timeout = 120
+
+# ── Testing Grate (Rust) ────────────────────────────────────────────
+
+[[grate]]
+name = "testing-grate"
+dir = "testing-grate"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/testing-grate-test.c"
+grate_args = ["-s", "0:100,1:"]
+
+# ── Write Filter (Rust) ────────────────────────────────────────────
+
+[[grate]]
+name = "write-filter-grate"
+dir = "write-filter-grate"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/write_filter-test-grate.c"
+
+# ── Devnull (Rust) ──────────────────────────────────────────────────
+
+[[grate]]
+name = "devnull-grate"
+dir = "devnull-grate"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/devnull_test.c"
+
+# ── FS Routing Clamp (Rust) ─────────────────────────────────────────
+
+[[grate]]
+name = "fs-routing-clamp"
+dir = "fs-routing-clamp"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/fs_routing_test.c"
+grate_args = "--prefix /tmp %{ testing-grate.cwasm -s 0:166,1:166,2:166,4:166,21:166,83:166,84:166,87:166 %}"
+
+# ── IPC (Rust) ──────────────────────────────────────────────────────
+
+[[grate]]
+name = "ipc-grate"
+dir = "ipc-grate"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/ipc_test.c"
+files = ["test/pipe_stdin_reader.c", "test/file_collision_reader.c"]
+timeout = 120
+
+# ── Net Routing Clamp (Rust) ────────────────────────────────────────
+
+[[grate]]
+name = "net-routing-clamp"
+dir = "net-routing-clamp"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/net_routing_test.c"
+grate_args = "--ports 8080-8090 %{ testing-grate.cwasm -s 49:166,42:166,43:166 %}"
+
+[[grate.tests]]
+test_src = "test/ratelimit_demo.c"
+grate_args = "--ports 5432-5432 %{ resource-grate.cwasm ratelimit_demo.cfg %}"
+files = ["test/ratelimit_demo.cfg"]
+timeout = 120
+
+# ── mTLS (Rust) ─────────────────────────────────────────────────────
+# Requires cert setup (test/setup.sh) and runs server+client separately.
+# Use test/test.sh for the full test with network capture verification.
+
+[[grate]]
+name = "mtls-grate"
+dir = "mtls-grate"
+type = "rust"
+skip = true
+
+# ── fs-view (Rust) ──────────────────────────────────────────────────
+
+[[grate]]
+name = "fs-view-grate"
+dir = "fs-view-grate"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/fs_view_test.c"
+
+# ── fdtables stress test (Rust) ─────────────────────────────────────
+
+[[grate]]
+name = "fdtables-test-grate"
+dir = "fdtables-test-grate"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/fdtables_test.c"
