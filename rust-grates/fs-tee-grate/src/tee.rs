@@ -1,6 +1,6 @@
 use std::{collections::HashMap, ffi::CString, sync::Mutex};
 
-use grate_rs::constants::fs::{O_CREAT, O_WRONLY};
+use grate_rs::constants::fs::{O_CREAT, O_TRUNC, O_WRONLY};
 
 /// Track which part of the exec chain fs-tee is currently walking.
 ///
@@ -63,8 +63,8 @@ impl TeeState {
         let secondary_log_fd = unsafe {
             libc::open(
                 CString::new("fs-tee-secondary.log").unwrap().as_ptr(),
-                O_CREAT | O_WRONLY,
-                0755,
+                O_CREAT | O_WRONLY | O_TRUNC,
+                0o666,
             )
         };
 

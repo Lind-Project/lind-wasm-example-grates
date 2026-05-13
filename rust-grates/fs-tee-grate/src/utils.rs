@@ -3,7 +3,7 @@ use grate_rs::{
     getcageid, make_threei_call,
 };
 
-use crate::tee::{with_tee, TeeRoute};
+use crate::tee::{TeeRoute, with_tee};
 
 /// Copy all tee routes from a parent cage to its child after fork.
 pub fn copy_route_table(source_cage: u64, target_cage: u64) {
@@ -109,6 +109,25 @@ pub fn is_tty(syscall_number: u64, cage_id: u64, arg1: u64) -> bool {
     [SYS_WRITE, SYS_PWRITE, SYS_WRITEV, SYS_PWRITEV].contains(&syscall_number)
         && cage_id == with_tee(|s| s.target_cage)
         && arg1 < 3
+}
+
+pub fn format_arg_array(values: &[u64; 6]) -> String {
+    // Treat very large values as pointer-like addresses for log readability.
+    // This keeps small flags/fds/lengths visible while redacting noisy raw pointers/sentinels.
+    const ADDR_THRESHOLD: u64 = 1u64 << 16;
+
+    let parts: Vec<String> = values
+        .iter()
+        .map(|v| {
+            if *v >= ADDR_THRESHOLD {
+                "A".to_string()
+            } else {
+                v.to_string()
+            }
+        })
+        .collect();
+
+    format!("[{}]", parts.join(", "))
 }
 
 /// Write a formatted line to fs-tee's secondary log file.

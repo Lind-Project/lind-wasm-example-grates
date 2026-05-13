@@ -130,12 +130,13 @@ pub fn tee_dispatch(
     };
 
     secondary_log!(
-        "{}({}, {}) primary={} secondary={}",
+        "{}\tCage={}\tPrimary={}\tSecondary={}\tArgs={}, ArgCage={}",
         syscall_name,
         cage_id,
-        args[0],
         primary_result,
-        secondary_result
+        secondary_result,
+        format_arg_array(args),
+        format_arg_array(arg_cages),
     );
 
     primary_result
@@ -284,7 +285,13 @@ pub extern "C" fn tee_open(
     record_fd_pair(arg2cage, primary_result, secondary_result);
 
     secondary_log!(
-        "open({cage_id}, {arg1}, {arg2}) primary={primary_result} secondary={secondary_result}"
+        "{}\tCage={}\tPrimary={}\tSecondary={}\tArgs={}, ArgCage={}",
+        "tee_open",
+        cage_id,
+        primary_result,
+        secondary_result,
+        format_arg_array(&args),
+        format_arg_array(&arg_cages),
     );
 
     primary_result
@@ -330,7 +337,13 @@ pub extern "C" fn tee_pipe(
     // record_fd_pair(arg2cage, primary_result, secondary_result);
 
     secondary_log!(
-        "pipe({cage_id}, {arg1}, {arg2}) primary={primary_result} secondary={secondary_result}"
+        "{}\tCage={}\tPrimary={}\tSecondary={}\tArgs={}, ArgCage={}",
+        "tee_pipe",
+        cage_id,
+        primary_result,
+        secondary_result,
+        format_arg_array(&args),
+        format_arg_array(&arg_cages),
     );
 
     primary_result
@@ -380,7 +393,13 @@ pub extern "C" fn tee_dup(
     record_fd_pair(cage_id, primary_result, secondary_result);
 
     secondary_log!(
-        "dup({cage_id}, {arg1}, {arg2}) primary={primary_result} secondary={secondary_result}"
+        "{}\tCage={}\tPrimary={}\tSecondary={}\tArgs={}, ArgCage={}",
+        "tee_dup",
+        cage_id,
+        primary_result,
+        secondary_result,
+        format_arg_array(&args),
+        format_arg_array(&arg_cages),
     );
 
     primary_result
@@ -430,9 +449,13 @@ pub extern "C" fn tee_dup2(
     record_fd_pair(cage_id, primary_result, secondary_result);
 
     secondary_log!(
-        "dup2({cage_id}, {}, {}) primary={primary_result} secondary={secondary_result}",
-        args[0],
-        args[1],
+        "{}\tCage={}\tPrimary={}\tSecondary={}\tArgs={}, ArgCage={}",
+        "tee_dup2",
+        cage_id,
+        primary_result,
+        secondary_result,
+        format_arg_array(&args),
+        format_arg_array(&arg_cages),
     );
 
     primary_result
@@ -485,11 +508,13 @@ pub extern "C" fn tee_fcntl(
     }
 
     secondary_log!(
-        "fcntl({cage_id}, {}, {}) primary={}, secondary={}",
-        arg1,
-        arg2,
+        "{}\tCage={}\tPrimary={}\tSecondary={}\tArgs={}, ArgCage={}",
+        "tee_fcntl",
+        cage_id,
         primary_result,
-        secondary_result
+        secondary_result,
+        format_arg_array(&args),
+        format_arg_array(&arg_cages),
     );
 
     primary_result
@@ -539,9 +564,13 @@ pub extern "C" fn tee_dup3(
     record_fd_pair(arg1cage, primary_result, secondary_result);
 
     secondary_log!(
-        "dup3({cage_id}, {}, {}) primary={primary_result} secondary={secondary_result}",
-        args[0],
-        args[1],
+        "{}\tCage={}\tPrimary={}\tSecondary={}\tArgs={}, ArgCage={}",
+        "tee_dup3",
+        cage_id,
+        primary_result,
+        secondary_result,
+        format_arg_array(&args),
+        format_arg_array(&arg_cages),
     );
 
     primary_result
@@ -587,7 +616,13 @@ pub extern "C" fn tee_pipe2(
     // record_fd_pair(arg2cage, primary_result, secondary_result);
 
     secondary_log!(
-        "pipe2({cage_id}, {arg1}, {arg2}) primary={primary_result} secondary={secondary_result}"
+        "{}\tCage={}\tPrimary={}\tSecondary={}\tArgs={}, ArgCage={}",
+        "tee_pipe2",
+        cage_id,
+        primary_result,
+        secondary_result,
+        format_arg_array(&args),
+        format_arg_array(&arg_cages),
     );
 
     primary_result
