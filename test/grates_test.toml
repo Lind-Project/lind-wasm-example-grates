@@ -167,6 +167,21 @@ type = "rust"
 test_src = "test/fs_routing_test.c"
 grate_args = "--prefix /tmp %{ testing-grate.cwasm -s 0:166,1:166,2:166,4:166,21:166,83:166,84:166,87:166 %}"
 
+[[grate.tests]]
+test_src = "test/unix_socket_outside_prefix_test.c"
+grate_args = "--prefix /tmp %{ testing-grate.cwasm -s 0:166 %}"
+timeout = 30
+
+[[grate.tests]]
+test_src = "test/unix_listener_poll_minimal_test.c"
+grate_args = "--prefix /tmp %{ testing-grate.cwasm -s 0:166 %}"
+timeout = 30
+
+[[grate.tests]]
+test_src = "test/fcntl_dup_minimal_test.c"
+grate_args = "--prefix /tmp %{ testing-grate.cwasm -s 0:166 %}"
+timeout = 30
+
 # ── IPC (Rust) ──────────────────────────────────────────────────────
 
 [[grate]]

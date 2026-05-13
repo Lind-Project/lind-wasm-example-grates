@@ -494,11 +494,18 @@ pub extern "C" fn ns_munmap_handler(
 
     let is_clamped_mapping = helpers::is_clamped_mmap(arg1cage, arg1, arg2);
 
+    if let Some(alt) = helpers::get_route(arg1cage, SYS_MUNMAP) {
+        let ret = helpers::do_syscall(arg1cage, alt, &args, &arg_cages);
+
+        if ret == 0 {
+            helpers::remove_clamped_mmap(arg1cage, arg1, arg2);
+        }
+
+        return ret;
+    }
+
     if is_clamped_mapping {
-        let ret = match helpers::get_route(arg1cage, SYS_MUNMAP) {
-            Some(alt) => helpers::do_syscall(arg1cage, alt, &args, &arg_cages),
-            None => helpers::do_clamp_syscall(arg1cage, SYS_MUNMAP, &args, &arg_cages),
-        };
+        let ret = helpers::do_clamp_syscall(arg1cage, SYS_MUNMAP, &args, &arg_cages);
 
         if ret == 0 {
             helpers::remove_clamped_mmap(arg1cage, arg1, arg2);
@@ -1179,13 +1186,14 @@ pub extern "C" fn ns_clone_handler(
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
     let nr = helpers::get_route(arg1cage, SYS_CLONE).unwrap_or(SYS_CLONE);
+    let is_thread = is_thread_clone(arg1, arg1cage);
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
 
     if ret <= 0 {
         return ret;
     }
 
-    if !is_thread_clone(arg1, arg1cage) {
+    if !is_thread {
         let child_cage_id = ret as u64;
 
         // Route cloning only — fdtables copy is handled by the lifecycle
