@@ -2400,6 +2400,7 @@ impl ImfsState {
         // (cage, addr) misses.  Fall back to matching by (cage, len),
         // which is unique for our use (each cage holds at most one
         // live mapping per node).
+        let mut tracked_addr = addr;
         let mut tracked = self.mmap_tracking.remove(&(cage_id, addr));
         if tracked.is_none() {
             let candidate = self
@@ -2408,6 +2409,7 @@ impl ImfsState {
                 .find(|((c, _), (_, l))| *c == cage_id && *l == len)
                 .map(|(k, _)| *k);
             if let Some(k) = candidate {
+                tracked_addr = k.1;
                 tracked = self.mmap_tracking.remove(&k);
             }
         }
@@ -2419,7 +2421,7 @@ impl ImfsState {
         if let Some((node_idx, _)) = tracked {
             let still_mapped = self.find_active_mapping(node_idx).is_some();
             if !still_mapped {
-                self.sync_mapping_to_chunks(node_idx, cage_id, addr, len);
+                self.sync_mapping_to_chunks(node_idx, cage_id, tracked_addr, len);
             }
         }
 
