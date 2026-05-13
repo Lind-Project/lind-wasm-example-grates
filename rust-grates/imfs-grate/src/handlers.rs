@@ -1487,6 +1487,27 @@ pub extern "C" fn chdir_handler(
     imfs::with_imfs(|s| s.chdir(arg2cage, &pathname))
 }
 
+pub extern "C" fn fchdir_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    _arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let fd = arg1;
+    let cage_id = arg1cage;
+
+    imfs::with_imfs(|state| state.fchdir(cage_id, fd))
+}
+
 // =====================================================================
 //  mkdir (syscall 83)
 // =====================================================================
