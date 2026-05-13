@@ -189,6 +189,7 @@ pub fn init_cwd(cageid: u64) -> String {
 
 /// Return the cage's tracked virtual cwd, defaulting to `/`.
 pub fn get_cage_cwd(cageid: u64) -> String {
+    crate::ensure_cage_cwd(cageid);
     crate::CAGE_CWDS
         .lock()
         .unwrap()

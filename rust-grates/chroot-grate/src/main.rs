@@ -41,6 +41,10 @@ pub static CAGE_CWDS: Mutex<Option<HashMap<u64, String>>> = Mutex::new(None);
 /// Per-cage directory fd tracking used to implement virtual `fchdir`.
 pub static CAGE_DIR_FDS: Mutex<Option<HashMap<u64, HashMap<u64, String>>>> = Mutex::new(None);
 
+/// Virtual cwd to use if a vfork/posix_spawn child runs before fork_handler
+/// gets a chance to register explicit per-cage state.
+pub static INITIAL_CWD: Mutex<String> = Mutex::new(String::new());
+
 /// Check if a directory exists.
 fn check_dir(dir: String) -> bool {
     let cwd_cstring = match CString::new(dir.as_str()) {
@@ -66,6 +70,33 @@ pub fn init_state(chroot_dir: String) {
             *CAGE_DIR_FDS.lock().unwrap() = Some(HashMap::new());
         }
     };
+}
+
+pub fn ensure_cage_cwd(cageid: u64) {
+    let has_cwd = CAGE_CWDS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|m| m.get(&cageid))
+        .is_some();
+    if has_cwd {
+        return;
+    }
+
+    let fallback = {
+        let initial = INITIAL_CWD.lock().unwrap();
+        if initial.is_empty() {
+            "/".to_string()
+        } else {
+            initial.clone()
+        }
+    };
+    if let Some(ref mut cwd_map) = *CAGE_CWDS.lock().unwrap() {
+        cwd_map.insert(cageid, fallback);
+    }
+    if let Some(ref mut fd_map) = *CAGE_DIR_FDS.lock().unwrap() {
+        fd_map.entry(cageid).or_insert_with(HashMap::new);
+    }
 }
 
 /// Dispatch a syscall via ThreeI, optionally rewriting some argument pointers.
@@ -250,6 +281,7 @@ fn rewrite_symlink_target(cageid: u64, target_ptr: u64, target_cage: u64) -> Res
 }
 
 fn fd_dir_path(cageid: u64, fd: u64) -> Option<String> {
+    ensure_cage_cwd(cageid);
     CAGE_DIR_FDS
         .lock()
         .unwrap()
@@ -1261,6 +1293,7 @@ extern "C" fn fork_handler(
 ) -> i32 {
     let thiscage = getcageid();
     let parent_cageid = arg1cage;
+    let is_thread = is_thread_clone(arg1, arg1cage);
 
     // Call the real fork syscall.
     let ret = match make_threei_call(
@@ -1287,7 +1320,7 @@ extern "C" fn fork_handler(
         Err(_) => return -1,
     };
 
-    if ret > 0 && !is_thread_clone(arg1, arg1cage) {
+    if ret > 0 && !is_thread {
         let child_cageid = ret as u64;
         register_cage(parent_cageid, child_cageid);
         register_child_fd_paths(parent_cageid, child_cageid);
@@ -1565,6 +1598,7 @@ fn main() {
     // Get initial cwd via syscall and add to table
     let cageid = getcageid();
     let initial_cwd = init_cwd(cageid);
+    *INITIAL_CWD.lock().unwrap() = initial_cwd.clone();
 
     log!("Initial cwd: {}", initial_cwd);
 

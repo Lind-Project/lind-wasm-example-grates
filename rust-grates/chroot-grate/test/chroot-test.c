@@ -35,6 +35,19 @@ static int total = 0;
         if (expr) PASS(x); else FAIL(x); \
     } while (0)
 
+#define CHECK_CHILD_EXIT(x, status) \
+    do { \
+        total++; \
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) { \
+            PASS(x); \
+        } else { \
+            printf("FAIL: %s (raw_status=%d exit_status=%d signal=%d)\n", \
+                   x, status, WIFEXITED(status) ? WEXITSTATUS(status) : -1, \
+                   WIFSIGNALED(status) ? WTERMSIG(status) : -1); \
+            failures++; \
+        } \
+    } while (0)
+
 static void mkaddr(struct sockaddr_un *un, const char *p) {
     memset(un, 0, sizeof(*un));
     un->sun_family = AF_UNIX;
@@ -44,9 +57,10 @@ static void mkaddr(struct sockaddr_un *un, const char *p) {
 int main(int argc, char *argv[]) {
     char cwd[PATH_MAX];
 
-    char *seed = "CHROOT_TEST";
+    char seed[64];
+    snprintf(seed, sizeof(seed), "CHROOT_TEST_%ld", (long)getpid());
     if (argc > 1) {
-        strcpy(seed, argv[1]);
+        snprintf(seed, sizeof(seed), "%s", argv[1]);
     }
 
     // ---- basic paths ----
@@ -61,11 +75,6 @@ int main(int argc, char *argv[]) {
     char absmissing[80];
     char at1[64];
     char at2[64];
-    char fd_dir_name[64];
-    char fd_file[64];
-    char fd_dup_file[64];
-    char fd_fcntl_file[64];
-    char fd_child_file[64];
 
     snprintf(dir, sizeof(dir), "sub-%s", seed);
     snprintf(a, sizeof(a), "a.txt-%s", seed);
@@ -78,11 +87,6 @@ int main(int argc, char *argv[]) {
     snprintf(absmissing, sizeof(absmissing), "/missing-abs-%s", seed);
     snprintf(at1, sizeof(at1), "at1.txt-%s", seed);
     snprintf(at2, sizeof(at2), "at2.txt-%s", seed);
-    snprintf(fd_dir_name, sizeof(fd_dir_name), "fd-dir-%s", seed);
-    snprintf(fd_file, sizeof(fd_file), "from-fchdir-%s", seed);
-    snprintf(fd_dup_file, sizeof(fd_dup_file), "from-dup-fchdir-%s", seed);
-    snprintf(fd_fcntl_file, sizeof(fd_fcntl_file), "from-fcntl-fchdir-%s", seed);
-    snprintf(fd_child_file, sizeof(fd_child_file), "from-fork-fchdir-%s", seed);
 
     // ---- mkdir ----
     CHECK("mkdir: create subdirectory", mkdir(dir, 0755) == 0 || errno == EEXIST);
@@ -211,6 +215,8 @@ int main(int argc, char *argv[]) {
     }
 
     // ---- fchdir / fd inheritance ----
+    char fd_dir_name[64];
+    snprintf(fd_dir_name, sizeof(fd_dir_name), "fd-dir-%ld", (long)getpid());
     CHECK("mkdir: create fchdir target directory", mkdir(fd_dir_name, 0755) == 0 || errno == EEXIST);
     int saved_cwd = open(".", O_RDONLY);
     int dir_for_fchdir = open(fd_dir_name, O_RDONLY);
@@ -222,6 +228,10 @@ int main(int argc, char *argv[]) {
         char fd_dup_path[128];
         char fd_fcntl_path[128];
         char fd_child_path[128];
+        const char *fd_file = "from-fchdir";
+        const char *fd_dup_file = "from-dup-fchdir";
+        const char *fd_fcntl_file = "from-fcntl-fchdir";
+        const char *fd_child_file = "from-fork-fchdir";
 
         snprintf(fd_file_path, sizeof(fd_file_path), "%s/%s", fd_dir_name, fd_file);
         snprintf(fd_dup_path, sizeof(fd_dup_path), "%s/%s", fd_dir_name, fd_dup_file);
@@ -261,19 +271,26 @@ int main(int argc, char *argv[]) {
             close(fcntl_dir);
         }
 
+        unlink(fd_child_path);
         pid_t fpid = fork();
         if (fpid == 0) {
             if (fchdir(dir_for_fchdir) != 0) _exit(2);
             int child_fd = open(fd_child_file, O_CREAT | O_RDWR, 0644);
             if (child_fd < 0) _exit(3);
-            close(child_fd);
+            if (write(child_fd, "c", 1) != 1) _exit(4);
+            if (close(child_fd) != 0) _exit(5);
             _exit(0);
         } else if (fpid > 0) {
             int fstatus;
             CHECK("waitpid: collect fchdir child", waitpid(fpid, &fstatus, 0) == fpid);
-            CHECK("fork: child inherits fchdir directory fd",
-                  WIFEXITED(fstatus) && WEXITSTATUS(fstatus) == 0);
-            CHECK("access: fork fchdir file created in directory", access(fd_child_path, F_OK) == 0);
+            CHECK_CHILD_EXIT("fork: child inherits fchdir directory fd", fstatus);
+            int verify_fd = open(fd_child_path, O_RDONLY);
+            CHECK("open: fork fchdir file created in directory", verify_fd >= 0);
+            if (verify_fd >= 0) {
+                char marker = '\0';
+                CHECK("read: fork fchdir child wrote marker", read(verify_fd, &marker, 1) == 1 && marker == 'c');
+                close(verify_fd);
+            }
         } else {
             FAIL("fork: fchdir inheritance fork failed");
         }
