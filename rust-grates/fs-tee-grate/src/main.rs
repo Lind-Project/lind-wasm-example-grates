@@ -10,8 +10,6 @@ use crate::{
     tee::{TEE_STATE, TeeState, with_tee},
 };
 
-// use fdtables;
-
 mod handlers;
 mod tee;
 mod utils;
@@ -43,8 +41,6 @@ fn main() {
     // Init TeeState and convert argv to get the exec_chain.
     *TEE_STATE.lock().unwrap() = Some(TeeState::new());
     let (_storage, c_argv) = to_exec_argv(&argv);
-
-    println!("[tee-grate] cage={}", getcageid());
 
     let mut exec_sem = create_sem();
 
