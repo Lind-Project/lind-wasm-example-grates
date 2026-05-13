@@ -85,6 +85,12 @@ pub struct NSClampState {
     /// Cage ID captured at the clamp entry point.
     clamp_entry_cage: u64,
 
+    /// Lexical nesting depth of `%{ ... %}` blocks currently being traversed.
+    ///
+    /// The outer clamp managed by fs-routing-clamp starts at depth 1. Nested grates may introduce
+    /// additional `%{ ... %}` pairs that fs-routing-clamp must pass through without consuming.
+    clamp_depth: usize,
+
     /// The path prefix condition for routing.
     routing_prefix: Option<String>,
 
@@ -109,6 +115,7 @@ impl NSClampState {
             routes: None,
             ns_cage_id: ns_cage_id,
             clamp_entry_cage: 0,
+            clamp_depth: 1,
             routing_prefix: Some(prefix),
             clamped_cages: None,
             cwd_by_cage: None,
@@ -164,6 +171,15 @@ pub fn get_clamp_entry() -> u64 {
         .clamp_entry_cage
 }
 
+pub fn get_clamp_depth() -> usize {
+    CLAMP_STATE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .expect("CLAMP_STATE not initialized")
+        .clamp_depth
+}
+
 pub fn get_routing_prefix() -> String {
     CLAMP_STATE
         .lock()
@@ -199,6 +215,25 @@ pub fn set_clamp_entry(cage_id: u64) {
     let s = state.as_mut().expect("CLAMP_STATE not initialized");
 
     s.clamp_entry_cage = cage_id;
+}
+
+pub fn enter_nested_clamp() -> usize {
+    let mut state = CLAMP_STATE.lock().unwrap();
+    let s = state.as_mut().expect("CLAMP_STATE not initialized");
+
+    s.clamp_depth += 1;
+    s.clamp_depth
+}
+
+pub fn exit_nested_clamp() -> usize {
+    let mut state = CLAMP_STATE.lock().unwrap();
+    let s = state.as_mut().expect("CLAMP_STATE not initialized");
+
+    if s.clamp_depth > 0 {
+        s.clamp_depth -= 1;
+    }
+
+    s.clamp_depth
 }
 
 pub fn register_clamped_cage(cage_id: u64) {

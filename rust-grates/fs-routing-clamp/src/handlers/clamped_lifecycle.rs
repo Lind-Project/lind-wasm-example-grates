@@ -128,8 +128,16 @@ pub fn register_target_handlers(target_cage: u64) -> i32 {
 
 /// Handler for syscall 59 (exec).
 ///
-/// Detects the `%}` sentinel in the exec path. When found:
-///   1. Ends the clamp phase (no more register_handler interception)
+/// Detects `%{` / `%}` sentinels in the exec path while respecting nested clamp blocks.
+///
+/// When `%{` belongs to a nested inner grate, fs-routing-clamp increments its nesting depth and
+/// forwards the exec unchanged.
+///
+/// When `%}` belongs to a nested inner grate, fs-routing-clamp decrements its nesting depth and
+/// forwards the exec unchanged.
+///
+/// When `%}` closes fs-routing-clamp's own outer block, it:
+///   1. Ends the clamp phase
 ///   2. Rewrites the exec to skip past `%}` and run the real program
 ///
 /// For all other exec calls, passes through unchanged.
@@ -152,14 +160,37 @@ pub extern "C" fn exec_handler(
 ) -> i32 {
     let ns_cage = helpers::get_ns_cage_id();
 
-    // Read the exec path from the cage's memory to check for %}.
+    // Read the exec path from the cage's memory so boundary markers can be detected.
     if let Some(path) = helpers::read_path_from_cage(arg1, arg1cage) {
+        if path == "%{" {
+            helpers::enter_nested_clamp();
+
+            return helpers::do_syscall(
+                arg1cage,
+                SYS_EXEC,
+                &[arg1, arg2, arg3, arg4, arg5, arg6],
+                &[arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
+            );
+        }
+
         if path == "%}" {
+            if helpers::get_clamp_depth() > 1 {
+                helpers::exit_nested_clamp();
+
+                return helpers::do_syscall(
+                    arg1cage,
+                    SYS_EXEC,
+                    &[arg1, arg2, arg3, arg4, arg5, arg6],
+                    &[arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
+                );
+            }
+
             // This cage is going to be the target cage, register the fs-clamped routing syscalls
             // to this cage_id.
             register_target_handlers(arg1cage);
 
             helpers::deregister_clamped_cage(arg1cage);
+            helpers::exit_nested_clamp();
 
             // We've detected the clamp boundary, we need to left shift all argv[] and update the
             // path to the binary to be argv[1].
@@ -215,10 +246,12 @@ pub extern "C" fn exec_handler(
             // println!("[ns-grate] execing real binary: path={}, ret={}", path, ret);
             return ret;
         } else {
-            // The current method to detect the "entry" grate to the clamp is to track the last
-            // exec'd process, and update this state variable. Once we hit the clamp end boundary
-            // (%}), we stop updating this variable.
-            helpers::set_clamp_entry(arg1cage);
+            // Track the outer clamp's entry grate as the last non-marker exec seen at depth 1.
+            // Nested clamp bodies must not overwrite this, or routed calls would bypass the outer
+            // grate and jump straight into an inner one.
+            if helpers::get_clamp_depth() == 1 {
+                helpers::set_clamp_entry(arg1cage);
+            }
 
             // In any other case, call exec without argument management.
             let ret = helpers::do_syscall(
