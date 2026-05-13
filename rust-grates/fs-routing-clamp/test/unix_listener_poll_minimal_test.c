@@ -17,6 +17,7 @@ static int tests_passed = 0;
 #define SOCK_DIR "/sock"
 #define POLL_PATH SOCK_DIR "/fsrouting_listener_poll_minimal.sock"
 #define SELECT_PATH SOCK_DIR "/fsrouting_listener_select_minimal.sock"
+#define NONBLOCK_PATH SOCK_DIR "/fsrouting_listener_nonblock_minimal.sock"
 
 #define CHECK(desc, cond)                                                      \
     do {                                                                       \
@@ -87,6 +88,55 @@ static void client_process(const char *path) {
     if (recv(fd, response, sizeof(response), 0) != 5 || memcmp(response, "ready", 5) != 0) {
         perror("client recv response");
         _exit(13);
+    }
+
+    close(fd);
+    _exit(0);
+}
+
+static void nonblocking_client_process(const char *path) {
+    struct sockaddr_un addr;
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (fd < 0) {
+        perror("nonblocking client socket");
+        _exit(20);
+    }
+
+    set_addr(&addr, path);
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 && errno != EINPROGRESS) {
+        perror("nonblocking client connect");
+        _exit(21);
+    }
+
+    struct pollfd writable = {.fd = fd, .events = POLLOUT | POLLERR, .revents = 0};
+    if (poll(&writable, 1, 5000) != 1 || !(writable.revents & (POLLOUT | POLLERR))) {
+        perror("nonblocking client poll connect");
+        _exit(22);
+    }
+
+    int err = -1;
+    socklen_t err_len = sizeof(err);
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &err_len) != 0 || err != 0) {
+        errno = err;
+        perror("nonblocking client SO_ERROR");
+        _exit(23);
+    }
+
+    if (send(fd, "startup", 7, 0) != 7) {
+        perror("nonblocking client send startup");
+        _exit(24);
+    }
+
+    struct pollfd readable = {.fd = fd, .events = POLLIN | POLLERR, .revents = 0};
+    if (poll(&readable, 1, 5000) != 1 || !(readable.revents & (POLLIN | POLLERR))) {
+        perror("nonblocking client poll response");
+        _exit(25);
+    }
+
+    char response[8] = {0};
+    if (recv(fd, response, sizeof(response), 0) != 5 || memcmp(response, "ready", 5) != 0) {
+        perror("nonblocking client recv response");
+        _exit(26);
     }
 
     close(fd);
@@ -189,6 +239,48 @@ static void run_listener_select_test(const char *path) {
     unlink(path);
 }
 
+static void run_nonblocking_socket_test(const char *path) {
+    char buf[16] = {0};
+
+    int listener = make_listener(path);
+    CHECK("create unix listener outside routed prefix for nonblocking test", listener >= 0);
+    if (listener < 0)
+        return;
+
+    pid_t pid = fork();
+    CHECK("fork nonblocking client", pid >= 0);
+    if (pid == 0)
+        nonblocking_client_process(path);
+    if (pid < 0)
+        return;
+
+    struct pollfd listener_pfd = {.fd = listener, .events = POLLIN, .revents = 0};
+    CHECK("poll listener before nonblocking accept", poll(&listener_pfd, 1, 5000) == 1);
+    CHECK("listener has POLLIN before nonblocking accept", (listener_pfd.revents & POLLIN) != 0);
+
+    int accepted = accept(listener, NULL, NULL);
+    CHECK("accept nonblocking client", accepted >= 0);
+    if (accepted >= 0) {
+        int flags = fcntl(accepted, F_GETFL);
+        CHECK("accepted socket F_GETFL", flags >= 0);
+        CHECK("set accepted socket O_NONBLOCK", fcntl(accepted, F_SETFL, flags | O_NONBLOCK) == 0);
+        CHECK("set accepted socket FD_CLOEXEC", fcntl(accepted, F_SETFD, FD_CLOEXEC) == 0);
+
+        struct pollfd readable = {.fd = accepted, .events = POLLIN | POLLERR, .revents = 0};
+        CHECK("poll accepted nonblocking socket for startup", poll(&readable, 1, 5000) == 1);
+        CHECK("accepted nonblocking socket has POLLIN", (readable.revents & POLLIN) != 0);
+        CHECK("recv startup from nonblocking accepted socket", recv(accepted, buf, sizeof(buf), 0) == 7);
+        CHECK("nonblocking startup payload matches", memcmp(buf, "startup", 7) == 0);
+        CHECK("send response on nonblocking accepted socket", send(accepted, "ready", 5, 0) == 5);
+        close(accepted);
+    }
+
+    wait_child_clean(pid);
+
+    close(listener);
+    unlink(path);
+}
+
 int main(void) {
     signal(SIGALRM, timeout_handler);
     alarm(30);
@@ -200,6 +292,9 @@ int main(void) {
 
     printf("\n[test_listener_select]\n");
     run_listener_select_test(SELECT_PATH);
+
+    printf("\n[test_nonblocking_socket]\n");
+    run_nonblocking_socket_test(NONBLOCK_PATH);
 
     printf("\n=== results: %d/%d passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
