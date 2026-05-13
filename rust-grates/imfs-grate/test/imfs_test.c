@@ -63,6 +63,15 @@ static void test_basic_rw(void) {
 
 	int ret = close(fd);
 	CHECK("close succeeds", ret == 0);
+
+	fd = open("/test_basic", O_WRONLY | O_TRUNC);
+	CHECK("open /test_basic with O_TRUNC", fd >= 0);
+	if (fd >= 0) {
+		struct stat st;
+		CHECK("fstat after O_TRUNC", fstat(fd, &st) == 0);
+		CHECK("O_TRUNC sets size to 0", st.st_size == 0);
+		close(fd);
+	}
 }
 
 /*  Test 2: Open nonexistent file without O_CREAT  */
@@ -134,6 +143,9 @@ static void test_lseek(void) {
 	pos = lseek(fd, -3, SEEK_END);
 	CHECK("SEEK_END -3 = 7", pos == 7);
 
+	pos = lseek(fd, -20, SEEK_SET);
+	CHECK("negative SEEK_SET fails", pos == -1 && errno == EINVAL);
+
 	/* Read from position 7: should get "789". */
 	char buf[4] = {0};
 	ssize_t nr = read(fd, buf, 3);
@@ -173,6 +185,9 @@ static void test_pread_pwrite(void) {
 	pos = lseek(fd, 0, SEEK_CUR);
 	CHECK("fd offset unchanged after pread", pos == 10);
 
+	CHECK("pread negative offset fails", pread(fd, buf, 1, -1) == -1 && errno == EINVAL);
+	CHECK("pwrite negative offset fails", pwrite(fd, "Z", 1, -1) == -1 && errno == EINVAL);
+
 	close(fd);
 }
 
@@ -183,6 +198,20 @@ static void test_mkdir(void) {
 
 	int ret = mkdir("/mydir", 0755);
 	CHECK("mkdir /mydir", ret == 0);
+
+	struct stat st;
+	CHECK("stat /mydir after mkdir", stat("/mydir", &st) == 0);
+	CHECK("new directory link count is 2", st.st_nlink == 2);
+
+	ret = mkdir("/mydir/subdir", 0755);
+	CHECK("mkdir /mydir/subdir", ret == 0);
+	CHECK("stat /mydir after child mkdir", stat("/mydir", &st) == 0);
+	CHECK("parent directory link count includes child directory", st.st_nlink == 3);
+	CHECK("stat /mydir/subdir after mkdir", stat("/mydir/subdir", &st) == 0);
+	CHECK("child directory link count is 2", st.st_nlink == 2);
+	CHECK("rmdir /mydir/subdir", rmdir("/mydir/subdir") == 0);
+	CHECK("stat /mydir after child rmdir", stat("/mydir", &st) == 0);
+	CHECK("parent directory link count drops after rmdir", st.st_nlink == 2);
 
 	/* Create a file inside the directory. */
 	int fd = open("/mydir/file.txt", O_CREAT | O_WRONLY, 0644);
@@ -206,6 +235,9 @@ static void test_mkdir(void) {
 	/* mkdir on existing path should fail. */
 	ret = mkdir("/mydir", 0755);
 	CHECK("mkdir on existing dir fails", ret != 0);
+
+	CHECK("chdir nonexistent path fails", chdir("/missing_chdir_dir") != 0);
+	CHECK("chdir regular file fails", chdir("/mydir/file.txt") != 0);
 }
 
 /*  Test 7: unlink  */
@@ -244,6 +276,25 @@ static void test_fcntl(void) {
 
 	int flags = fcntl(fd, F_GETFL);
 	CHECK("fcntl F_GETFL returns O_RDWR", (flags & O_ACCMODE) == O_RDWR);
+
+	int fdflags = fcntl(fd, F_GETFD);
+	CHECK("fcntl F_GETFD starts clear", fdflags == 0);
+
+	CHECK("fcntl F_SETFD sets FD_CLOEXEC", fcntl(fd, F_SETFD, FD_CLOEXEC) == 0);
+	fdflags = fcntl(fd, F_GETFD);
+	CHECK("fcntl F_GETFD reports FD_CLOEXEC", (fdflags & FD_CLOEXEC) != 0);
+
+	CHECK("fcntl F_SETFD clears FD_CLOEXEC", fcntl(fd, F_SETFD, 0) == 0);
+	fdflags = fcntl(fd, F_GETFD);
+	CHECK("fcntl F_GETFD reports clear", fdflags == 0);
+
+	int dupfd = fcntl(fd, F_DUPFD, 20);
+	CHECK("fcntl F_DUPFD returns fd at least requested minimum", dupfd >= 20);
+	if (dupfd >= 0) {
+		CHECK("fcntl duplicated fd has same access mode",
+		      (fcntl(dupfd, F_GETFL) & O_ACCMODE) == O_RDWR);
+		close(dupfd);
+	}
 
 	close(fd);
 }
@@ -355,7 +406,10 @@ static void test_link_rw(void) {
 	int ret = write(fd, buf, 6);
 	close(fd);
 
-	link("file1", "file2");
+	struct stat st;
+	CHECK("initial hard link count is 1", stat("file1", &st) == 0 && st.st_nlink == 1);
+	CHECK("link file1 to file2", link("file1", "file2") == 0);
+	CHECK("hard link count after link is 2", stat("file1", &st) == 0 && st.st_nlink == 2);
 
 	fd = open("file2", O_RDONLY, 0666);
 
@@ -376,8 +430,9 @@ static void test_link_rw(void) {
 
 	CHECK("Write linked file.", strcmp(buf, read_buf) == 0);
 
-	unlink("file1");
-	unlink("file2");
+	CHECK("unlink file1", unlink("file1") == 0);
+	CHECK("remaining hard link count is 1", stat("file2", &st) == 0 && st.st_nlink == 1);
+	CHECK("unlink file2", unlink("file2") == 0);
 }
 
 static void test_at_metadata_syscalls(void) {
