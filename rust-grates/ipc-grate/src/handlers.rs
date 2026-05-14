@@ -52,6 +52,12 @@ fn write_user_bytes(dst: u64, src: *const u8, len: usize) {
     }
 }
 
+fn ensure_cage_fdtable(cage: u64) {
+    if !fdtables::check_cage_exists(cage) {
+        fdtables::init_empty_cage(cage);
+    }
+}
+
 /// Translate a grate virt fd to the runtime's virt fd (the underfd).
 /// Returns None if the fd doesn't exist in our fdtable.
 fn translate_to_underfd(cage: u64, fd: u64) -> Option<u64> {
@@ -147,7 +153,7 @@ fn forward_with_two_dirfds(
 /// On allocation failure, close the runtime fd and return -EMFILE.
 fn register_kernel_fd(cage: u64, runtime_vfd: i32, cloexec: bool, perfdinfo: u64) -> i32 {
     if !fdtables::check_cage_exists(cage) {
-        return runtime_vfd;
+        fdtables::init_empty_cage(cage);
     }
     match fdtables::get_unused_virtual_fd(
         cage, FDKIND_KERNEL, runtime_vfd as u64, cloexec, perfdinfo,
@@ -321,11 +327,7 @@ pub extern "C" fn pipe_handler(
     let this_cage = getcageid();
 
     if !fdtables::check_cage_exists(cage_id) {
-        return forward_syscall(
-            SYS_PIPE, cage_id,
-            &[arg1, 0, 0, 0, 0, 0],
-            &[arg1cage, 0, 0, 0, 0, 0],
-        );
+        fdtables::init_empty_cage(cage_id);
     }
 
     let (rfd, wfd) = match with_ipc(|s| s.create_pipe(cage_id, 0)) {
@@ -360,11 +362,7 @@ pub extern "C" fn pipe2_handler(
     let flags = arg2 as i32;
 
     if !fdtables::check_cage_exists(cage_id) {
-        return forward_syscall(
-            SYS_PIPE2, cage_id,
-            &[arg1, arg2, 0, 0, 0, 0],
-            &[arg1cage, _arg2cage, 0, 0, 0, 0],
-        );
+        fdtables::init_empty_cage(cage_id);
     }
 
     let (rfd, wfd) = match with_ipc(|s| s.create_pipe(cage_id, flags)) {
@@ -1362,6 +1360,7 @@ pub extern "C" fn dup2_handler(
         if new_runtime_vfd < 0 {
             return new_runtime_vfd;
         }
+        ensure_cage_fdtable(cage_id);
         close_old_runtime_if_kernel();
         let _ = fdtables::get_specific_virtual_fd(
             cage_id, newfd, FDKIND_KERNEL, new_runtime_vfd as u64, false, 0,
@@ -1487,6 +1486,7 @@ pub extern "C" fn fcntl_handler(
         if new_runtime_vfd < 0 {
             return new_runtime_vfd;
         }
+        ensure_cage_fdtable(cage_id);
         return match fdtables::get_unused_virtual_fd_from_startfd(
             cage_id, FDKIND_KERNEL, new_runtime_vfd as u64, cloexec, 0, min_fd,
         ) {
@@ -1643,7 +1643,7 @@ pub extern "C" fn fork_handler(
         // Copy parent's fdtable to child.  This bumps the (fdkind, underfd)
         // refcount in fdtables for each entry but does NOT fire our
         // registered close handler.  When this succeeds (the normal path)
-        // the child cage has all the IPC entries the parent did.
+        // the child cage has all the entries the parent did.
         //
         // We deliberately do NOT re-install the IPC entries via
         // get_specific_virtual_fd on the success path: that call decrements
@@ -1657,7 +1657,28 @@ pub extern "C" fn fork_handler(
         // eof latches / write returns EPIPE.  This was the root cause of
         // pipepong, test_pipe_large, test_pipe_pipeline, test_socketpair_fork,
         // test_popen_exec etc. all failing the same way.
-        let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id);
+        if fdtables::check_cage_exists(child_cage_id) {
+            // The child ran before we got here and had to create fds of its
+            // own (for example shell command substitution: pipe(); dup2(...)).
+            // Preserve those child-side entries, and merge only parent fds
+            // that are still absent.  Overwriting child entries here would
+            // undo redirections performed between clone and exec.
+            let parent_fds = fdtables::return_fdtable_copy(cage_id);
+            for (fd, entry) in &parent_fds {
+                if fdtables::translate_virtual_fd(child_cage_id, *fd).is_err() {
+                    let _ = fdtables::get_specific_virtual_fd(
+                        child_cage_id,
+                        *fd,
+                        entry.fdkind,
+                        entry.underfd,
+                        entry.should_cloexec,
+                        entry.perfdinfo,
+                    );
+                }
+            }
+        } else {
+            let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id);
+        }
 
         // Propagate our registered syscall handlers to the new cage so
         // its read/write/close/etc. continue to flow through us instead
@@ -1741,7 +1762,7 @@ pub extern "C" fn socket_handler(
     let arg_cages = [arg1cage, _arg2cage, _arg3cage, arg4cage, arg5cage, arg6cage];
 
     if !fdtables::check_cage_exists(cage_id) {
-        return forward_syscall(SYS_SOCKET, cage_id, &args, &arg_cages);
+        fdtables::init_empty_cage(cage_id);
     }
 
     // Only handle AF_UNIX and AF_INET (for potential loopback); everything
@@ -1812,11 +1833,7 @@ pub extern "C" fn socketpair_handler(
     let this_cage = getcageid();
 
     if !fdtables::check_cage_exists(cage_id) {
-        return forward_syscall(
-            SYS_SOCKETPAIR, cage_id,
-            &[arg1, arg2, arg3, arg4, 0, 0],
-            &[arg1cage, _arg2cage, _arg3cage, arg4cage, 0, 0],
-        );
+        fdtables::init_empty_cage(cage_id);
     }
 
     if domain != socket::AF_UNIX {
@@ -2430,7 +2447,7 @@ const EPOLLHUP: u32 = 0x010;
 /// IPC target map.
 fn register_ipc_epoll_fd(cage: u64, runtime_vfd: i32, cloexec: bool) -> i32 {
     if !fdtables::check_cage_exists(cage) {
-        return runtime_vfd;
+        fdtables::init_empty_cage(cage);
     }
     match fdtables::get_unused_virtual_fd(cage, IPC_EPOLL, runtime_vfd as u64, cloexec, 0) {
         Ok(grate_vfd) => {
