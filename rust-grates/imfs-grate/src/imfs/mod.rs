@@ -62,6 +62,8 @@ pub struct FsData {
 const DIRENT64_FIXED_SIZE: usize = 8 + 8 + 2 + 1;
 const IMFS_BLOCK_SIZE: i32 = 512;
 const LIND_AT_FDCWD: i32 = -100;
+const LIND_AT_NO_AUTOMOUNT: i32 = 0x800;
+const LIND_AT_EMPTY_PATH: i32 = 0x1000;
 const IMFS_STATFS_MAGIC: u64 = 0x494d_4653; // "IMFS"
 const IMFS_STATFS_BLOCK_SIZE: u64 = 4096;
 const IMFS_STATFS_TOTAL_BLOCKS: u64 = 1024 * 1024;
@@ -1158,12 +1160,12 @@ impl ImfsState {
         flags: i32,
     ) -> i32 {
         let supported_flags =
-            libc::AT_SYMLINK_NOFOLLOW | libc::AT_NO_AUTOMOUNT | libc::AT_EMPTY_PATH;
+            libc::AT_SYMLINK_NOFOLLOW | LIND_AT_NO_AUTOMOUNT | LIND_AT_EMPTY_PATH;
         if flags & !supported_flags != 0 {
             return -22; // EINVAL
         }
 
-        if path.is_empty() && flags & libc::AT_EMPTY_PATH != 0 {
+        if path.is_empty() && flags & LIND_AT_EMPTY_PATH != 0 {
             let node_idx = if dirfd == LIND_AT_FDCWD {
                 let norm_path = self.normalize_path_for_cage(cage_id, ".");
                 match self.resolve_path(&norm_path, true) {
