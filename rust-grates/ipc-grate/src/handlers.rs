@@ -37,6 +37,7 @@ const AT_FDCWD: i64 = -100;
 /// wasm linear memory (e.g. a `Vec` we own) — without it, the host
 /// receives a tiny wasm offset and segfaults dereferencing it.
 const ARG_TRANSLATE_FLAG: u64 = 1u64 << 63;
+const CLONE_VFORK: u64 = 0x0000_4000;
 
 #[inline]
 fn read_user_bytes(src: u64, dst: *mut u8, len: usize) {
@@ -52,19 +53,38 @@ fn write_user_bytes(dst: u64, src: *const u8, len: usize) {
     }
 }
 
+fn read_clone_flags(clone_args_ptr: u64, clone_args_cage: u64) -> u64 {
+    let mut flags = 0u64;
+    let this_cage = getcageid();
+    let _ = copy_data_between_cages(
+        this_cage,
+        clone_args_cage,
+        clone_args_ptr,
+        clone_args_cage,
+        &mut flags as *mut u64 as u64,
+        this_cage,
+        8,
+        0,
+    );
+    flags
+}
+
 fn ensure_cage_fdtable(cage: u64) {
-    if !fdtables::check_cage_exists(cage) {
+    if !wait_for_cage_fdtable(cage) {
         fdtables::init_empty_cage(cage);
+        for fd in 0..3u64 {
+            let _ = fdtables::get_specific_virtual_fd(cage, fd, FDKIND_KERNEL, fd, false, 0);
+        }
     }
 }
 
 /// Translate a grate virt fd to the runtime's virt fd (the underfd).
 /// Returns None if the fd doesn't exist in our fdtable.
 fn translate_to_underfd(cage: u64, fd: u64) -> Option<u64> {
-    if !fdtables::check_cage_exists(cage) {
+    if !wait_for_cage_fdtable(cage) {
         return Some(fd);
     }
-    fdtables::translate_virtual_fd(cage, fd).ok().map(|e| e.underfd)
+    wait_for_fdtable_entry(cage, fd).map(|e| e.underfd)
 }
 
 /// Translate a possibly-AT_FDCWD dirfd; AT_FDCWD passes through unchanged.
@@ -72,10 +92,10 @@ fn translate_dirfd(cage: u64, fd: u64) -> Option<u64> {
     if (fd as i64) == AT_FDCWD {
         return Some(fd);
     }
-    if !fdtables::check_cage_exists(cage) {
+    if !wait_for_cage_fdtable(cage) {
         return Some(fd);
     }
-    let entry = fdtables::translate_virtual_fd(cage, fd).ok()?;
+    let entry = wait_for_fdtable_entry(cage, fd)?;
     if entry.fdkind == FDKIND_KERNEL {
         Some(entry.underfd)
     } else {
@@ -152,9 +172,7 @@ fn forward_with_two_dirfds(
 /// FDKIND_KERNEL entry, returning a fresh grate virt fd that maps to it.
 /// On allocation failure, close the runtime fd and return -EMFILE.
 fn register_kernel_fd(cage: u64, runtime_vfd: i32, cloexec: bool, perfdinfo: u64) -> i32 {
-    if !fdtables::check_cage_exists(cage) {
-        fdtables::init_empty_cage(cage);
-    }
+    ensure_cage_fdtable(cage);
     match fdtables::get_unused_virtual_fd(
         cage, FDKIND_KERNEL, runtime_vfd as u64, cloexec, perfdinfo,
     ) {
@@ -326,9 +344,7 @@ pub extern "C" fn pipe_handler(
     let cage_id = arg1cage;
     let this_cage = getcageid();
 
-    if !fdtables::check_cage_exists(cage_id) {
-        fdtables::init_empty_cage(cage_id);
-    }
+    ensure_cage_fdtable(cage_id);
 
     let (rfd, wfd) = match with_ipc(|s| s.create_pipe(cage_id, 0)) {
         Ok(fds) => fds,
@@ -361,9 +377,7 @@ pub extern "C" fn pipe2_handler(
     let this_cage = getcageid();
     let flags = arg2 as i32;
 
-    if !fdtables::check_cage_exists(cage_id) {
-        fdtables::init_empty_cage(cage_id);
-    }
+    ensure_cage_fdtable(cage_id);
 
     let (rfd, wfd) = match with_ipc(|s| s.create_pipe(cage_id, flags)) {
         Ok(fds) => fds,
@@ -1542,16 +1556,10 @@ pub extern "C" fn fcntl_handler(
 
 /// fork (syscall 57): forward fork and clone fdtables for the child.
 ///
-/// The child cage starts running as soon as forward_syscall(SYS_CLONE)
-/// returns.  To prevent the child from using an uninitialised fdtable
-/// (which causes "Unknown cageid" panics) or closing an fd before its
-/// refcount is bumped (which causes premature pipe EOF / EPIPE), we:
-///
-///   1. Pre-collect parent's pipe Arc refs via with_ipc (needs IPC_STATE).
-///   2. Acquire CAGE_INIT_LOCK, then fork, copy fdtable, bump refcounts,
-///      and release.  The child's first handler call goes through
-///      lookup_ipc_fd which also acquires CAGE_INIT_LOCK — so the child
-///      blocks until setup is complete.
+/// Children can run syscalls before the parent-side clone handler returns.
+/// vfork/posix_spawn makes that unavoidable: the parent is suspended until
+/// the child execs.  Snapshot the parent fdtable before cloning so early child
+/// handlers can lazily install inherited IPC fds.
 pub extern "C" fn fork_handler(
     cageid: u64,
     arg1: u64, arg1cage: u64,
@@ -1567,7 +1575,9 @@ pub extern "C" fn fork_handler(
 
     // Threads share the parent's fd table — only do fork bookkeeping
     // for process forks.
+    let clone_flags = read_clone_flags(arg1, arg1cage);
     let is_thread = is_thread_clone(arg1, arg1cage);
+    let is_vfork = (clone_flags & CLONE_VFORK) != 0;
 
     // --- Phase 1: snapshot parent's fdtable and pre-collect pipe/socket
     //     Arc references BEFORE forking.  Uses IPC_STATE (via with_ipc) but
@@ -1581,9 +1591,11 @@ pub extern "C" fn fork_handler(
     }
 
     let mut bumps: Vec<RefBump> = Vec::new();
+    let mut parent_fds: HashMap<u64, fdtables::FDTableEntry> = HashMap::new();
 
     if !is_thread {
-        let parent_fds = fdtables::return_fdtable_copy(cage_id);
+        parent_fds = fdtables::return_fdtable_copy(cage_id);
+        push_pending_fdtable(cage_id, &parent_fds);
         for (_fd, entry) in &parent_fds {
             match entry.fdkind {
                 IPC_PIPE => {
@@ -1607,19 +1619,7 @@ pub extern "C" fn fork_handler(
                 _ => {}
             }
         }
-    }
 
-    // --- Phase 2: fork, bump refcounts, THEN create child cage in fdtables.
-    let ret = forward_syscall(SYS_CLONE, cage_id, &args, &arg_cages);
-
-    if ret <= 0 {
-        return ret;
-    }
-
-    let child_cage_id = ret as u64;
-
-    if !is_thread {
-        // Bump refcounts FIRST (child is spinning, can't interfere).
         for bump in &bumps {
             match bump {
                 RefBump::Pipe { pipe, is_read } => {
@@ -1639,6 +1639,42 @@ pub extern "C" fn fork_handler(
                 }
             }
         }
+    }
+
+    // --- Phase 2: fork, then create child cage in fdtables if the child
+    //     did not lazily create it before the parent returned.
+    let ret = forward_syscall(SYS_CLONE, cage_id, &args, &arg_cages);
+
+    if ret <= 0 {
+        if ret < 0 && !is_thread {
+            for bump in &bumps {
+                match bump {
+                    RefBump::Pipe { pipe, is_read } => {
+                        if *is_read {
+                            pipe.decr_read_ref();
+                        } else {
+                            pipe.decr_write_ref();
+                        }
+                    }
+                    RefBump::Socket { sendpipe, recvpipe } => {
+                        if let Some(sp) = sendpipe {
+                            sp.decr_write_ref();
+                        }
+                        if let Some(rp) = recvpipe {
+                            rp.decr_read_ref();
+                        }
+                    }
+                }
+            }
+            remove_pending_fdtable(cage_id);
+        }
+        return ret;
+    }
+
+    let child_cage_id = ret as u64;
+
+    if !is_thread {
+        remove_pending_fdtable(cage_id);
 
         // Copy parent's fdtable to child.  This bumps the (fdkind, underfd)
         // refcount in fdtables for each entry but does NOT fire our
@@ -1663,17 +1699,18 @@ pub extern "C" fn fork_handler(
             // Preserve those child-side entries, and merge only parent fds
             // that are still absent.  Overwriting child entries here would
             // undo redirections performed between clone and exec.
-            let parent_fds = fdtables::return_fdtable_copy(cage_id);
-            for (fd, entry) in &parent_fds {
-                if fdtables::translate_virtual_fd(child_cage_id, *fd).is_err() {
-                    let _ = fdtables::get_specific_virtual_fd(
-                        child_cage_id,
-                        *fd,
-                        entry.fdkind,
-                        entry.underfd,
-                        entry.should_cloexec,
-                        entry.perfdinfo,
-                    );
+            if !is_vfork {
+                for (fd, entry) in &parent_fds {
+                    if fdtables::translate_virtual_fd(child_cage_id, *fd).is_err() {
+                        let _ = fdtables::get_specific_virtual_fd(
+                            child_cage_id,
+                            *fd,
+                            entry.fdkind,
+                            entry.underfd,
+                            entry.should_cloexec,
+                            entry.perfdinfo,
+                        );
+                    }
                 }
             }
         } else {
@@ -1703,7 +1740,7 @@ pub extern "C" fn exec_handler(
 ) -> i32 {
     let cage_id = arg1cage;
 
-    if !fdtables::check_cage_exists(cage_id) {
+    if !wait_for_cage_fdtable(cage_id) {
         return forward_syscall(
             SYS_EXEC, cage_id,
             &[arg1, arg2, arg3, arg4, arg5, arg6],
@@ -1761,9 +1798,7 @@ pub extern "C" fn socket_handler(
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, _arg2cage, _arg3cage, arg4cage, arg5cage, arg6cage];
 
-    if !fdtables::check_cage_exists(cage_id) {
-        fdtables::init_empty_cage(cage_id);
-    }
+    ensure_cage_fdtable(cage_id);
 
     // Only handle AF_UNIX and AF_INET (for potential loopback); everything
     // else just gets forwarded to the runtime with a fresh grate vfd wrapping
@@ -1832,9 +1867,7 @@ pub extern "C" fn socketpair_handler(
     let socktype = arg2 as i32;
     let this_cage = getcageid();
 
-    if !fdtables::check_cage_exists(cage_id) {
-        fdtables::init_empty_cage(cage_id);
-    }
+    ensure_cage_fdtable(cage_id);
 
     if domain != socket::AF_UNIX {
         return -97; // EAFNOSUPPORT
@@ -2446,9 +2479,7 @@ const EPOLLHUP: u32 = 0x010;
 /// this fd fires `ipc_epoll_close_handler`, which cleans up our per-epfd
 /// IPC target map.
 fn register_ipc_epoll_fd(cage: u64, runtime_vfd: i32, cloexec: bool) -> i32 {
-    if !fdtables::check_cage_exists(cage) {
-        fdtables::init_empty_cage(cage);
-    }
+    ensure_cage_fdtable(cage);
     match fdtables::get_unused_virtual_fd(cage, IPC_EPOLL, runtime_vfd as u64, cloexec, 0) {
         Ok(grate_vfd) => {
             // Initialize an empty IPC-target map for this (cage, grate_epfd).
