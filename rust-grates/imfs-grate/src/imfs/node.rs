@@ -20,7 +20,7 @@ pub enum NodeType {
     Reg,
     /// Directory.
     Dir,
-    /// Symbolic link.
+    /// Link node.
     Lnk,
     /// Pipe.
     #[allow(unused)]
@@ -62,8 +62,10 @@ pub enum NodeInfo {
     },
     /// Directory: list of child entries.
     Dir { children: Vec<DirEntry> },
-    /// Symbolic/hard link: index of the target node.
-    Lnk { target: usize },
+    /// Hard link: index of the target node.
+    HardLink { target: usize },
+    /// Symbolic link: stored target path.
+    Symlink { target: String },
     /// Pipe (limited implementation).
     Pip {
         data: Vec<u8>,
@@ -123,7 +125,9 @@ impl Node {
             NodeType::Dir => NodeInfo::Dir {
                 children: Vec::new(),
             },
-            NodeType::Lnk => NodeInfo::Lnk { target: 0 },
+            NodeType::Lnk => NodeInfo::Symlink {
+                target: String::new(),
+            },
             NodeType::Pip => NodeInfo::Pip {
                 data: Vec::new(),
                 readers: 0,
@@ -168,10 +172,17 @@ impl Node {
         }
     }
 
-    /// Get the link target index of a link node.
-    pub fn link_target(&self) -> Option<usize> {
+    /// Get the hard-link target index of a link node.
+    pub fn hardlink_target(&self) -> Option<usize> {
         match &self.info {
-            NodeInfo::Lnk { target } => Some(*target),
+            NodeInfo::HardLink { target } => Some(*target),
+            _ => None,
+        }
+    }
+
+    pub fn symlink_target(&self) -> Option<&str> {
+        match &self.info {
+            NodeInfo::Symlink { target } => Some(target),
             _ => None,
         }
     }

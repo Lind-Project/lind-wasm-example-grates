@@ -16,6 +16,8 @@ use grate_rs::constants::fs::O_RDWR;
 use grate_rs::constants::*;
 use grate_rs::{GrateBuilder, GrateError};
 
+const SYS_LINKAT: u64 = 265;
+
 struct Config {
     argv: Vec<String>,
     log_enabled: bool,
@@ -76,12 +78,15 @@ fn main() {
         .register(SYS_UNLINK, handlers::unlink_handler)
         .register(SYS_UNLINKAT, handlers::unlinkat_handler)
         .register(SYS_LINK, handlers::link_handler)
+        .register(SYS_LINKAT, handlers::linkat_handler)
         .register(SYS_RENAME, handlers::rename_handler)
         .register(SYS_RENAMEAT, handlers::renameat_handler)
         .register(SYS_RENAMEAT2, handlers::renameat2_handler)
         .register(SYS_MKNOD, handlers::mknod_handler)
-        .register(SYS_READLINK, handlers::enosys_handler)
-        .register(SYS_READLINKAT, handlers::enosys_handler)
+        .register(SYS_SYMLINK, handlers::symlink_handler)
+        .register(SYS_SYMLINKAT, handlers::symlinkat_handler)
+        .register(SYS_READLINK, handlers::readlink_handler)
+        .register(SYS_READLINKAT, handlers::readlinkat_handler)
         .register(SYS_PREAD, handlers::pread_handler)
         .register(SYS_PWRITE, handlers::pwrite_handler)
         .register(SYS_PREADV, handlers::preadv_handler)
@@ -92,7 +97,9 @@ fn main() {
         .register(SYS_CHDIR, handlers::chdir_handler)
         .register(SYS_FXSTAT, handlers::fstat_handler)
         .register(SYS_XSTAT, handlers::stat_handler)
+        .register(SYS_LSTAT, handlers::lstat_handler)
         .register(SYS_NEWFSTATAT, handlers::fstatat_handler)
+        .register(SYS_STATX, handlers::enosys_handler)
         .register(SYS_RMDIR, handlers::rmdir_handler)
         .register(SYS_CHMOD, handlers::chmod_handler)
         .register(SYS_FCHMODAT, handlers::fchmodat_handler)
