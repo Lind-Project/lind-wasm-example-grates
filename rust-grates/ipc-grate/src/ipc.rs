@@ -15,8 +15,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 // Neither std::sync::Mutex nor POSIX shared-memory semaphores synchronize
 // across Lind runtime threads.  The only cross-thread primitive that works
-// is DashMap (used by fdtables).  We use fdtables::check_cage_exists as a
-// spin-wait signal: the child spins until its cage appears in the DashMap.
+// is DashMap (used by fdtables).
 
 use crate::pipe::{PipeBuffer, PIPE_CAPACITY};
 use crate::socket::{SocketRegistry, IPC_SOCKET};
@@ -165,27 +164,21 @@ impl IpcState {
 /// Check if a fd belongs to the IPC grate (pipe endpoint or socket).
 /// Returns (underfd, fdkind, flags) or None if it's not ours.
 ///
-/// If the cage doesn't exist in fdtables yet, init it empty.  This
-/// covers the vfork-spawn case: posix_spawn issues
+/// If the cage doesn't exist in fdtables yet, do not initialize it here.
+/// Forked children must get their fdtable from the fork handler's
+/// `copy_fdtable_for_cage`; creating an empty table from lookup paths races
+/// that copy and leaves inherited fds partially tracked.
+///
+/// The vfork-spawn case is subtle: posix_spawn issues
 /// `clone(CLONE_VM | CLONE_VFORK)` which suspends the parent inside
 /// the runtime's clone until the child execs.  The child runs
 /// syscalls (dup2/close for redirection, etc.) before our parent
 /// fork_handler returns from forward_syscall and gets to call
-/// `copy_fdtable_for_cage`.  Without on-demand init, the child either
-/// spins forever (with the old spin-wait) or panics in
-/// `translate_virtual_fd`'s `check_cage_exists` assert.
-///
-/// Init-on-demand here means the spawned cage starts with an empty
-/// fdtable in our grate.  IPC operations on inherited fds will not
-/// find entries (so they fall through to forward_syscall, which is
-/// fine — under CLONE_VM the runtime handles fd state via the
-/// shared VM with the parent).
+/// `copy_fdtable_for_cage`.  We still must not create an empty IPC fdtable
+/// there; pre-exec syscalls on ordinary fds should fall through to the
+/// runtime/default handler.
 pub fn lookup_ipc_fd(cage_id: u64, fd: u64) -> Option<(u64, u32, i32)> {
     if !fdtables::check_cage_exists(cage_id) {
-        // Vfork-spawn child may run syscalls before our parent
-        // fork_handler can copy_fdtable_for_cage; init the cage empty
-        // on demand and let the syscall fall through to forward.
-        fdtables::init_empty_cage(cage_id);
         return None;
     }
     match fdtables::translate_virtual_fd(cage_id, fd) {
