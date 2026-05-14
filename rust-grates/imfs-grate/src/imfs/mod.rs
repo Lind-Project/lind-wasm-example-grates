@@ -24,6 +24,7 @@ pub const IMFS_FDKIND: u32 = 1;
 const IMFS_F_GETFD: i32 = 1;
 const IMFS_F_SETFD: i32 = 2;
 const IMFS_FD_CLOEXEC: i32 = 1;
+const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
 
 /// Global IMFS state.
 pub static IMFS: Mutex<Option<ImfsState>> = Mutex::new(None);
@@ -1160,8 +1161,9 @@ impl ImfsState {
         flags: i32,
     ) -> i32 {
         let supported_flags =
-            libc::AT_SYMLINK_NOFOLLOW | LIND_AT_NO_AUTOMOUNT | LIND_AT_EMPTY_PATH;
+            AT_SYMLINK_NOFOLLOW | LIND_AT_NO_AUTOMOUNT | LIND_AT_EMPTY_PATH;
         if flags & !supported_flags != 0 {
+            println!("[mifs] flag={}, supported={}", flags, supported_flags);
             return -22; // EINVAL
         }
 
