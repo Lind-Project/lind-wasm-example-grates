@@ -111,7 +111,8 @@ impl Node {
             NodeType::Reg => 0o100000 | (mode & 0o777), // S_IFREG
             NodeType::Dir => 0o040000 | (mode & 0o777), // S_IFDIR
             NodeType::Lnk => 0o120000 | (mode & 0o777), // S_IFLNK
-            _ => mode & 0o777,
+            NodeType::Pip => 0o010000 | (mode & 0o777), // S_IFIFO
+            NodeType::Free => mode & 0o777,
         };
 
         let info = match node_type {

@@ -212,7 +212,7 @@ pub extern "C" fn access_handler(
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
-    arg2cage: u64,
+    _arg2cage: u64,
     _arg3: u64,
     _arg3cage: u64,
     _arg4: u64,
@@ -227,17 +227,17 @@ pub extern "C" fn access_handler(
         None => return -14,
     };
 
-    imfs::with_imfs(|state| state.access(arg2cage, &pathname, arg2 as i32))
+    imfs::with_imfs(|state| state.access(arg1cage, &pathname, arg2 as i32))
 }
 
 pub extern "C" fn faccessat_handler(
     _cageid: u64,
     arg1: u64,
-    _arg1cage: u64,
+    arg1cage: u64,
     arg2: u64,
     arg2cage: u64,
     arg3: u64,
-    arg3cage: u64,
+    _arg3cage: u64,
     _arg4: u64,
     _arg4cage: u64,
     _arg5: u64,
@@ -250,7 +250,7 @@ pub extern "C" fn faccessat_handler(
         None => return -14,
     };
 
-    imfs::with_imfs(|state| state.accessat(arg3cage, arg1 as i32, &pathname, arg3 as i32))
+    imfs::with_imfs(|state| state.accessat(arg1cage, arg1 as i32, &pathname, arg3 as i32))
 }
 
 // =====================================================================
@@ -555,7 +555,7 @@ pub extern "C" fn chmod_handler(
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
-    arg2cage: u64,
+    _arg2cage: u64,
     _arg3: u64,
     _arg3cage: u64,
     _arg4: u64,
@@ -572,17 +572,17 @@ pub extern "C" fn chmod_handler(
 
     let mode = arg2 as u32;
 
-    imfs::with_imfs(|state| state.chmod(arg2cage, &pathname, mode))
+    imfs::with_imfs(|state| state.chmod(arg1cage, &pathname, mode))
 }
 
 pub extern "C" fn fchmodat_handler(
     _cageid: u64,
     arg1: u64,
-    _arg1cage: u64,
+    arg1cage: u64,
     arg2: u64,
     arg2cage: u64,
     arg3: u64,
-    arg3cage: u64,
+    _arg3cage: u64,
     arg4: u64,
     _arg4cage: u64,
     _arg5: u64,
@@ -599,7 +599,7 @@ pub extern "C" fn fchmodat_handler(
         None => return -14,
     };
 
-    imfs::with_imfs(|state| state.chmodat(arg3cage, arg1 as i32, &pathname, arg3 as u32))
+    imfs::with_imfs(|state| state.chmodat(arg1cage, arg1 as i32, &pathname, arg3 as u32))
 }
 
 pub extern "C" fn chown_handler(
@@ -607,7 +607,7 @@ pub extern "C" fn chown_handler(
     arg1: u64,
     arg1cage: u64,
     _arg2: u64,
-    arg2cage: u64,
+    _arg2cage: u64,
     _arg3: u64,
     _arg3cage: u64,
     _arg4: u64,
@@ -622,17 +622,17 @@ pub extern "C" fn chown_handler(
         None => return -14,
     };
 
-    imfs::with_imfs(|state| state.chown(arg2cage, &pathname))
+    imfs::with_imfs(|state| state.chown(arg1cage, &pathname))
 }
 
 pub extern "C" fn fchownat_handler(
     _cageid: u64,
     arg1: u64,
-    _arg1cage: u64,
+    arg1cage: u64,
     arg2: u64,
     arg2cage: u64,
     _arg3: u64,
-    arg3cage: u64,
+    _arg3cage: u64,
     _arg4: u64,
     _arg4cage: u64,
     _arg5: u64,
@@ -645,7 +645,7 @@ pub extern "C" fn fchownat_handler(
         None => return -14,
     };
 
-    imfs::with_imfs(|state| state.chownat(arg3cage, arg1 as i32, &pathname))
+    imfs::with_imfs(|state| state.chownat(arg1cage, arg1 as i32, &pathname))
 }
 
 pub extern "C" fn truncate_handler(
@@ -715,7 +715,7 @@ pub extern "C" fn stat_handler(
         None => return -14,
     };
 
-    let ret = imfs::with_imfs(|state| state.stat(arg2cage, &pathname, &mut statbuf));
+    let ret = imfs::with_imfs(|state| state.stat(arg1cage, &pathname, &mut statbuf));
 
     if ret < 0 {
         return ret;
@@ -739,13 +739,13 @@ pub extern "C" fn stat_handler(
 pub extern "C" fn fstatat_handler(
     _cageid: u64,
     arg1: u64,
-    _arg1cage: u64,
+    arg1cage: u64,
     arg2: u64,
     arg2cage: u64,
     arg3: u64,
     arg3cage: u64,
     _arg4: u64,
-    arg4cage: u64,
+    _arg4cage: u64,
     _arg5: u64,
     _arg5cage: u64,
     _arg6: u64,
@@ -761,7 +761,7 @@ pub extern "C" fn fstatat_handler(
     };
 
     let mut statbuf = stat::default();
-    let ret = imfs::with_imfs(|state| state.statat(arg4cage, arg1 as i32, &pathname, &mut statbuf));
+    let ret = imfs::with_imfs(|state| state.statat(arg1cage, arg1 as i32, &pathname, &mut statbuf));
 
     if ret < 0 {
         return ret;
@@ -848,7 +848,7 @@ pub extern "C" fn statfs_handler(
     };
 
     let mut statbuf = imfs::FsData::default();
-    let ret = imfs::with_imfs(|state| state.statfs(arg2cage, &pathname, &mut statbuf));
+    let ret = imfs::with_imfs(|state| state.statfs(arg1cage, &pathname, &mut statbuf));
 
     if ret < 0 {
         return ret;
@@ -942,11 +942,11 @@ pub extern "C" fn unlink_handler(
 pub extern "C" fn unlinkat_handler(
     _cageid: u64,
     arg1: u64,
-    _arg1cage: u64,
+    arg1cage: u64,
     arg2: u64,
     arg2cage: u64,
     arg3: u64,
-    arg3cage: u64,
+    _arg3cage: u64,
     _arg4: u64,
     _arg4cage: u64,
     _arg5: u64,
@@ -959,7 +959,7 @@ pub extern "C" fn unlinkat_handler(
         None => return -14,
     };
 
-    imfs::with_imfs(|state| state.unlinkat(arg3cage, arg1 as i32, &pathname, arg3 as i32))
+    imfs::with_imfs(|state| state.unlinkat(arg1cage, arg1 as i32, &pathname, arg3 as i32))
 }
 
 pub extern "C" fn link_handler(
@@ -969,7 +969,7 @@ pub extern "C" fn link_handler(
     arg2: u64,
     arg2cage: u64,
     _arg3: u64,
-    arg3cage: u64,
+    _arg3cage: u64,
     _arg4: u64,
     _arg4cage: u64,
     _arg5: u64,
@@ -987,7 +987,7 @@ pub extern "C" fn link_handler(
         None => return -14,
     };
 
-    imfs::with_imfs(|state| state.link(arg3cage, &oldpath, &newpath))
+    imfs::with_imfs(|state| state.link(arg1cage, &oldpath, &newpath))
 }
 
 pub extern "C" fn rename_handler(
@@ -997,7 +997,7 @@ pub extern "C" fn rename_handler(
     arg2: u64,
     arg2cage: u64,
     _arg3: u64,
-    arg3cage: u64,
+    _arg3cage: u64,
     _arg4: u64,
     _arg4cage: u64,
     _arg5: u64,
@@ -1015,7 +1015,7 @@ pub extern "C" fn rename_handler(
         None => return -14,
     };
 
-    imfs::with_imfs(|state| state.rename(arg3cage, &oldpath, &newpath))
+    imfs::with_imfs(|state| state.rename(arg1cage, &oldpath, &newpath))
 }
 
 fn renameat_impl(
@@ -1532,7 +1532,7 @@ pub extern "C" fn rmdir_handler(
         None => return -14,
     };
 
-    imfs::with_imfs(|state| state.rmdir(_arg2cage, &pathname))
+    imfs::with_imfs(|state| state.rmdir(arg1cage, &pathname))
 }
 
 pub extern "C" fn mkdir_handler(
@@ -1540,7 +1540,7 @@ pub extern "C" fn mkdir_handler(
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
-    arg2cage: u64,
+    _arg2cage: u64,
     _arg3: u64,
     _arg3cage: u64,
     _arg4: u64,
@@ -1558,14 +1558,14 @@ pub extern "C" fn mkdir_handler(
 
     let mode = arg2 as u32;
 
-    imfs::with_imfs(|state| state.mkdir(arg2cage, &pathname, mode))
+    imfs::with_imfs(|state| state.mkdir(arg1cage, &pathname, mode))
 }
 
 pub extern "C" fn mknod_handler(
     _cageid: u64,
-    _arg1: u64,
-    _arg1cage: u64,
-    _arg2: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
     _arg2cage: u64,
     _arg3: u64,
     _arg3cage: u64,
@@ -1576,7 +1576,12 @@ pub extern "C" fn mknod_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    -38 // ENOSYS
+    let pathname = match copy_path_from_cage(arg1, arg1cage) {
+        Some(p) => p,
+        None => return -14,
+    };
+
+    imfs::with_imfs(|state| state.mknod(arg1cage, &pathname, arg2 as u32))
 }
 
 pub extern "C" fn fsync_handler(
@@ -1597,16 +1602,52 @@ pub extern "C" fn fsync_handler(
     0
 }
 
+pub extern "C" fn sync_file_range_handler(
+    _cageid: u64,
+    _arg1: u64,
+    _arg1cage: u64,
+    _arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    0
+}
+
+pub extern "C" fn fchmod_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    imfs::with_imfs(|state| state.fchmod(arg1cage, arg1, arg2 as u32))
+}
+
 pub extern "C" fn utimensat_handler(
     _cageid: u64,
     arg1: u64,
-    _arg1cage: u64,
+    arg1cage: u64,
     arg2: u64,
     arg2cage: u64,
     _arg3: u64,
     _arg3cage: u64,
     arg4: u64,
-    arg4cage: u64,
+    _arg4cage: u64,
     _arg5: u64,
     _arg5cage: u64,
     _arg6: u64,
@@ -1625,7 +1666,7 @@ pub extern "C" fn utimensat_handler(
         }
     };
 
-    imfs::with_imfs(|state| state.utimensat(arg4cage, arg1 as i32, pathname.as_deref()))
+    imfs::with_imfs(|state| state.utimensat(arg1cage, arg1 as i32, pathname.as_deref()))
 }
 
 // =====================================================================
