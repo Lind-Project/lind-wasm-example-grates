@@ -736,6 +736,53 @@ pub extern "C" fn stat_handler(
     ret
 }
 
+pub extern "C" fn lstat_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    if arg2 == 0 {
+        return -14;
+    }
+
+    let mut statbuf = stat::default();
+
+    let pathname = match copy_path_from_cage(arg1, arg1cage) {
+        Some(p) => p,
+        None => return -14,
+    };
+
+    let ret = imfs::with_imfs(|state| state.lstat(arg1cage, &pathname, &mut statbuf));
+
+    if ret < 0 {
+        return ret;
+    }
+
+    let this_cage = getcageid();
+    let _ = copy_data_between_cages(
+        this_cage,
+        arg2cage,
+        &statbuf as *const stat as u64,
+        this_cage,
+        arg2,
+        arg2cage,
+        std::mem::size_of::<stat>() as u64,
+        0,
+    );
+
+    ret
+}
+
 pub extern "C" fn fstatat_handler(
     _cageid: u64,
     arg1: u64,
@@ -744,7 +791,7 @@ pub extern "C" fn fstatat_handler(
     arg2cage: u64,
     arg3: u64,
     arg3cage: u64,
-    _arg4: u64,
+    arg4: u64,
     _arg4cage: u64,
     _arg5: u64,
     _arg5cage: u64,
@@ -761,7 +808,9 @@ pub extern "C" fn fstatat_handler(
     };
 
     let mut statbuf = stat::default();
-    let ret = imfs::with_imfs(|state| state.statat(arg1cage, arg1 as i32, &pathname, &mut statbuf));
+    let ret = imfs::with_imfs(|state| {
+        state.statat(arg1cage, arg1 as i32, &pathname, &mut statbuf, arg4 as i32)
+    });
 
     if ret < 0 {
         return ret;
@@ -988,6 +1037,181 @@ pub extern "C" fn link_handler(
     };
 
     imfs::with_imfs(|state| state.link(arg1cage, &oldpath, &newpath))
+}
+
+pub extern "C" fn linkat_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    _arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let oldpath = match copy_path_from_cage(arg2, arg2cage) {
+        Some(p) => p,
+        None => return -14,
+    };
+
+    let newpath = match copy_path_from_cage(arg4, arg4cage) {
+        Some(p) => p,
+        None => return -14,
+    };
+
+    imfs::with_imfs(|state| {
+        state.linkat(
+            arg1cage,
+            arg1 as i32,
+            &oldpath,
+            arg3 as i32,
+            &newpath,
+            arg5 as i32,
+        )
+    })
+}
+
+pub extern "C" fn symlink_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let target = match copy_path_from_cage(arg1, arg1cage) {
+        Some(p) => p,
+        None => return -14,
+    };
+
+    let linkpath = match copy_path_from_cage(arg2, arg2cage) {
+        Some(p) => p,
+        None => return -14,
+    };
+
+    imfs::with_imfs(|state| state.symlink(arg2cage, &target, &linkpath))
+}
+
+pub extern "C" fn symlinkat_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let target = match copy_path_from_cage(arg1, arg1cage) {
+        Some(p) => p,
+        None => return -14,
+    };
+
+    let linkpath = match copy_path_from_cage(arg3, arg3cage) {
+        Some(p) => p,
+        None => return -14,
+    };
+
+    imfs::with_imfs(|state| state.symlinkat(arg2cage, &target, arg2 as i32, &linkpath))
+}
+
+fn copy_readlink_target_to_cage(target: String, buf: u64, buf_cage: u64, bufsiz: u64) -> i32 {
+    if buf == 0 {
+        return -14;
+    }
+
+    let copy_len = std::cmp::min(target.len(), bufsiz as usize);
+    if copy_len == 0 {
+        return 0;
+    }
+
+    let this_cage = getcageid();
+    match copy_data_between_cages(
+        this_cage,
+        buf_cage,
+        target.as_ptr() as u64,
+        this_cage,
+        buf,
+        buf_cage,
+        copy_len as u64,
+        0,
+    ) {
+        Ok(_) => copy_len as i32,
+        Err(_) => -14,
+    }
+}
+
+pub extern "C" fn readlink_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let pathname = match copy_path_from_cage(arg1, arg1cage) {
+        Some(p) => p,
+        None => return -14,
+    };
+
+    let target = match imfs::with_imfs(|state| state.readlink(arg1cage, &pathname)) {
+        Ok(target) => target,
+        Err(e) => return e,
+    };
+
+    copy_readlink_target_to_cage(target, arg2, arg2cage, arg3)
+}
+
+pub extern "C" fn readlinkat_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let pathname = match copy_path_from_cage(arg2, arg2cage) {
+        Some(p) => p,
+        None => return -14,
+    };
+
+    let target = match imfs::with_imfs(|state| state.readlinkat(arg1cage, arg1 as i32, &pathname)) {
+        Ok(target) => target,
+        Err(e) => return e,
+    };
+
+    copy_readlink_target_to_cage(target, arg3, arg3cage, arg4)
 }
 
 pub extern "C" fn rename_handler(

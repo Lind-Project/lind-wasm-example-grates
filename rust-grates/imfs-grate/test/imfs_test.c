@@ -463,88 +463,90 @@ static void test_link_rw(void) {
 	CHECK("unlink file2", unlink("file2") == 0);
 }
 
-static void test_at_metadata_syscalls(void) {
-	printf("\n[test_at_metadata_syscalls]\n");
+static void test_symlink_readlink_linkat(void) {
+	printf("\n[test_symlink_readlink_linkat]\n");
 
-	int ret = mkdir("/atdir", 0755);
-	CHECK("mkdir /atdir for *at tests", ret == 0);
+	CHECK("mkdir /symdir", mkdir("/symdir", 0755) == 0);
 
-	int dirfd = open("/atdir", O_RDONLY | O_DIRECTORY);
-	CHECK("open /atdir as dirfd", dirfd >= 0);
-	if (dirfd < 0)
-		return;
-
-	int fd = openat(dirfd, "file", O_CREAT | O_RDWR, 0644);
-	CHECK("openat creates file relative to dirfd", fd >= 0);
+	int fd = open("/symdir/target", O_CREAT | O_RDWR, 0644);
+	CHECK("create symlink target", fd >= 0);
 	if (fd >= 0) {
-		CHECK("write openat file", write(fd, "atdata", 6) == 6);
+		CHECK("write symlink target", write(fd, "sdata", 5) == 5);
 		close(fd);
 	}
 
-	CHECK("faccessat sees relative file",
-	      faccessat(dirfd, "file", F_OK, 0) == 0);
+	CHECK("create relative symlink", symlink("target", "/symdir/rel_link") == 0);
+
+	char linkbuf[64];
+	memset(linkbuf, 0, sizeof(linkbuf));
+	ssize_t n = readlink("/symdir/rel_link", linkbuf, sizeof(linkbuf));
+	CHECK("readlink returns target length", n == 6);
+	if (n >= 0 && n < (ssize_t)sizeof(linkbuf))
+		linkbuf[n] = '\0';
+	CHECK("readlink returns target bytes", strcmp(linkbuf, "target") == 0);
 
 	struct stat st;
 	memset(&st, 0, sizeof(st));
-	CHECK("fstatat sees relative file",
-	      fstatat(dirfd, "file", &st, 0) == 0);
-	CHECK("fstatat reports regular file", S_ISREG(st.st_mode));
-
-	CHECK("fchmodat updates mode",
-	      fchmodat(dirfd, "file", 0600, 0) == 0);
+	CHECK("lstat sees symlink", lstat("/symdir/rel_link", &st) == 0 && S_ISLNK(st.st_mode));
+	CHECK("lstat symlink size is target length", st.st_size == 6);
 	memset(&st, 0, sizeof(st));
-	CHECK("fstatat after fchmodat",
-	      fstatat(dirfd, "file", &st, 0) == 0);
-	CHECK("mode after fchmodat is 0600", (st.st_mode & 0777) == 0600);
+	CHECK("stat follows symlink", stat("/symdir/rel_link", &st) == 0 && S_ISREG(st.st_mode));
 
-	CHECK("chown existing path succeeds",
-	      chown("/atdir/file", getuid(), getgid()) == 0);
-	CHECK("lchown existing path succeeds",
-	      lchown("/atdir/file", getuid(), getgid()) == 0);
-	CHECK("fchownat existing path succeeds",
-	      fchownat(dirfd, "file", getuid(), getgid(), 0) == 0);
-
-	CHECK("utimensat relative path succeeds",
-	      utimensat(dirfd, "file", NULL, 0) == 0);
-
-	CHECK("renameat relative path succeeds",
-	      renameat(dirfd, "file", dirfd, "file2") == 0);
-	CHECK("old name gone after renameat",
-	      faccessat(dirfd, "file", F_OK, 0) != 0);
-	CHECK("new name exists after renameat",
-	      faccessat(dirfd, "file2", F_OK, 0) == 0);
-
-	CHECK("unlinkat removes relative file",
-	      unlinkat(dirfd, "file2", 0) == 0);
-	CHECK("file gone after unlinkat",
-	      faccessat(dirfd, "file2", F_OK, 0) != 0);
-
-	close(dirfd);
-	CHECK("rmdir removes empty *at test dir", rmdir("/atdir") == 0);
-}
-
-static void test_statfs(void) {
-	printf("\n[test_statfs]\n");
-
-	struct statfs sfs;
-	int ret = statfs("/", &sfs);
-	CHECK("statfs root succeeds", ret == 0);
-	CHECK("statfs reports block size", ret == 0 && sfs.f_bsize > 0);
-	CHECK("statfs reports blocks", ret == 0 && sfs.f_blocks > 0);
-	CHECK("statfs reports name length", ret == 0 && sfs.f_namelen > 0);
-
-	int fd = open("/test_statfs_file", O_CREAT | O_RDWR, 0644);
-	CHECK("create /test_statfs_file", fd >= 0);
+	char readbuf[8] = {0};
+	fd = open("/symdir/rel_link", O_RDONLY);
+	CHECK("open follows symlink", fd >= 0);
 	if (fd >= 0) {
-		memset(&sfs, 0, sizeof(sfs));
-		ret = fstatfs(fd, &sfs);
-		CHECK("fstatfs file succeeds", ret == 0);
-		CHECK("fstatfs reports block size", ret == 0 && sfs.f_bsize > 0);
+		CHECK("read through symlink", read(fd, readbuf, 5) == 5);
 		close(fd);
+		CHECK("symlink read data matches", memcmp(readbuf, "sdata", 5) == 0);
 	}
 
-	ret = statfs("/missing_statfs_path", &sfs);
-	CHECK("statfs nonexistent path fails", ret != 0);
+	CHECK("create dangling symlink", symlink("missing", "/symdir/dangling") == 0);
+	memset(linkbuf, 0, sizeof(linkbuf));
+	n = readlink("/symdir/dangling", linkbuf, sizeof(linkbuf));
+	CHECK("readlink dangling succeeds", n == 7);
+	CHECK("open dangling symlink fails", open("/symdir/dangling", O_RDONLY) < 0);
+
+	int dirfd = open("/symdir", O_RDONLY | O_DIRECTORY);
+	CHECK("open /symdir dirfd", dirfd >= 0);
+	if (dirfd >= 0) {
+		CHECK("symlinkat creates relative symlink",
+		      symlinkat("target", dirfd, "at_link") == 0);
+		memset(linkbuf, 0, sizeof(linkbuf));
+		n = readlinkat(dirfd, "at_link", linkbuf, sizeof(linkbuf));
+		CHECK("readlinkat returns target length", n == 6);
+		if (n >= 0 && n < (ssize_t)sizeof(linkbuf))
+			linkbuf[n] = '\0';
+		CHECK("readlinkat returns target bytes", strcmp(linkbuf, "target") == 0);
+
+		memset(&st, 0, sizeof(st));
+		CHECK("fstatat nofollow sees symlink",
+		      fstatat(dirfd, "at_link", &st, AT_SYMLINK_NOFOLLOW) == 0
+		      && S_ISLNK(st.st_mode));
+		memset(&st, 0, sizeof(st));
+		CHECK("fstatat follows symlink",
+		      fstatat(dirfd, "at_link", &st, 0) == 0 && S_ISREG(st.st_mode));
+
+		CHECK("linkat creates hard link",
+		      linkat(dirfd, "target", dirfd, "hard_at", 0) == 0);
+		fd = open("/symdir/hard_at", O_RDONLY);
+		CHECK("open linkat hard link", fd >= 0);
+		if (fd >= 0) {
+			memset(readbuf, 0, sizeof(readbuf));
+			CHECK("read linkat hard link", read(fd, readbuf, 5) == 5);
+			close(fd);
+			CHECK("linkat hard link data matches", memcmp(readbuf, "sdata", 5) == 0);
+		}
+
+		CHECK("unlink symlinkat link", unlinkat(dirfd, "at_link", 0) == 0);
+		CHECK("unlink linkat hard link", unlinkat(dirfd, "hard_at", 0) == 0);
+		close(dirfd);
+	}
+
+	CHECK("unlink relative symlink", unlink("/symdir/rel_link") == 0);
+	CHECK("unlink dangling symlink", unlink("/symdir/dangling") == 0);
+	CHECK("unlink symlink target", unlink("/symdir/target") == 0);
+	CHECK("rmdir /symdir", rmdir("/symdir") == 0);
 }
 
 static void test_at_metadata_syscalls(void) {
@@ -650,6 +652,7 @@ int main(void) {
 	test_fork();
 	test_wrong_write();
 	test_link_rw();
+	test_symlink_readlink_linkat();
 	test_at_metadata_syscalls();
 	test_lseek();
 	test_statfs();
