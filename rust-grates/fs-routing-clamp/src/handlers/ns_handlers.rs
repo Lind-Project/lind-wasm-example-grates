@@ -2,7 +2,7 @@ use crate::helpers;
 use grate_rs::{SyscallHandler, constants::*, copy_data_between_cages, getcageid, is_thread_clone};
 use grate_rs::constants::fs::{F_DUPFD, F_DUPFD_CLOEXEC, FD_CLOEXEC, O_CLOEXEC, F_SETFD};
 use grate_rs::constants::mman::MAP_ANON;
-use grate_rs::constants::error::{EBADF, EMFILE, EINVAL};
+use grate_rs::constants::error::{EAGAIN, EBADF, EMFILE, EINVAL};
 // =====================================================================
 //  PATH-BASED SYSCALL HANDLERS
 //
@@ -161,6 +161,29 @@ pub extern "C" fn ns_chdir_handler(
 //  Some handlers (open, close, dup) also update fdtables as a side effect.
 // =====================================================================
 
+fn do_routed_underfd_syscall(
+    cageid: u64,
+    sysno: u64,
+    args: &[u64; 6],
+    arg_cages: &[u64; 6],
+    is_clamped: bool,
+) -> i32 {
+    if is_clamped {
+        match helpers::get_route(cageid, sysno) {
+            Some(alt) => helpers::do_syscall(cageid, alt, args, arg_cages),
+            None => helpers::do_clamp_syscall(cageid, sysno, args, arg_cages),
+        }
+    } else {
+        helpers::do_syscall(cageid, sysno, args, arg_cages)
+    }
+}
+
+fn close_underfd(cageid: u64, underfd: u64, is_clamped: bool) -> i32 {
+    let close_args = [underfd, 0, 0, 0, 0, 0];
+    let close_cages = [cageid; 6];
+    do_routed_underfd_syscall(cageid, SYS_CLOSE, &close_args, &close_cages, is_clamped)
+}
+
 macro_rules! fd_route_handler {
     ($name:ident, $sysno:expr) => {
         pub extern "C" fn $name(
@@ -205,6 +228,19 @@ macro_rules! fd_route_handler {
                     // Clamp entry grate has a handler for this call, invoke that.
                     Some(alt) => {
                         let ret = helpers::do_syscall(arg1cage, alt, &args, &arg_cages);
+                        if ret == -(EAGAIN as i32) {
+                            eprintln!(
+                                "[fs-routing-clamp|fd-route|EAGAIN] handler={} sys={} cage={} vfd={} underfd={} fdkind={} perfdinfo={} route=clamped-alt alt={}",
+                                stringify!($name),
+                                $sysno,
+                                arg1cage,
+                                arg1,
+                                old_fd_entry.underfd,
+                                old_fd_entry.fdkind,
+                                old_fd_entry.perfdinfo,
+                                alt,
+                            );
+                        }
                         // println!(
                         //     "[ns_handlers|{}] cageid={} fd={} underfd={} clamped=clamped grate routed_to=clamped grate ret={}",
                         //     stringify!($name),
@@ -219,6 +255,18 @@ macro_rules! fd_route_handler {
                     // selfcage_id=entrycage
                     None => {
                         let ret = helpers::do_clamp_syscall(arg1cage, $sysno, &args, &arg_cages);
+                        if ret == -(EAGAIN as i32) {
+                            eprintln!(
+                                "[fs-routing-clamp|fd-route|EAGAIN] handler={} sys={} cage={} vfd={} underfd={} fdkind={} perfdinfo={} route=clamped-raw",
+                                stringify!($name),
+                                $sysno,
+                                arg1cage,
+                                arg1,
+                                old_fd_entry.underfd,
+                                old_fd_entry.fdkind,
+                                old_fd_entry.perfdinfo,
+                            );
+                        }
                         // println!(
                         //     "[ns_handlers|{}] cageid={} fd={} underfd={} clamped=clamped grate routed_to=kernel ret={}",
                         //     stringify!($name),
@@ -233,6 +281,18 @@ macro_rules! fd_route_handler {
             }
 
             let ret = helpers::do_syscall(arg1cage, $sysno, &args, &arg_cages);
+            if ret == -(EAGAIN as i32) {
+                eprintln!(
+                    "[fs-routing-clamp|fd-route|EAGAIN] handler={} sys={} cage={} vfd={} underfd={} fdkind={} perfdinfo={} route=raw",
+                    stringify!($name),
+                    $sysno,
+                    arg1cage,
+                    arg1,
+                    old_fd_entry.underfd,
+                    old_fd_entry.fdkind,
+                    old_fd_entry.perfdinfo,
+                );
+            }
 
             // println!(
             //     "[ns_handlers|{}] cageid={} fd={} underfd={} clamped={} routed_to={} ret={}",
@@ -337,9 +397,7 @@ pub extern "C" fn ns_open_handler(
                 return vfd as i32;
             }
             Err(_) => {
-                let close_args = [ret as u64, 0, 0, 0, 0, 0];
-                let close_cages = [arg1cage, arg1cage, arg1cage, arg1cage, arg1cage, arg1cage];
-                let _ = helpers::do_syscall(arg1cage, SYS_CLOSE, &close_args, &close_cages);
+                let _ = close_underfd(arg1cage, ret as u64, clamped != 0);
                 return -(EMFILE as i32);
             }
         };
@@ -383,14 +441,9 @@ pub extern "C" fn ns_close_handler(
 
     let is_clamped = old_fd_entry.perfdinfo != 0;
 
-    let nr = match helpers::get_route(arg1cage, SYS_CLOSE) {
-        Some(alt) if is_clamped => alt,
-        _ => SYS_CLOSE,
-    };
-
     args[0] = old_fd_entry.underfd; // replace virtual fd with underfd for the syscall
 
-    let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
+    let ret = do_routed_underfd_syscall(arg1cage, SYS_CLOSE, &args, &arg_cages, is_clamped);
 
     if ret >= 0 {
         let _ = fdtables::close_virtualfd(arg1cage, arg1);
@@ -551,15 +604,16 @@ pub extern "C" fn ns_fcntl_handler(
 
     let perfdinfo = old_fd_entry.perfdinfo;
 
-    let nr = match helpers::get_route(arg1cage, SYS_FCNTL) {
-        Some(alt) if perfdinfo != 0 => alt,
-        _ => SYS_FCNTL,
-    };
-
     args[0] = old_fd_entry.underfd; // replace virtual fd with underfd for the syscall
     // arg_cages[0] = cageid;
 
-    let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
+    let ret = do_routed_underfd_syscall(
+        arg1cage,
+        SYS_FCNTL,
+        &args,
+        &arg_cages,
+        perfdinfo != 0,
+    );
 
     if ret >= 0 {
         let cmd = arg2;
@@ -587,7 +641,10 @@ pub extern "C" fn ns_fcntl_handler(
                     // );
                     return vfd as i32;
                 }
-                Err(_) => return -(EMFILE as i32),
+                Err(_) => {
+                    let _ = close_underfd(arg1cage, ret as u64, perfdinfo != 0);
+                    return -(EMFILE as i32);
+                }
             };
         }
     }
@@ -795,9 +852,7 @@ pub extern "C" fn ns_openat_handler(
             }
             Err(_) => {
                 // Avoid leaking the kernel fd if we cannot allocate a virtual fd.
-                let close_args = [ret as u64, 0, 0, 0, 0, 0];
-                let close_cages = [arg1cage, arg1cage, arg1cage, arg1cage, arg1cage, arg1cage];
-                let _ = helpers::do_syscall(arg1cage, SYS_CLOSE, &close_args, &close_cages);
+                let _ = close_underfd(arg1cage, ret as u64, clamped != 0);
 
                 return -(EMFILE as i32);
             }
@@ -875,9 +930,7 @@ pub extern "C" fn ns_dup_handler(
         Err(errno) => {
             // If fdtable installation fails, close the duplicated underfd
             // to avoid leaking a real fd.
-            let close_args = [new_underfd, 0, 0, 0, 0, 0];
-            let close_cages = [arg1cage; 6];
-            let _ = helpers::do_syscall(arg1cage, SYS_CLOSE, &close_args, &close_cages);
+            let _ = close_underfd(arg1cage, new_underfd, perfdinfo != 0);
 
             -(errno as i32)
         }
@@ -929,10 +982,7 @@ pub extern "C" fn ns_dup2_handler(
     // This implements the guest-visible dup2 behavior:
     // newfd is atomically replaced from the guest's perspective.
     if let Ok(new_fd_entry) = fdtables::translate_virtual_fd(arg1cage, arg2) {
-        let close_args = [new_fd_entry.underfd, 0, 0, 0, 0, 0];
-        let close_cages = [arg1cage; 6];
-
-        let _ = helpers::do_syscall(arg1cage, SYS_CLOSE, &close_args, &close_cages);
+        let _ = close_underfd(arg1cage, new_fd_entry.underfd, new_fd_entry.perfdinfo != 0);
         let _ = fdtables::close_virtualfd(arg1cage, arg2);
     }
 
@@ -983,10 +1033,7 @@ pub extern "C" fn ns_dup2_handler(
         Err(errno) => {
             // If fdtable installation fails, close the duplicated underfd
             // to avoid leaking a real fd.
-            let close_args = [new_underfd, 0, 0, 0, 0, 0];
-            let close_cages = [arg1cage; 6];
-
-            let _ = helpers::do_syscall(arg1cage, SYS_CLOSE, &close_args, &close_cages);
+            let _ = close_underfd(arg1cage, new_underfd, perfdinfo != 0);
 
             // println!(
             //     "[ns_handlers|dup2] cageid={} old_fd={} underfd={} clamped={} new_underfd={} failed to install new_virtual_fd={}, errno={}",
@@ -1054,10 +1101,7 @@ pub extern "C" fn ns_dup3_handler(
     // If the target virtual fd already exists, close its underlying fd
     // and remove the virtual mapping.
     if let Ok(new_fd_entry) = fdtables::translate_virtual_fd(arg1cage, arg2) {
-        let close_args = [new_fd_entry.underfd, 0, 0, 0, 0, 0];
-        let close_cages = [arg1cage; 6];
-
-        let _ = helpers::do_syscall(arg1cage, SYS_CLOSE, &close_args, &close_cages);
+        let _ = close_underfd(arg1cage, new_fd_entry.underfd, new_fd_entry.perfdinfo != 0);
         let _ = fdtables::close_virtualfd(arg1cage, arg2);
     }
 
@@ -1095,13 +1139,16 @@ pub extern "C" fn ns_dup3_handler(
         ];
         let fcntl_cages = [arg1cage; 6];
 
-        let fcntl_ret = helpers::do_syscall(arg1cage, SYS_FCNTL, &fcntl_args, &fcntl_cages);
+        let fcntl_ret = do_routed_underfd_syscall(
+            arg1cage,
+            SYS_FCNTL,
+            &fcntl_args,
+            &fcntl_cages,
+            perfdinfo != 0,
+        );
 
         if fcntl_ret < 0 {
-            let close_args = [new_underfd, 0, 0, 0, 0, 0];
-            let close_cages = [arg1cage; 6];
-
-            let _ = helpers::do_syscall(arg1cage, SYS_CLOSE, &close_args, &close_cages);
+            let _ = close_underfd(arg1cage, new_underfd, perfdinfo != 0);
 
             // println!(
             //     "[ns_handlers|dup3] cageid={} old_fd={} underfd={} clamped={} new_underfd={} failed to set CLOEXEC, errno={}",
@@ -1142,10 +1189,7 @@ pub extern "C" fn ns_dup3_handler(
         Err(errno) => {
             // If fdtable installation fails, close the duplicated underfd
             // to avoid leaking a real fd.
-            let close_args = [new_underfd, 0, 0, 0, 0, 0];
-            let close_cages = [arg1cage; 6];
-
-            let _ = helpers::do_syscall(arg1cage, SYS_CLOSE, &close_args, &close_cages);
+            let _ = close_underfd(arg1cage, new_underfd, perfdinfo != 0);
 
             // println!(
             //     "[ns_handlers|dup3] cageid={} old_fd={} underfd={} clamped={} new_underfd={} failed to install new_virtual_fd={}, errno={}",
