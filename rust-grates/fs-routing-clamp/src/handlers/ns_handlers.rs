@@ -270,6 +270,37 @@ pub extern "C" fn ns_faccessat_handler(
     helpers::do_syscall(arg1cage, nr, &args, &arg_cages)
 }
 
+pub extern "C" fn ns_statx_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    let should_clamp = match prepare_at_path_route(arg1cage, arg1, arg2, arg2cage, &mut args, 0) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    let nr = match helpers::get_route(arg1cage, SYS_STATX) {
+        Some(alt) if should_clamp => alt,
+        _ => SYS_STATX,
+    };
+
+    helpers::do_syscall(arg1cage, nr, &args, &arg_cages)
+}
+
 pub extern "C" fn ns_fchmodat_handler(
     _cageid: u64,
     arg1: u64,
@@ -1593,6 +1624,7 @@ pub fn get_ns_handler(syscall_nr: u64) -> Option<SyscallHandler> {
         SYS_LSEEK => Some(ns_lseek_handler),
         SYS_FXSTAT => Some(ns_fstat_handler),
         SYS_NEWFSTATAT => Some(ns_fstatat_handler),
+        SYS_STATX => Some(ns_statx_handler),
         SYS_FACCESSAT => Some(ns_faccessat_handler),
         SYS_FCNTL => Some(ns_fcntl_handler),
         SYS_FTRUNCATE => Some(ns_ftruncate_handler),

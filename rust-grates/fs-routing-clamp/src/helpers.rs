@@ -18,7 +18,7 @@ pub const SYS_LINKAT_NR: u64 = 265;
 // These are all the calls that the fs-namespace grate cares about. All of the
 // following calls from the target must be routed through the grate regardless
 // of whether the clamp interposed on them.
-pub const FS_CALLS: [u64; 56] = [
+pub const FS_CALLS: [u64; 57] = [
     SYS_OPEN,
     SYS_OPENAT,
     SYS_XSTAT,
@@ -55,6 +55,7 @@ pub const FS_CALLS: [u64; 56] = [
     SYS_LSEEK,
     SYS_FXSTAT,
     SYS_NEWFSTATAT,
+    SYS_STATX,
     SYS_FACCESSAT,
     SYS_FCNTL,
     SYS_FTRUNCATE,
