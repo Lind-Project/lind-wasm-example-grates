@@ -49,7 +49,12 @@ fn translate_dirfd(cage: u64, fd: u64) -> Option<u64> {
     if (fd as i64) == AT_FDCWD {
         return Some(fd);
     }
-    translate_to_underfd(cage, fd)
+    let entry = fdtables::translate_virtual_fd(cage, fd).ok()?;
+    if entry.fdkind == FDKIND_KERNEL {
+        Some(entry.underfd)
+    } else {
+        None
+    }
 }
 
 /// Forward a syscall whose first argument is an fd, translating that fd
@@ -73,6 +78,47 @@ fn forward_with_dirfd1(syscall: u64, cage: u64, args: [u64; 6], arg_cages: [u64;
     };
     let mut t = args;
     t[0] = under;
+    forward_syscall(syscall, cage, &t, &arg_cages)
+}
+
+/// Forward a syscall with one dirfd argument at `idx`, translating
+/// grate-vfd to runtime-vfd. AT_FDCWD is passed through unchanged.
+fn forward_with_dirfd_at(
+    syscall: u64,
+    cage: u64,
+    args: [u64; 6],
+    arg_cages: [u64; 6],
+    idx: usize,
+) -> i32 {
+    let under = match translate_dirfd(cage, args[idx]) {
+        Some(u) => u,
+        None => return EBADF_NEG,
+    };
+    let mut t = args;
+    t[idx] = under;
+    forward_syscall(syscall, cage, &t, &arg_cages)
+}
+
+/// Forward a syscall with two dirfd arguments, translating both.
+fn forward_with_two_dirfds(
+    syscall: u64,
+    cage: u64,
+    args: [u64; 6],
+    arg_cages: [u64; 6],
+    first_idx: usize,
+    second_idx: usize,
+) -> i32 {
+    let first = match translate_dirfd(cage, args[first_idx]) {
+        Some(u) => u,
+        None => return EBADF_NEG,
+    };
+    let second = match translate_dirfd(cage, args[second_idx]) {
+        Some(u) => u,
+        None => return EBADF_NEG,
+    };
+    let mut t = args;
+    t[first_idx] = first;
+    t[second_idx] = second;
     forward_syscall(syscall, cage, &t, &arg_cages)
 }
 
@@ -3774,3 +3820,59 @@ pub extern "C" fn mmap_handler(
     }
     forward_syscall(SYS_MMAP, cage_id, &args, &arg_cages)
 }
+
+/// Generic forwarding handlers for dirfd-based syscalls. These do not
+/// operate on IPC pipes/sockets directly, but they can receive a directory
+/// fd opened through ipc-grate and therefore need grate-vfd to runtime-vfd
+/// translation before forwarding.
+macro_rules! dirfd_forward_handler {
+    ($name:ident, $sysno:expr, $idx:expr) => {
+        pub extern "C" fn $name(
+            _cageid: u64,
+            arg1: u64, arg1cage: u64,
+            arg2: u64, arg2cage: u64,
+            arg3: u64, arg3cage: u64,
+            arg4: u64, arg4cage: u64,
+            arg5: u64, arg5cage: u64,
+            arg6: u64, arg6cage: u64,
+        ) -> i32 {
+            let cage_id = arg1cage;
+            let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+            let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+            forward_with_dirfd_at($sysno, cage_id, args, arg_cages, $idx)
+        }
+    };
+}
+
+macro_rules! two_dirfd_forward_handler {
+    ($name:ident, $sysno:expr, $first_idx:expr, $second_idx:expr) => {
+        pub extern "C" fn $name(
+            _cageid: u64,
+            arg1: u64, arg1cage: u64,
+            arg2: u64, arg2cage: u64,
+            arg3: u64, arg3cage: u64,
+            arg4: u64, arg4cage: u64,
+            arg5: u64, arg5cage: u64,
+            arg6: u64, arg6cage: u64,
+        ) -> i32 {
+            let cage_id = arg1cage;
+            let args = [arg1, arg2, arg3, arg4, arg5, arg6];
+            let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+            forward_with_two_dirfds($sysno, cage_id, args, arg_cages, $first_idx, $second_idx)
+        }
+    };
+}
+
+dirfd_forward_handler!(mkdirat_handler,    SYS_MKDIRAT,    0);
+dirfd_forward_handler!(fchownat_handler,   SYS_FCHOWNAT,   0);
+dirfd_forward_handler!(newfstatat_handler, SYS_NEWFSTATAT, 0);
+dirfd_forward_handler!(unlinkat_handler,   SYS_UNLINKAT,   0);
+dirfd_forward_handler!(symlinkat_handler,  SYS_SYMLINKAT,  1);
+dirfd_forward_handler!(readlinkat_handler, SYS_READLINKAT, 0);
+dirfd_forward_handler!(fchmodat_handler,   SYS_FCHMODAT,   0);
+dirfd_forward_handler!(faccessat_handler,  SYS_FACCESSAT,  0);
+dirfd_forward_handler!(utimensat_handler,  SYS_UTIMENSAT,  0);
+dirfd_forward_handler!(statx_handler,      SYS_STATX,      0);
+
+two_dirfd_forward_handler!(renameat_handler,  SYS_RENAMEAT,  0, 2);
+two_dirfd_forward_handler!(renameat2_handler, SYS_RENAMEAT2, 0, 2);
