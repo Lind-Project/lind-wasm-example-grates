@@ -91,6 +91,12 @@ fn prepare_at_path_route(
     let is_at_fdcwd = (dirfd as i64) == AT_FDCWD_I64;
     let path = helpers::read_path_from_cage(path_ptr, path_cage).unwrap_or_default();
 
+    if path.starts_with('/') {
+        return Ok(helpers::path_matches_prefix(&helpers::normalize_path(
+            &path,
+        )));
+    }
+
     let mut dirfd_clamped = false;
     if !is_at_fdcwd {
         let fd_entry =
@@ -101,8 +107,6 @@ fn prepare_at_path_route(
 
     let should_clamp = if path.is_empty() {
         dirfd_clamped
-    } else if path.starts_with('/') {
-        helpers::path_matches_prefix(&helpers::normalize_path(&path))
     } else if is_at_fdcwd {
         helpers::path_matches_prefix(&helpers::resolve_path_for_cage(cage_id, &path))
     } else {
@@ -230,6 +234,144 @@ pub extern "C" fn ns_unlinkat_handler(
     let nr = match helpers::get_route(arg1cage, SYS_UNLINKAT) {
         Some(alt) if should_clamp => alt,
         _ => SYS_UNLINKAT,
+    };
+
+    helpers::do_syscall(arg1cage, nr, &args, &arg_cages)
+}
+
+pub extern "C" fn ns_faccessat_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    let should_clamp = match prepare_at_path_route(arg1cage, arg1, arg2, arg2cage, &mut args, 0) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    let nr = match helpers::get_route(arg1cage, SYS_FACCESSAT) {
+        Some(alt) if should_clamp => alt,
+        _ => SYS_FACCESSAT,
+    };
+
+    helpers::do_syscall(arg1cage, nr, &args, &arg_cages)
+}
+
+pub extern "C" fn ns_fchmodat_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    let should_clamp = match prepare_at_path_route(arg1cage, arg1, arg2, arg2cage, &mut args, 0) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    let nr = match helpers::get_route(arg1cage, SYS_FCHMODAT) {
+        Some(alt) if should_clamp => alt,
+        _ => SYS_FCHMODAT,
+    };
+
+    helpers::do_syscall(arg1cage, nr, &args, &arg_cages)
+}
+
+pub extern "C" fn ns_fchownat_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    let should_clamp = match prepare_at_path_route(arg1cage, arg1, arg2, arg2cage, &mut args, 0) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    let nr = match helpers::get_route(arg1cage, SYS_FCHOWNAT) {
+        Some(alt) if should_clamp => alt,
+        _ => SYS_FCHOWNAT,
+    };
+
+    helpers::do_syscall(arg1cage, nr, &args, &arg_cages)
+}
+
+pub extern "C" fn ns_utimensat_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
+
+    let should_clamp = if arg2 == 0 {
+        if (arg1 as i64) == AT_FDCWD_I64 {
+            false
+        } else {
+            match fdtables::translate_virtual_fd(arg1cage, arg1) {
+                Ok(entry) => {
+                    args[0] = entry.underfd;
+                    entry.perfdinfo != 0
+                }
+                Err(_) => return -(EBADF as i32),
+            }
+        }
+    } else {
+        match prepare_at_path_route(arg1cage, arg1, arg2, arg2cage, &mut args, 0) {
+            Ok(v) => v,
+            Err(e) => return e,
+        }
+    };
+
+    let nr = match helpers::get_route(arg1cage, SYS_UTIMENSAT) {
+        Some(alt) if should_clamp => alt,
+        _ => SYS_UTIMENSAT,
     };
 
     helpers::do_syscall(arg1cage, nr, &args, &arg_cages)
@@ -817,9 +959,10 @@ pub extern "C" fn ns_fstatat_handler(
     let mut dirfd_clamped = false;
 
     /*
-     * If dirfd is not AT_FDCWD, translate virtual dirfd -> underlying kernel fd.
+     * If dirfd is not AT_FDCWD and path is relative/empty, translate virtual
+     * dirfd -> underlying kernel fd. Absolute paths ignore dirfd on Linux.
      */
-    if !is_at_fdcwd {
+    if !is_at_fdcwd && (path.is_empty() || !path.starts_with('/')) {
         let fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
             Ok(entry) => entry,
             Err(_) => {
@@ -897,9 +1040,10 @@ pub extern "C" fn ns_openat_handler(
     let mut underfd = arg1;
 
     /*
-     * If dirfd is not AT_FDCWD, translate virtual fd -> kernel fd.
+     * If dirfd is not AT_FDCWD and path is relative, translate virtual fd ->
+     * kernel fd. Absolute paths ignore dirfd on Linux.
      */
-    if !is_at_fdcwd {
+    if !is_at_fdcwd && !path.starts_with('/') {
         let fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
             Ok(entry) => entry,
             Err(_) => {
@@ -1449,10 +1593,14 @@ pub fn get_ns_handler(syscall_nr: u64) -> Option<SyscallHandler> {
         SYS_LSEEK => Some(ns_lseek_handler),
         SYS_FXSTAT => Some(ns_fstat_handler),
         SYS_NEWFSTATAT => Some(ns_fstatat_handler),
+        SYS_FACCESSAT => Some(ns_faccessat_handler),
         SYS_FCNTL => Some(ns_fcntl_handler),
         SYS_FTRUNCATE => Some(ns_ftruncate_handler),
         SYS_FCHMOD => Some(ns_fchmod_handler),
+        SYS_FCHMODAT => Some(ns_fchmodat_handler),
+        SYS_FCHOWNAT => Some(ns_fchownat_handler),
         SYS_FCHDIR => Some(ns_fchdir_handler),
+        SYS_UTIMENSAT => Some(ns_utimensat_handler),
         SYS_FSYNC => Some(ns_fsync_handler),
         SYS_FDATASYNC => Some(ns_fdatasync_handler),
         SYS_FSTATFS => Some(ns_fstatfs_handler),

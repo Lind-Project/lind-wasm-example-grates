@@ -590,7 +590,8 @@ pub extern "C" fn fchmodat_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
-    if arg4 != 0 {
+    let supported_flags = libc::AT_SYMLINK_NOFOLLOW | libc::AT_EMPTY_PATH;
+    if (arg4 as i32) & !supported_flags != 0 {
         return -22;
     }
 

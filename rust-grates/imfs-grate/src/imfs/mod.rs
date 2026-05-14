@@ -1157,9 +1157,33 @@ impl ImfsState {
         statbuf: &mut stat,
         flags: i32,
     ) -> i32 {
-        let supported_flags = libc::AT_SYMLINK_NOFOLLOW;
+        let supported_flags =
+            libc::AT_SYMLINK_NOFOLLOW | libc::AT_NO_AUTOMOUNT | libc::AT_EMPTY_PATH;
         if flags & !supported_flags != 0 {
             return -22; // EINVAL
+        }
+
+        if path.is_empty() && flags & libc::AT_EMPTY_PATH != 0 {
+            let node_idx = if dirfd == LIND_AT_FDCWD {
+                let norm_path = self.normalize_path_for_cage(cage_id, ".");
+                match self.resolve_path(&norm_path, true) {
+                    Ok(idx) => idx,
+                    Err(e) => return e,
+                }
+            } else {
+                let entry = match fdtables::translate_virtual_fd(cage_id, dirfd as u64) {
+                    Ok(entry) => entry,
+                    Err(_) => return -9, // EBADF
+                };
+                entry.underfd as usize
+            };
+
+            if node_idx >= self.nodes.len() {
+                return -9; // EBADF
+            }
+            self.fill_stat(node_idx, statbuf);
+            self.update_atime(node_idx);
+            return 0;
         }
 
         let norm_path = match self.normalize_path_at(cage_id, dirfd, path) {
