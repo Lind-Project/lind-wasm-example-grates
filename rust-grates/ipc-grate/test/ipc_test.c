@@ -27,6 +27,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/epoll.h>
+#include <time.h>
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -1565,6 +1566,69 @@ static void test_ipc_espipe(void) {
     close(p[0]); close(p[1]); close(sv[0]); close(sv[1]);
 }
 
+/* ── Test: dirfd syscall forwarding translates grate fds ──────────── */
+
+static void test_dirfd_syscall_translation(void) {
+    printf("\n[test_dirfd_syscall_translation]\n");
+
+    int p[2];
+    int pret = pipe(p);
+    CHECK("create IPC pipe before dirfd open", pret == 0);
+    if (pret != 0) return;
+
+    const char *base = "/tmp/ipc_dirfd_test";
+    unlinkat(AT_FDCWD, "/tmp/ipc_dirfd_test/two", 0);
+    unlinkat(AT_FDCWD, "/tmp/ipc_dirfd_test/one", 0);
+    unlinkat(AT_FDCWD, "/tmp/ipc_dirfd_test/sub", AT_REMOVEDIR);
+    unlinkat(AT_FDCWD, base, AT_REMOVEDIR);
+
+    CHECK("mkdir base directory", mkdir(base, 0700) == 0);
+
+    int dfd = open(base, O_RDONLY | O_DIRECTORY);
+    CHECK("open directory fd", dfd >= 0);
+    if (dfd < 0) {
+        close(p[0]);
+        close(p[1]);
+        return;
+    }
+
+    int fd = openat(dfd, "one", O_CREAT | O_RDWR | O_TRUNC, 0600);
+    CHECK("openat relative file", fd >= 0);
+    if (fd >= 0) {
+        CHECK("write relative file", write(fd, "x", 1) == 1);
+        struct timespec ts[2] = {
+            { .tv_sec = 100, .tv_nsec = 0 },
+            { .tv_sec = 200, .tv_nsec = 0 },
+        };
+        CHECK("futimens on grate-tracked fd", futimens(fd, ts) == 0);
+        close(fd);
+    }
+
+    struct stat st;
+    memset(&st, 0, sizeof(st));
+    CHECK("stat absolute file", stat("/tmp/ipc_dirfd_test/one", &st) == 0);
+    memset(&st, 0, sizeof(st));
+    CHECK("lstat absolute file", lstat("/tmp/ipc_dirfd_test/one", &st) == 0);
+    memset(&st, 0, sizeof(st));
+    CHECK("newfstatat/fstatat relative file", fstatat(dfd, "one", &st, 0) == 0);
+    CHECK("faccessat relative file", faccessat(dfd, "one", F_OK, 0) == 0);
+    CHECK("fchmodat relative file", fchmodat(dfd, "one", 0644, 0) == 0);
+    struct timespec ts[2] = {
+        { .tv_sec = 300, .tv_nsec = 0 },
+        { .tv_sec = 400, .tv_nsec = 0 },
+    };
+    CHECK("utimensat relative file", utimensat(dfd, "one", ts, 0) == 0);
+    CHECK("renameat relative file", renameat(dfd, "one", dfd, "two") == 0);
+    CHECK("unlinkat relative file", unlinkat(dfd, "two", 0) == 0);
+    CHECK("mkdirat relative directory", mkdirat(dfd, "sub", 0700) == 0);
+    CHECK("unlinkat relative directory", unlinkat(dfd, "sub", AT_REMOVEDIR) == 0);
+
+    close(dfd);
+    unlinkat(AT_FDCWD, base, AT_REMOVEDIR);
+    close(p[0]);
+    close(p[1]);
+}
+
 /* ── Main ──────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -1629,6 +1693,7 @@ int main(void) {
     test_uds_ioctl();
     test_ipc_fstat();
     test_ipc_espipe();
+    test_dirfd_syscall_translation();
 
     printf("\n=== results: %d/%d passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
