@@ -38,6 +38,20 @@ const AT_FDCWD: i64 = -100;
 /// receives a tiny wasm offset and segfaults dereferencing it.
 const ARG_TRANSLATE_FLAG: u64 = 1u64 << 63;
 
+#[inline]
+fn read_user_bytes(src: u64, dst: *mut u8, len: usize) {
+    unsafe {
+        core::ptr::copy_nonoverlapping(src as *const u8, dst, len);
+    }
+}
+
+#[inline]
+fn write_user_bytes(dst: u64, src: *const u8, len: usize) {
+    unsafe {
+        core::ptr::copy_nonoverlapping(src, dst as *mut u8, len);
+    }
+}
+
 /// Translate a grate virt fd to the runtime's virt fd (the underfd).
 /// Returns None if the fd doesn't exist in our fdtable.
 fn translate_to_underfd(cage: u64, fd: u64) -> Option<u64> {
@@ -2189,7 +2203,7 @@ pub extern "C" fn accept_handler(
     // SOCK_CLOEXEC does (handled by accept4_handler).
     accept_ipc_inner(
         cage_id, socket_id, flags, /*cloexec=*/false, /*extra_perfdinfo=*/0,
-        arg2, arg2cage, arg3, _arg3cage,
+        arg2, arg3,
     )
 }
 
@@ -2197,12 +2211,12 @@ pub extern "C" fn accept_handler(
 /// cloexec / SOCK_NONBLOCK from its flags arg without duplicating the
 /// pending-connection wait loop.
 ///
-/// `addr_arg` / `addr_cage` and `addrlen_arg` / `addrlen_cage` are the
-/// caller's `accept(fd, &addr, &addrlen)` out-params.  They may both be
-/// NULL, in which case we skip the peer-address writeback.  When set,
-/// we synthesise a sockaddr from the new socket's domain + remote_addr
-/// (set when the connection was queued by connect()) and copy it back,
-/// so callers like postgres that read raddr after accept() see a real
+/// `addr_arg` and `addrlen_arg` are host pointers to the caller's
+/// `accept(fd, &addr, &addrlen)` out-params.  They may both be NULL, in
+/// which case we skip the peer-address writeback.  When set, we
+/// synthesise a sockaddr from the new socket's domain + remote_addr (set
+/// when the connection was queued by connect()) and copy it back, so
+/// callers like postgres that read raddr after accept() see a real
 /// sa_family instead of a zero-initialised buffer.
 fn accept_ipc_inner(
     cage_id: u64,
@@ -2210,8 +2224,8 @@ fn accept_ipc_inner(
     listen_flags: i32,
     cloexec: bool,
     extra_perfdinfo: u64,
-    addr_arg: u64, addr_cage: u64,
-    addrlen_arg: u64, addrlen_cage: u64,
+    addr_arg: u64,
+    addrlen_arg: u64,
 ) -> i32 {
     let nonblocking = (listen_flags & O_NONBLOCK) != 0;
 
@@ -2278,9 +2292,7 @@ fn accept_ipc_inner(
                 let (sock_buf, sock_len) = build_ipc_sockaddr(domain, &remote_addr);
                 let _ = ipc_writeback_sockaddr(
                     &sock_buf, sock_len,
-                    addr_arg, addr_cage,
-                    addrlen_arg, addrlen_cage,
-                    getcageid(),
+                    addr_arg, addrlen_arg,
                 );
             }
 
@@ -2921,12 +2933,7 @@ pub extern "C" fn recvfrom_handler(
     // "no peer address available" rather than uninitialized bytes.
     if ret >= 0 && arg6 != 0 {
         let zero: u32 = 0;
-        let _ = copy_data_between_cages(
-            this_cage, arg6cage,
-            &zero as *const u32 as u64, this_cage,
-            arg6, arg6cage,
-            4, 0,
-        );
+        write_user_bytes(arg6, &zero as *const u32 as *const u8, 4);
     }
     ret
 }
@@ -3170,7 +3177,6 @@ pub extern "C" fn getsockopt_handler(
 ) -> i32 {
     let cage_id = arg1cage;
     let fd = arg1;
-    let this_cage = getcageid();
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -3222,28 +3228,13 @@ pub extern "C" fn getsockopt_handler(
         return -22; // EINVAL
     }
     let mut user_optlen: u32 = 0;
-    let _ = copy_data_between_cages(
-        this_cage, arg5cage,
-        arg5, arg5cage,
-        &mut user_optlen as *mut u32 as u64, this_cage,
-        4, 0,
-    );
+    read_user_bytes(arg5, &mut user_optlen as *mut u32 as *mut u8, 4);
     let write_bytes = core::cmp::min(user_optlen, 4) as u64;
     if write_bytes > 0 {
-        let _ = copy_data_between_cages(
-            this_cage, arg4cage,
-            &val as *const i32 as u64, this_cage,
-            arg4, arg4cage,
-            write_bytes, 0,
-        );
+        write_user_bytes(arg4, &val as *const i32 as *const u8, write_bytes as usize);
     }
     let four: u32 = 4;
-    let _ = copy_data_between_cages(
-        this_cage, arg5cage,
-        &four as *const u32 as u64, this_cage,
-        arg5, arg5cage,
-        4, 0,
-    );
+    write_user_bytes(arg5, &four as *const u32 as *const u8, 4);
     0
 }
 
@@ -3296,35 +3287,19 @@ fn build_ipc_sockaddr(domain: i32, addr: &Option<String>) -> ([u8; 110], u32) {
 /// (Linux semantics: indicates the real length, even if truncated).
 fn ipc_writeback_sockaddr(
     sock_buf: &[u8], sock_len: u32,
-    addr_arg: u64, addrcage: u64,
-    addrlen_arg: u64, addrlencage: u64,
-    this_cage: u64,
+    addr_arg: u64,
+    addrlen_arg: u64,
 ) -> i32 {
     if addr_arg == 0 || addrlen_arg == 0 {
         return -22; // EINVAL
     }
     let mut user_addrlen: u32 = 0;
-    let _ = copy_data_between_cages(
-        this_cage, addrlencage,
-        addrlen_arg, addrlencage,
-        &mut user_addrlen as *mut u32 as u64, this_cage,
-        4, 0,
-    );
+    read_user_bytes(addrlen_arg, &mut user_addrlen as *mut u32 as *mut u8, 4);
     let copy_len = core::cmp::min(sock_len, user_addrlen);
     if copy_len > 0 {
-        let _ = copy_data_between_cages(
-            this_cage, addrcage,
-            sock_buf.as_ptr() as u64, this_cage,
-            addr_arg, addrcage,
-            copy_len as u64, 0,
-        );
+        write_user_bytes(addr_arg, sock_buf.as_ptr(), copy_len as usize);
     }
-    let _ = copy_data_between_cages(
-        this_cage, addrlencage,
-        &sock_len as *const u32 as u64, this_cage,
-        addrlen_arg, addrlencage,
-        4, 0,
-    );
+    write_user_bytes(addrlen_arg, &sock_len as *const u32 as *const u8, 4);
     0
 }
 
@@ -3342,7 +3317,6 @@ pub extern "C" fn getsockname_handler(
 ) -> i32 {
     let cage_id = arg1cage;
     let fd = arg1;
-    let this_cage = getcageid();
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -3362,7 +3336,7 @@ pub extern "C" fn getsockname_handler(
     let (sock_buf, sock_len) = build_ipc_sockaddr(domain, &local_addr);
     ipc_writeback_sockaddr(
         &sock_buf, sock_len,
-        arg2, arg2cage, arg3, arg3cage, this_cage,
+        arg2, arg3,
     )
 }
 
@@ -3380,7 +3354,6 @@ pub extern "C" fn getpeername_handler(
 ) -> i32 {
     let cage_id = arg1cage;
     let fd = arg1;
-    let this_cage = getcageid();
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -3403,7 +3376,7 @@ pub extern "C" fn getpeername_handler(
     let (sock_buf, sock_len) = build_ipc_sockaddr(domain, &remote_addr);
     ipc_writeback_sockaddr(
         &sock_buf, sock_len,
-        arg2, arg2cage, arg3, arg3cage, this_cage,
+        arg2, arg3,
     )
 }
 
@@ -3601,7 +3574,6 @@ pub extern "C" fn ioctl_handler(
     let cage_id = arg1cage;
     let fd = arg1;
     let request = arg2;
-    let this_cage = getcageid();
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -3616,12 +3588,7 @@ pub extern "C" fn ioctl_handler(
             // *argp is an int: nonzero = set O_NONBLOCK, zero = clear.
             if arg3 == 0 { return -22; }
             let mut user_val: i32 = 0;
-            let _ = copy_data_between_cages(
-                this_cage, arg3cage,
-                arg3, arg3cage,
-                &mut user_val as *mut i32 as u64, this_cage,
-                4, 0,
-            );
+            read_user_bytes(arg3, &mut user_val as *mut i32 as *mut u8, 4);
             let new_flags = if user_val != 0 {
                 (flags as u64) | (O_NONBLOCK as u64)
             } else {
@@ -3652,12 +3619,7 @@ pub extern "C" fn ioctl_handler(
                 }),
                 _ => 0,
             };
-            let _ = copy_data_between_cages(
-                this_cage, arg3cage,
-                &avail as *const i32 as u64, this_cage,
-                arg3, arg3cage,
-                4, 0,
-            );
+            write_user_bytes(arg3, &avail as *const i32 as *const u8, 4);
             0
         }
         _ => -25, // ENOTTY — ioctl request not supported on IPC fds
@@ -3689,7 +3651,6 @@ pub extern "C" fn fstat_handler(
 
     let cage_id = arg1cage;
     let fd = arg1;
-    let this_cage = getcageid();
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -3707,12 +3668,7 @@ pub extern "C" fn fstat_handler(
         _ => return -22,
     };
     buf[ST_MODE_OFFSET..ST_MODE_OFFSET + 4].copy_from_slice(&mode.to_le_bytes());
-    let _ = copy_data_between_cages(
-        this_cage, arg2cage,
-        buf.as_ptr() as u64, this_cage,
-        arg2, arg2cage,
-        STAT_SIZE as u64, 0,
-    );
+    write_user_bytes(arg2, buf.as_ptr(), STAT_SIZE);
     0
 }
 
@@ -3777,7 +3733,7 @@ pub extern "C" fn accept4_handler(
         let extra_perfdinfo = (arg4) & (O_NONBLOCK as u64);
         return accept_ipc_inner(
             cage_id, socket_id, listen_flags, cloexec, extra_perfdinfo,
-            arg2, arg2cage, arg3, arg3cage,
+            arg2, arg3,
         );
     }
 
