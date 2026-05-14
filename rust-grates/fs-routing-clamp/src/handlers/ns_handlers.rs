@@ -69,6 +69,8 @@ define_path_handler!(ns_rmdir_handler, SYS_RMDIR);
 define_path_handler!(ns_rename_handler, SYS_RENAME);
 define_path_handler!(ns_truncate_handler, SYS_TRUNCATE);
 define_path_handler!(ns_chmod_handler, SYS_CHMOD);
+define_path_handler!(ns_chown_handler, SYS_CHOWN);
+define_path_handler!(ns_lchown_handler, SYS_LCHOWN);
 define_path_handler!(ns_mknod_handler, SYS_MKNOD);
 define_path_handler!(ns_readlink_handler, SYS_READLINK);
 define_path_handler!(ns_statfs_handler, SYS_STATFS);
@@ -101,8 +103,10 @@ fn prepare_at_path_route(
     if !is_at_fdcwd {
         let fd_entry =
             fdtables::translate_virtual_fd(cage_id, dirfd).map_err(|_| -(EBADF as i32))?;
-        args[dirfd_arg_index] = fd_entry.underfd;
         dirfd_clamped = fd_entry.perfdinfo != 0;
+        if !dirfd_clamped {
+            args[dirfd_arg_index] = fd_entry.underfd;
+        }
     }
 
     let should_clamp = if path.is_empty() {
@@ -986,7 +990,6 @@ pub extern "C" fn ns_fstatat_handler(
 
     let path = helpers::read_path_from_cage(arg2, arg2cage).unwrap_or_default();
 
-    let mut underfd = arg1;
     let mut dirfd_clamped = false;
 
     /*
@@ -1006,9 +1009,10 @@ pub extern "C" fn ns_fstatat_handler(
             }
         };
 
-        underfd = fd_entry.underfd;
         dirfd_clamped = fd_entry.perfdinfo != 0;
-        args[0] = underfd;
+        if !dirfd_clamped {
+            args[0] = fd_entry.underfd;
+        }
     }
 
     /*
@@ -1068,7 +1072,6 @@ pub extern "C" fn ns_openat_handler(
     let path = helpers::read_path_from_cage(arg2, arg2cage).unwrap_or_default();
 
     let mut dirfd_clamped = false;
-    let mut underfd = arg1;
 
     /*
      * If dirfd is not AT_FDCWD and path is relative, translate virtual fd ->
@@ -1087,9 +1090,10 @@ pub extern "C" fn ns_openat_handler(
             }
         };
 
-        underfd = fd_entry.underfd;
         dirfd_clamped = fd_entry.perfdinfo != 0;
-        args[0] = underfd;
+        if !dirfd_clamped {
+            args[0] = fd_entry.underfd;
+        }
     }
 
     /*
@@ -1601,6 +1605,8 @@ pub fn get_ns_handler(syscall_nr: u64) -> Option<SyscallHandler> {
         SYS_RENAME => Some(ns_rename_handler),
         SYS_TRUNCATE => Some(ns_truncate_handler),
         SYS_CHMOD => Some(ns_chmod_handler),
+        SYS_CHOWN => Some(ns_chown_handler),
+        SYS_LCHOWN => Some(ns_lchown_handler),
         SYS_CHDIR => Some(ns_chdir_handler),
         SYS_MKNOD => Some(ns_mknod_handler),
         SYS_SYMLINK => Some(ns_symlink_handler),

@@ -608,9 +608,9 @@ pub extern "C" fn chown_handler(
     _cageid: u64,
     arg1: u64,
     arg1cage: u64,
-    _arg2: u64,
+    arg2: u64,
     _arg2cage: u64,
-    _arg3: u64,
+    arg3: u64,
     _arg3cage: u64,
     _arg4: u64,
     _arg4cage: u64,
@@ -624,16 +624,16 @@ pub extern "C" fn chown_handler(
         None => return -14,
     };
 
-    imfs::with_imfs(|state| state.chown(arg1cage, &pathname))
+    imfs::with_imfs(|state| state.chown(arg1cage, &pathname, arg2 as u32, arg3 as u32))
 }
 
-pub extern "C" fn fchownat_handler(
+pub extern "C" fn lchown_handler(
     _cageid: u64,
     arg1: u64,
     arg1cage: u64,
     arg2: u64,
-    arg2cage: u64,
-    _arg3: u64,
+    _arg2cage: u64,
+    arg3: u64,
     _arg3cage: u64,
     _arg4: u64,
     _arg4cage: u64,
@@ -642,12 +642,49 @@ pub extern "C" fn fchownat_handler(
     _arg6: u64,
     _arg6cage: u64,
 ) -> i32 {
+    let pathname = match copy_path_from_cage(arg1, arg1cage) {
+        Some(p) => p,
+        None => return -14,
+    };
+
+    imfs::with_imfs(|state| state.lchown(arg1cage, &pathname, arg2 as u32, arg3 as u32))
+}
+
+pub extern "C" fn fchownat_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    _arg3cage: u64,
+    arg4: u64,
+    _arg4cage: u64,
+    arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    let supported_flags = libc::AT_SYMLINK_NOFOLLOW | LIND_AT_EMPTY_PATH;
+    if (arg5 as i32) & !supported_flags != 0 {
+        return -22;
+    }
+
     let pathname = match copy_path_from_cage(arg2, arg2cage) {
         Some(p) => p,
         None => return -14,
     };
 
-    imfs::with_imfs(|state| state.chownat(arg1cage, arg1 as i32, &pathname))
+    imfs::with_imfs(|state| {
+        state.chownat(
+            arg1cage,
+            arg1 as i32,
+            &pathname,
+            arg3 as u32,
+            arg4 as u32,
+            arg5 as i32,
+        )
+    })
 }
 
 pub extern "C" fn truncate_handler(

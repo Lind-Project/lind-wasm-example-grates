@@ -584,7 +584,18 @@ static void test_at_metadata_syscalls(void) {
 	CHECK("mode after fchmodat is 0600", (st.st_mode & 0777) == 0600);
 
 	CHECK("chown existing path succeeds",
-	      chown("/atdir/file", getuid(), getgid()) == 0);
+	      chown("/atdir/file", 123, 456) == 0);
+	memset(&st, 0, sizeof(st));
+	CHECK("stat after chown succeeds", stat("/atdir/file", &st) == 0);
+	CHECK("stat reports chown owner/group",
+	      st.st_uid == 123 && st.st_gid == 456);
+
+	CHECK("fchmod preserves special mode bits",
+	      chmod("/atdir/file", 04711) == 0);
+	memset(&st, 0, sizeof(st));
+	CHECK("stat after special chmod succeeds", stat("/atdir/file", &st) == 0);
+	CHECK("mode after special chmod is 04711", (st.st_mode & 07777) == 04711);
+
 	CHECK("lchown existing path succeeds",
 	      lchown("/atdir/file", getuid(), getgid()) == 0);
 	CHECK("fchownat existing path succeeds",
