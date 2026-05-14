@@ -99,7 +99,7 @@ fn main() {
         .register(SYS_XSTAT, handlers::stat_handler)
         .register(SYS_LSTAT, handlers::lstat_handler)
         .register(SYS_NEWFSTATAT, handlers::fstatat_handler)
-        .register(SYS_STATX, handlers::enosys_handler)
+        .register(SYS_STATX, handlers::statx_handler)
         .register(SYS_RMDIR, handlers::rmdir_handler)
         .register(SYS_CHMOD, handlers::chmod_handler)
         .register(SYS_FCHMODAT, handlers::fchmodat_handler)
