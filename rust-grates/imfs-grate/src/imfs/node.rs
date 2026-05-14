@@ -110,11 +110,11 @@ impl Node {
     /// Create a new node with the given name, type, and permissions.
     pub fn new(index: usize, name: &str, node_type: NodeType, mode: u32) -> Self {
         let mode_bits = match node_type {
-            NodeType::Reg => 0o100000 | (mode & 0o777), // S_IFREG
-            NodeType::Dir => 0o040000 | (mode & 0o777), // S_IFDIR
-            NodeType::Lnk => 0o120000 | (mode & 0o777), // S_IFLNK
-            NodeType::Pip => 0o010000 | (mode & 0o777), // S_IFIFO
-            NodeType::Free => mode & 0o777,
+            NodeType::Reg => 0o100000 | (mode & 0o7777), // S_IFREG
+            NodeType::Dir => 0o040000 | (mode & 0o7777), // S_IFDIR
+            NodeType::Lnk => 0o120000 | (mode & 0o7777), // S_IFLNK
+            NodeType::Pip => 0o010000 | (mode & 0o7777), // S_IFIFO
+            NodeType::Free => mode & 0o7777,
         };
 
         let info = match node_type {

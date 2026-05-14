@@ -104,7 +104,7 @@ fn main() {
         .register(SYS_CHMOD, handlers::chmod_handler)
         .register(SYS_FCHMODAT, handlers::fchmodat_handler)
         .register(SYS_CHOWN, handlers::chown_handler)
-        .register(SYS_LCHOWN, handlers::chown_handler)
+        .register(SYS_LCHOWN, handlers::lchown_handler)
         .register(SYS_FCHOWNAT, handlers::fchownat_handler)
         .register(SYS_TRUNCATE, handlers::truncate_handler)
         .register(SYS_FTRUNCATE, handlers::ftruncate_handler)

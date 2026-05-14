@@ -72,6 +72,10 @@ const IMFS_STATFS_NAME_MAX: u64 = 254;
 const S_IFMT: u32 = 0o170000;
 const S_IFIFO: u32 = 0o010000;
 const S_IFREG: u32 = 0o100000;
+const S_MODE_BITS: u32 = 0o7777;
+const S_ISUID: u32 = 0o4000;
+const S_ISGID: u32 = 0o2000;
+const CHOWN_NO_CHANGE: u32 = u32::MAX;
 
 /// The complete IMFS state.
 pub struct ImfsState {
@@ -521,8 +525,8 @@ impl ImfsState {
             st_ino: node_idx as u64,
             st_mode: node.mode,
             st_nlink: self.link_count(node_idx),
-            st_uid: 0, //node.owner,
-            st_gid: 0, //node.group,
+            st_uid: node.owner,
+            st_gid: node.group,
             st_rdev: 0,
             st_size: node.total_size as u64,
             st_blksize: IMFS_BLOCK_SIZE,
@@ -1160,8 +1164,7 @@ impl ImfsState {
         statbuf: &mut stat,
         flags: i32,
     ) -> i32 {
-        let supported_flags =
-            AT_SYMLINK_NOFOLLOW | LIND_AT_NO_AUTOMOUNT | LIND_AT_EMPTY_PATH;
+        let supported_flags = AT_SYMLINK_NOFOLLOW | LIND_AT_NO_AUTOMOUNT | LIND_AT_EMPTY_PATH;
         if flags & !supported_flags != 0 {
             println!("[mifs] flag={}, supported={}", flags, supported_flags);
             return -22; // EINVAL
@@ -1896,7 +1899,7 @@ impl ImfsState {
             Err(e) => return e,
         };
 
-        self.nodes[node_idx].mode = (self.nodes[node_idx].mode & !0o777) | (mode & 0o777);
+        self.nodes[node_idx].mode = (self.nodes[node_idx].mode & S_IFMT) | (mode & S_MODE_BITS);
         self.update_ctime(node_idx);
 
         0
@@ -1908,29 +1911,85 @@ impl ImfsState {
             Err(e) => return e,
         };
 
-        self.nodes[node_idx].mode = (self.nodes[node_idx].mode & !0o777) | (mode & 0o777);
+        self.nodes[node_idx].mode = (self.nodes[node_idx].mode & S_IFMT) | (mode & S_MODE_BITS);
         self.update_ctime(node_idx);
 
         0
     }
 
-    pub fn chown(&mut self, cage_id: u64, path: &str) -> i32 {
+    pub fn chown(&mut self, cage_id: u64, path: &str, owner: u32, group: u32) -> i32 {
         let norm_path = self.normalize_path_for_cage(cage_id, path);
         match self.resolve_path(&norm_path, true) {
-            Ok(_) => 0,
+            Ok(node_idx) => self.chown_node(node_idx, owner, group),
             Err(e) => e,
         }
     }
 
-    pub fn chownat(&mut self, cage_id: u64, dirfd: i32, path: &str) -> i32 {
-        let norm_path = match self.normalize_path_at(cage_id, dirfd, path) {
-            Ok(path) => path,
-            Err(e) => return e,
-        };
-        match self.resolve_path(&norm_path, true) {
-            Ok(_) => 0,
+    pub fn lchown(&mut self, cage_id: u64, path: &str, owner: u32, group: u32) -> i32 {
+        let norm_path = self.normalize_path_for_cage(cage_id, path);
+        match self.resolve_path(&norm_path, false) {
+            Ok(node_idx) => self.chown_node(node_idx, owner, group),
             Err(e) => e,
         }
+    }
+
+    pub fn chownat(
+        &mut self,
+        cage_id: u64,
+        dirfd: i32,
+        path: &str,
+        owner: u32,
+        group: u32,
+        flags: i32,
+    ) -> i32 {
+        let follow_final = (flags & AT_SYMLINK_NOFOLLOW) == 0;
+        let node_idx = match self.node_idx_at(cage_id, dirfd, path, follow_final) {
+            Ok(idx) => idx,
+            Err(e) => return e,
+        };
+
+        self.chown_node(node_idx, owner, group)
+    }
+
+    fn node_idx_at(
+        &self,
+        cage_id: u64,
+        dirfd: i32,
+        path: &str,
+        follow_final: bool,
+    ) -> Result<usize, i32> {
+        let norm_path = if path.is_empty() && dirfd != LIND_AT_FDCWD {
+            let entry = fdtables::translate_virtual_fd(cage_id, dirfd as u64).map_err(|_| -9)?;
+            let mut node_idx = entry.underfd as usize;
+            while let NodeInfo::HardLink { target } = &self.nodes[node_idx].info {
+                node_idx = *target;
+            }
+            return Ok(node_idx);
+        } else {
+            self.normalize_path_at(cage_id, dirfd, path)?
+        };
+
+        self.resolve_path(&norm_path, follow_final)
+    }
+
+    fn chown_node(&mut self, node_idx: usize, owner: u32, group: u32) -> i32 {
+        let mut changed = false;
+
+        if owner != CHOWN_NO_CHANGE && self.nodes[node_idx].owner != owner {
+            self.nodes[node_idx].owner = owner;
+            changed = true;
+        }
+        if group != CHOWN_NO_CHANGE && self.nodes[node_idx].group != group {
+            self.nodes[node_idx].group = group;
+            changed = true;
+        }
+
+        if changed {
+            self.nodes[node_idx].mode &= !(S_ISUID | S_ISGID);
+        }
+        self.update_ctime(node_idx);
+
+        0
     }
 
     pub fn utimensat(&mut self, cage_id: u64, dirfd: i32, path: Option<&str>) -> i32 {
