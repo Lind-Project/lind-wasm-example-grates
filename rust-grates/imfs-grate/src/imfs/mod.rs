@@ -71,6 +71,9 @@ const IMFS_STATFS_MAGIC: u64 = 0x494d_4653; // "IMFS"
 const IMFS_STATFS_BLOCK_SIZE: u64 = 4096;
 const IMFS_STATFS_TOTAL_BLOCKS: u64 = 1024 * 1024;
 const IMFS_STATFS_NAME_MAX: u64 = 254;
+const S_IFMT: u32 = 0o170000;
+const S_IFIFO: u32 = 0o010000;
+const S_IFREG: u32 = 0o100000;
 
 /// The complete IMFS state.
 pub struct ImfsState {
@@ -172,6 +175,7 @@ impl ImfsState {
             NodeType::Dir => DT_DIR,
             NodeType::Reg | NodeType::RegMapped => DT_REG,
             NodeType::Lnk => DT_LNK,
+            NodeType::Pip => DT_FIFO,
             _ => DT_UNKNOWN,
         }
     }
@@ -2369,6 +2373,18 @@ impl ImfsState {
         0
     }
 
+    pub fn fchmod(&mut self, cage_id: u64, fd: u64, mode: u32) -> i32 {
+        let (node_idx, _) = match self.get_node_and_flags(cage_id, fd) {
+            Ok(entry) => entry,
+            Err(e) => return e,
+        };
+
+        self.nodes[node_idx].mode = (self.nodes[node_idx].mode & !0o777) | (mode & 0o777);
+        self.update_ctime(node_idx);
+
+        0
+    }
+
     pub fn chown(&mut self, cage_id: u64, path: &str) -> i32 {
         let norm_path = self.normalize_path_for_cage(cage_id, path);
         match self.resolve_path(&norm_path, true) {
@@ -2415,6 +2431,40 @@ impl ImfsState {
         self.update_atime(node_idx);
         self.update_mtime(node_idx);
         self.update_ctime(node_idx);
+        0
+    }
+
+    pub fn mknod(&mut self, cage_id: u64, path: &str, mode: u32) -> i32 {
+        let node_type = match mode & S_IFMT {
+            S_IFIFO => NodeType::Pip,
+            S_IFREG | 0 => NodeType::Reg,
+            _ => return -1, // EPERM
+        };
+
+        let norm_path = self.normalize_path_for_cage(cage_id, path);
+        if self.resolve_path(&norm_path, true).is_ok() {
+            return -17; // EEXIST
+        }
+
+        let (parent_idx, name) = match self.resolve_parent_and_name(&norm_path) {
+            Ok(parent) => parent,
+            Err(e) => return e,
+        };
+
+        if name == "." || name == ".." {
+            return -17; // EEXIST
+        }
+        if name.len() >= MAX_NODE_NAME {
+            return -36; // ENAMETOOLONG
+        }
+
+        let node_idx = self.create_node(&name, node_type, mode);
+        self.add_child(parent_idx, node_idx);
+        self.update_mtime(parent_idx);
+        self.update_ctime(parent_idx);
+        self.update_mtime(node_idx);
+        self.update_ctime(node_idx);
+
         0
     }
 

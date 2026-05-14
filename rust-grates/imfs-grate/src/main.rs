@@ -102,7 +102,7 @@ fn main() {
         .register(SYS_TRUNCATE, handlers::truncate_handler)
         .register(SYS_FTRUNCATE, handlers::ftruncate_handler)
         .register(SYS_FCHDIR, handlers::fchdir_handler)
-        .register(SYS_FCHMOD, handlers::enosys_handler)
+        .register(SYS_FCHMOD, handlers::fchmod_handler)
         .register(SYS_READV, handlers::readv_handler)
         .register(SYS_WRITEV, handlers::writev_handler)
         .register(SYS_FSYNC, handlers::fsync_handler)
