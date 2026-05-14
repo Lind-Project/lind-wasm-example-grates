@@ -36,7 +36,7 @@ macro_rules! define_path_handler {
             let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
             let nr = match helpers::get_route(arg1cage, $sysno) {
-                Some(alt) => match helpers::resolve_path_from_cage(arg2cage, arg1, arg1cage) {
+                Some(alt) => match helpers::resolve_path_from_cage(arg1cage, arg1, arg1cage) {
                     Some(path) if helpers::path_matches_prefix(&path) => alt,
                     _ => $sysno,
                 },
@@ -489,7 +489,7 @@ pub extern "C" fn ns_chdir_handler(
         }
     };
 
-    let resolved_path: String = helpers::resolve_path_for_cage(arg2cage, &pathstr);
+    let resolved_path: String = helpers::resolve_path_for_cage(arg1cage, &pathstr);
 
     let matches: bool = helpers::path_matches_prefix(&resolved_path);
 
@@ -501,7 +501,7 @@ pub extern "C" fn ns_chdir_handler(
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
 
     if ret == 0 {
-        helpers::set_cage_cwd(arg2cage, resolved_path.clone());
+        helpers::set_cage_cwd(arg1cage, resolved_path.clone());
     }
 
     // println!(
