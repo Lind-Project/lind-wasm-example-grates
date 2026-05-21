@@ -164,21 +164,21 @@ type = "rust"
 
 [[grate.tests]]
 test_src = "test/fs_routing_test.c"
-grate_args = "--prefix /tmp %{ testing-grate.cwasm -s 0:166,1:166,2:166,4:166,21:166,83:166,84:166,87:166 %}"
+grate_args = "--prefix /tmp %{ grates/testing-grate.cwasm -s 0:166,1:166,2:166,4:166,21:166,83:166,84:166,87:166 %}"
 
 [[grate.tests]]
 test_src = "test/unix_socket_outside_prefix_test.c"
-grate_args = "--prefix /tmp %{ testing-grate.cwasm -s 0:166 %}"
+grate_args = "--prefix /tmp %{ grates/testing-grate.cwasm -s 0:166 %}"
 timeout = 30
 
 [[grate.tests]]
 test_src = "test/unix_listener_poll_minimal_test.c"
-grate_args = "--prefix /tmp %{ testing-grate.cwasm -s 0:166 %}"
+grate_args = "--prefix /tmp %{ grates/testing-grate.cwasm -s 0:166 %}"
 timeout = 30
 
 [[grate.tests]]
 test_src = "test/fcntl_dup_minimal_test.c"
-grate_args = "--prefix /tmp %{ testing-grate.cwasm -s 0:166 %}"
+grate_args = "--prefix /tmp %{ grates/testing-grate.cwasm -s 0:166 %}"
 timeout = 30
 
 # ── IPC (Rust) ──────────────────────────────────────────────────────
@@ -202,11 +202,11 @@ type = "rust"
 
 [[grate.tests]]
 test_src = "test/net_routing_test.c"
-grate_args = "--ports 8080-8090 %{ testing-grate.cwasm -s 49:166,42:166,43:166 %}"
+grate_args = "--ports 8080-8090 %{ grates/testing-grate.cwasm -s 49:166,42:166,43:166 %}"
 
 [[grate.tests]]
 test_src = "test/ratelimit_demo.c"
-grate_args = "--ports 5432-5432 %{ resource-grate.cwasm ratelimit_demo.cfg %}"
+grate_args = "--ports 5432-5432 %{ grates/resource-grate.cwasm ratelimit_demo.cfg %}"
 files = ["test/ratelimit_demo.cfg"]
 timeout = 120
 
