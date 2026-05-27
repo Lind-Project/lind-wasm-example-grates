@@ -764,7 +764,7 @@ void load_file(char *path) {
 
 void dump_file(char *path, char *actual_path) {
 	char split_path[4096];
-	strcpy(split_path, path);
+	strcpy(split_path, actual_path);
 
 	for (char *p = split_path + 1; *p; p++) {
 		if (*p == '/') {
