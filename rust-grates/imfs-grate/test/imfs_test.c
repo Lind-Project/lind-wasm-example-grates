@@ -463,6 +463,92 @@ static void test_link_rw(void) {
 	CHECK("unlink file2", unlink("file2") == 0);
 }
 
+static void test_symlink_readlink_linkat(void) {
+	printf("\n[test_symlink_readlink_linkat]\n");
+
+	CHECK("mkdir /symdir", mkdir("/symdir", 0755) == 0);
+
+	int fd = open("/symdir/target", O_CREAT | O_RDWR, 0644);
+	CHECK("create symlink target", fd >= 0);
+	if (fd >= 0) {
+		CHECK("write symlink target", write(fd, "sdata", 5) == 5);
+		close(fd);
+	}
+
+	CHECK("create relative symlink", symlink("target", "/symdir/rel_link") == 0);
+
+	char linkbuf[64];
+	memset(linkbuf, 0, sizeof(linkbuf));
+	ssize_t n = readlink("/symdir/rel_link", linkbuf, sizeof(linkbuf));
+	CHECK("readlink returns target length", n == 6);
+	if (n >= 0 && n < (ssize_t)sizeof(linkbuf))
+		linkbuf[n] = '\0';
+	CHECK("readlink returns target bytes", strcmp(linkbuf, "target") == 0);
+
+	struct stat st;
+	memset(&st, 0, sizeof(st));
+	CHECK("lstat sees symlink", lstat("/symdir/rel_link", &st) == 0 && S_ISLNK(st.st_mode));
+	CHECK("lstat symlink size is target length", st.st_size == 6);
+	memset(&st, 0, sizeof(st));
+	CHECK("stat follows symlink", stat("/symdir/rel_link", &st) == 0 && S_ISREG(st.st_mode));
+
+	char readbuf[8] = {0};
+	fd = open("/symdir/rel_link", O_RDONLY);
+	CHECK("open follows symlink", fd >= 0);
+	if (fd >= 0) {
+		CHECK("read through symlink", read(fd, readbuf, 5) == 5);
+		close(fd);
+		CHECK("symlink read data matches", memcmp(readbuf, "sdata", 5) == 0);
+	}
+
+	CHECK("create dangling symlink", symlink("missing", "/symdir/dangling") == 0);
+	memset(linkbuf, 0, sizeof(linkbuf));
+	n = readlink("/symdir/dangling", linkbuf, sizeof(linkbuf));
+	CHECK("readlink dangling succeeds", n == 7);
+	CHECK("open dangling symlink fails", open("/symdir/dangling", O_RDONLY) < 0);
+
+	int dirfd = open("/symdir", O_RDONLY | O_DIRECTORY);
+	CHECK("open /symdir dirfd", dirfd >= 0);
+	if (dirfd >= 0) {
+		CHECK("symlinkat creates relative symlink",
+		      symlinkat("target", dirfd, "at_link") == 0);
+		memset(linkbuf, 0, sizeof(linkbuf));
+		n = readlinkat(dirfd, "at_link", linkbuf, sizeof(linkbuf));
+		CHECK("readlinkat returns target length", n == 6);
+		if (n >= 0 && n < (ssize_t)sizeof(linkbuf))
+			linkbuf[n] = '\0';
+		CHECK("readlinkat returns target bytes", strcmp(linkbuf, "target") == 0);
+
+		memset(&st, 0, sizeof(st));
+		CHECK("fstatat nofollow sees symlink",
+		      fstatat(dirfd, "at_link", &st, AT_SYMLINK_NOFOLLOW) == 0
+		      && S_ISLNK(st.st_mode));
+		memset(&st, 0, sizeof(st));
+		CHECK("fstatat follows symlink",
+		      fstatat(dirfd, "at_link", &st, 0) == 0 && S_ISREG(st.st_mode));
+
+		CHECK("linkat creates hard link",
+		      linkat(dirfd, "target", dirfd, "hard_at", 0) == 0);
+		fd = open("/symdir/hard_at", O_RDONLY);
+		CHECK("open linkat hard link", fd >= 0);
+		if (fd >= 0) {
+			memset(readbuf, 0, sizeof(readbuf));
+			CHECK("read linkat hard link", read(fd, readbuf, 5) == 5);
+			close(fd);
+			CHECK("linkat hard link data matches", memcmp(readbuf, "sdata", 5) == 0);
+		}
+
+		CHECK("unlink symlinkat link", unlinkat(dirfd, "at_link", 0) == 0);
+		CHECK("unlink linkat hard link", unlinkat(dirfd, "hard_at", 0) == 0);
+		close(dirfd);
+	}
+
+	CHECK("unlink relative symlink", unlink("/symdir/rel_link") == 0);
+	CHECK("unlink dangling symlink", unlink("/symdir/dangling") == 0);
+	CHECK("unlink symlink target", unlink("/symdir/target") == 0);
+	CHECK("rmdir /symdir", rmdir("/symdir") == 0);
+}
+
 static void test_at_metadata_syscalls(void) {
 	printf("\n[test_at_metadata_syscalls]\n");
 
@@ -498,7 +584,18 @@ static void test_at_metadata_syscalls(void) {
 	CHECK("mode after fchmodat is 0600", (st.st_mode & 0777) == 0600);
 
 	CHECK("chown existing path succeeds",
-	      chown("/atdir/file", getuid(), getgid()) == 0);
+	      chown("/atdir/file", 123, 456) == 0);
+	memset(&st, 0, sizeof(st));
+	CHECK("stat after chown succeeds", stat("/atdir/file", &st) == 0);
+	CHECK("stat reports chown owner/group",
+	      st.st_uid == 123 && st.st_gid == 456);
+
+	CHECK("fchmod preserves special mode bits",
+	      chmod("/atdir/file", 04711) == 0);
+	memset(&st, 0, sizeof(st));
+	CHECK("stat after special chmod succeeds", stat("/atdir/file", &st) == 0);
+	CHECK("mode after special chmod is 04711", (st.st_mode & 07777) == 04711);
+
 	CHECK("lchown existing path succeeds",
 	      lchown("/atdir/file", getuid(), getgid()) == 0);
 	CHECK("fchownat existing path succeeds",
@@ -566,6 +663,7 @@ int main(void) {
 	test_fork();
 	test_wrong_write();
 	test_link_rw();
+	test_symlink_readlink_linkat();
 	test_at_metadata_syscalls();
 	test_lseek();
 	test_statfs();

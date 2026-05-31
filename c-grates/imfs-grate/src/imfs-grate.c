@@ -36,6 +36,46 @@ int pass_fptr_to_wt(uint64_t fn_ptr_uint, uint64_t grateid, uint64_t arg1,
 
 // Stores list of files on host that need to be copied in before cage execution.
 const char *preload_files;
+const char *dump_files;
+
+static void dump_outputs(const char *env) {
+	if (!env || strlen(env) == 0) {
+		return;
+	}
+
+	char *list = strdup(env);
+	if (!list) {
+		return;
+	}
+
+	char *entry = strtok(list, ";");
+	while (entry) {
+		while (*entry == ' ' || *entry == '\t') {
+			entry++;
+		}
+
+		if (strlen(entry) > 0) {
+			char *sep = strchr(entry, '=');
+			char *imfs_path = entry;
+			char *actual_path = entry;
+
+			if (sep) {
+				*sep = '\0';
+				actual_path = sep + 1;
+			}
+
+			if (strlen(imfs_path) > 0 && strlen(actual_path) > 0) {
+				fprintf(stderr, "dumping %s -> %s\n", imfs_path,
+					actual_path);
+				dump_file(imfs_path, actual_path);
+			}
+		}
+
+		entry = strtok(NULL, ";");
+	}
+
+	free(list);
+}
 
 // This is a util function to enable logging syscall invocations along with
 // inputs and return value.
@@ -443,6 +483,10 @@ int main(int argc, char *argv[]) {
 			break;
 		}
 	}
+
+	// Dump selected IMFS files back to disk after the cage exits.
+	dump_files = getenv("DUMPS");
+	dump_outputs(dump_files);
 
 	// Clean up the semaphore once the cage has exited.
 	sem_destroy(sem);
