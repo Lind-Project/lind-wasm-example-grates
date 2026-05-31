@@ -15,11 +15,21 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 // Neither std::sync::Mutex nor POSIX shared-memory semaphores synchronize
 // across Lind runtime threads.  The only cross-thread primitive that works
-// is DashMap (used by fdtables).  We use fdtables::check_cage_exists as a
-// spin-wait signal: the child spins until its cage appears in the DashMap.
+// is DashMap (used by fdtables).
 
 use crate::pipe::{PipeBuffer, PIPE_CAPACITY};
 use crate::socket::{SocketRegistry, IPC_SOCKET};
+
+const FDTABLE_WAIT_ATTEMPTS: usize = 100;
+const FDTABLE_WAIT_NSEC: libc::c_long = 100_000;
+
+#[derive(Clone)]
+struct PendingFdTable {
+    parent_cage: u64,
+    entries: Vec<(u64, fdtables::FDTableEntry)>,
+}
+
+static PENDING_FDTABLES: Mutex<Vec<PendingFdTable>> = Mutex::new(Vec::new());
 
 // =====================================================================
 //  Constants
@@ -165,35 +175,116 @@ impl IpcState {
 /// Check if a fd belongs to the IPC grate (pipe endpoint or socket).
 /// Returns (underfd, fdkind, flags) or None if it's not ours.
 ///
-/// If the cage doesn't exist in fdtables yet, init it empty.  This
-/// covers the vfork-spawn case: posix_spawn issues
+/// If the cage doesn't exist in fdtables yet, do not initialize it here.
+/// Forked children must get their fdtable from the fork handler's
+/// `copy_fdtable_for_cage`; creating an empty table from lookup paths races
+/// that copy and leaves inherited fds partially tracked.
+///
+/// The vfork-spawn case is subtle: posix_spawn issues
 /// `clone(CLONE_VM | CLONE_VFORK)` which suspends the parent inside
 /// the runtime's clone until the child execs.  The child runs
 /// syscalls (dup2/close for redirection, etc.) before our parent
 /// fork_handler returns from forward_syscall and gets to call
-/// `copy_fdtable_for_cage`.  Without on-demand init, the child either
-/// spins forever (with the old spin-wait) or panics in
-/// `translate_virtual_fd`'s `check_cage_exists` assert.
-///
-/// Init-on-demand here means the spawned cage starts with an empty
-/// fdtable in our grate.  IPC operations on inherited fds will not
-/// find entries (so they fall through to forward_syscall, which is
-/// fine — under CLONE_VM the runtime handles fd state via the
-/// shared VM with the parent).
+/// `copy_fdtable_for_cage`.  We still must not create an empty IPC fdtable
+/// there; pre-exec syscalls on ordinary fds should fall through to the
+/// runtime/default handler.
 pub fn lookup_ipc_fd(cage_id: u64, fd: u64) -> Option<(u64, u32, i32)> {
-    if !fdtables::check_cage_exists(cage_id) {
-        // Vfork-spawn child may run syscalls before our parent
-        // fork_handler can copy_fdtable_for_cage; init the cage empty
-        // on demand and let the syscall fall through to forward.
-        fdtables::init_empty_cage(cage_id);
+    if !wait_for_cage_fdtable(cage_id) {
         return None;
     }
-    match fdtables::translate_virtual_fd(cage_id, fd) {
-        Ok(entry) if entry.fdkind == IPC_PIPE || entry.fdkind == IPC_SOCKET => {
+    match wait_for_fdtable_entry(cage_id, fd) {
+        Some(entry) if entry.fdkind == IPC_PIPE || entry.fdkind == IPC_SOCKET => {
             Some((entry.underfd, entry.fdkind, entry.perfdinfo as i32))
         }
         _ => None,
     }
+}
+
+pub fn push_pending_fdtable(parent_cage: u64, entries: &HashMap<u64, fdtables::FDTableEntry>) {
+    let mut pending = PENDING_FDTABLES.lock().unwrap();
+    pending.push(PendingFdTable {
+        parent_cage,
+        entries: entries.iter().map(|(fd, entry)| (*fd, *entry)).collect(),
+    });
+}
+
+pub fn remove_pending_fdtable(parent_cage: u64) {
+    let mut pending = PENDING_FDTABLES.lock().unwrap();
+    if let Some(pos) = pending.iter().position(|snapshot| snapshot.parent_cage == parent_cage) {
+        pending.remove(pos);
+    }
+}
+
+fn install_pending_fdtable(cage_id: u64) -> bool {
+    let snapshot = {
+        let pending = PENDING_FDTABLES.lock().unwrap();
+        pending.last().cloned()
+    };
+    let Some(snapshot) = snapshot else {
+        return false;
+    };
+
+    if !fdtables::check_cage_exists(cage_id) {
+        fdtables::init_empty_cage(cage_id);
+    }
+
+    for (fd, entry) in snapshot.entries {
+        if fdtables::translate_virtual_fd(cage_id, fd).is_err() {
+            let _ = fdtables::get_specific_virtual_fd(
+                cage_id,
+                fd,
+                entry.fdkind,
+                entry.underfd,
+                entry.should_cloexec,
+                entry.perfdinfo,
+            );
+        }
+    }
+
+    true
+}
+
+fn wait_briefly_for_fdtable_copy() {
+    unsafe {
+        let ts = libc::timespec { tv_sec: 0, tv_nsec: FDTABLE_WAIT_NSEC };
+        libc::nanosleep(&ts, std::ptr::null_mut());
+    }
+}
+
+/// Wait for the parent fork handler to publish this cage's copied fdtable.
+///
+/// A forked child may run a syscall before the parent-side clone handler
+/// returns and calls `copy_fdtable_for_cage`.  Returning "missing cage"
+/// immediately makes inherited IPC fds look like kernel fds, so dup2/close
+/// during shell redirection fails with EBADF.  We wait briefly for normal
+/// fork children; vfork-style children time out and can still fall back to
+/// raw runtime handling or a fresh table in fd-creating paths.
+pub fn wait_for_cage_fdtable(cage_id: u64) -> bool {
+    for _ in 0..FDTABLE_WAIT_ATTEMPTS {
+        if fdtables::check_cage_exists(cage_id) {
+            return true;
+        }
+        if install_pending_fdtable(cage_id) {
+            return true;
+        }
+        wait_briefly_for_fdtable_copy();
+    }
+    fdtables::check_cage_exists(cage_id)
+}
+
+/// Look up a virtual fd, allowing a short window for the parent to merge
+/// inherited fds into a child table that was created early.
+pub fn wait_for_fdtable_entry(cage_id: u64, fd: u64) -> Option<fdtables::FDTableEntry> {
+    for _ in 0..FDTABLE_WAIT_ATTEMPTS {
+        match fdtables::translate_virtual_fd(cage_id, fd) {
+            Ok(entry) => return Some(entry),
+            Err(_) => {
+                install_pending_fdtable(cage_id);
+                wait_briefly_for_fdtable_copy();
+            }
+        }
+    }
+    fdtables::translate_virtual_fd(cage_id, fd).ok()
 }
 
 /// Check if perfdinfo flags indicate a read-end pipe fd.

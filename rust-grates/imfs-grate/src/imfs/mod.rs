@@ -24,6 +24,7 @@ pub const IMFS_FDKIND: u32 = 1;
 const IMFS_F_GETFD: i32 = 1;
 const IMFS_F_SETFD: i32 = 2;
 const IMFS_FD_CLOEXEC: i32 = 1;
+const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
 
 /// Global IMFS state.
 pub static IMFS: Mutex<Option<ImfsState>> = Mutex::new(None);
@@ -61,11 +62,24 @@ pub struct FsData {
 
 const DIRENT64_FIXED_SIZE: usize = 8 + 8 + 2 + 1;
 const IMFS_BLOCK_SIZE: i32 = 512;
+// stat.st_blksize: preferred I/O size that glibc stdio sizes its buffer to.
+// Too small truncates seek-heavy buffered writers (e.g. GNU as). Distinct from
+// IMFS_BLOCK_SIZE, the POSIX-fixed 512-byte unit for st_blocks.
+const IMFS_PREFERRED_IO_SIZE: i32 = 4096;
 const LIND_AT_FDCWD: i32 = -100;
+const LIND_AT_NO_AUTOMOUNT: i32 = 0x800;
+const LIND_AT_EMPTY_PATH: i32 = 0x1000;
 const IMFS_STATFS_MAGIC: u64 = 0x494d_4653; // "IMFS"
 const IMFS_STATFS_BLOCK_SIZE: u64 = 4096;
 const IMFS_STATFS_TOTAL_BLOCKS: u64 = 1024 * 1024;
 const IMFS_STATFS_NAME_MAX: u64 = 254;
+const S_IFMT: u32 = 0o170000;
+const S_IFIFO: u32 = 0o010000;
+const S_IFREG: u32 = 0o100000;
+const S_MODE_BITS: u32 = 0o7777;
+const S_ISUID: u32 = 0o4000;
+const S_ISGID: u32 = 0o2000;
+const CHOWN_NO_CHANGE: u32 = u32::MAX;
 
 /// The complete IMFS state.
 pub struct ImfsState {
@@ -106,11 +120,11 @@ pub fn init() {
 
     // Create . and .. in root.
     let dot_idx = state.create_node(".", NodeType::Lnk, 0);
-    state.nodes[dot_idx].info = NodeInfo::Lnk { target: root_idx };
+    state.nodes[dot_idx].info = NodeInfo::HardLink { target: root_idx };
     state.add_child(root_idx, dot_idx);
 
     let dotdot_idx = state.create_node("..", NodeType::Lnk, 0);
-    state.nodes[dotdot_idx].info = NodeInfo::Lnk { target: root_idx };
+    state.nodes[dotdot_idx].info = NodeInfo::HardLink { target: root_idx };
     state.add_child(root_idx, dotdot_idx);
 
     *IMFS.lock().unwrap() = Some(state);
@@ -140,7 +154,7 @@ impl ImfsState {
     fn dirent_type(&self, node_idx: usize) -> u8 {
         let mut idx = node_idx;
 
-        while let NodeInfo::Lnk { target } = &self.nodes[idx].info {
+        while let NodeInfo::HardLink { target } = &self.nodes[idx].info {
             idx = *target;
         }
 
@@ -148,6 +162,7 @@ impl ImfsState {
             NodeType::Dir => DT_DIR,
             NodeType::Reg => DT_REG,
             NodeType::Lnk => DT_LNK,
+            NodeType::Pip => DT_FIFO,
             _ => DT_UNKNOWN,
         }
     }
@@ -256,7 +271,7 @@ impl ImfsState {
                     entry.node_idx == node_idx
                         || matches!(
                             &self.nodes[entry.node_idx].info,
-                            NodeInfo::Lnk { target } if *target == node_idx
+                            NodeInfo::HardLink { target } if *target == node_idx
                         )
                 })
                 .count() as u32,
@@ -264,7 +279,7 @@ impl ImfsState {
     }
 
     fn unlink_node(&mut self, node_idx: usize) {
-        if let NodeInfo::Lnk { target } = &self.nodes[node_idx].info {
+        if let NodeInfo::HardLink { target } = &self.nodes[node_idx].info {
             let target = *target;
             self.update_ctime(target);
             if self.link_count(target) == 0 {
@@ -348,6 +363,27 @@ impl ImfsState {
         }
     }
 
+    fn normalize_path_from_base(base: &str, path: &str) -> String {
+        let base = if path.starts_with('/') { "/" } else { base };
+        let mut parts: Vec<&str> = Vec::new();
+
+        for part in base.split('/').chain(path.split('/')) {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    parts.pop();
+                }
+                x => parts.push(x),
+            }
+        }
+
+        if parts.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{}", parts.join("/"))
+        }
+    }
+
     fn lookup_child(&self, parent_idx: usize, name: &str) -> Option<usize> {
         self.nodes[parent_idx]
             .children()
@@ -361,6 +397,19 @@ impl ImfsState {
     /// component is not a directory. If follow_final is false, the last path
     /// component is returned without following a link node.
     fn resolve_path(&self, path: &str, follow_final: bool) -> Result<usize, i32> {
+        self.resolve_path_inner(path, follow_final, 0)
+    }
+
+    fn resolve_path_inner(
+        &self,
+        path: &str,
+        follow_final: bool,
+        depth: usize,
+    ) -> Result<usize, i32> {
+        if depth > 40 {
+            return Err(-40); // ELOOP
+        }
+
         if path == "/" {
             return Ok(self.root_idx);
         }
@@ -382,8 +431,18 @@ impl ImfsState {
 
             current = if is_final && !follow_final {
                 entry_idx
+            } else if let Some(target) = self.nodes[entry_idx].hardlink_target() {
+                target
+            } else if let Some(target) = self.nodes[entry_idx].symlink_target() {
+                let parent_path = self.absolute_path_for_node(current);
+                let mut resolved = Self::normalize_path_from_base(&parent_path, target);
+                let remaining = &components[idx + 1..];
+                if !remaining.is_empty() {
+                    resolved = Self::normalize_path_from_base(&resolved, &remaining.join("/"));
+                }
+                return self.resolve_path_inner(&resolved, follow_final, depth + 1);
             } else {
-                self.nodes[entry_idx].link_target().unwrap_or(entry_idx)
+                entry_idx
             };
         }
 
@@ -446,7 +505,7 @@ impl ImfsState {
         };
 
         let mut node_idx = entry.underfd as usize;
-        while let NodeInfo::Lnk { target } = &self.nodes[node_idx].info {
+        while let NodeInfo::HardLink { target } = &self.nodes[node_idx].info {
             node_idx = *target;
         }
 
@@ -470,11 +529,11 @@ impl ImfsState {
             st_ino: node_idx as u64,
             st_mode: node.mode,
             st_nlink: self.link_count(node_idx),
-            st_uid: 0, //node.owner,
-            st_gid: 0, //node.group,
+            st_uid: node.owner,
+            st_gid: node.group,
             st_rdev: 0,
             st_size: node.total_size as u64,
-            st_blksize: IMFS_BLOCK_SIZE,
+            st_blksize: IMFS_PREFERRED_IO_SIZE,
             st_blocks: (node.total_size / IMFS_BLOCK_SIZE as usize) as u32,
             st_atim: node.atime.as_stat_pair(),
             st_mtim: node.mtime.as_stat_pair(),
@@ -814,7 +873,7 @@ impl ImfsState {
 
         // If the node is a Link, follow until we hit an actual Node.
         // Streamlines process of reading/writing symlink'd files.
-        while let NodeInfo::Lnk { target } = &self.nodes[idx].info {
+        while let NodeInfo::HardLink { target } = &self.nodes[idx].info {
             idx = *target;
         }
 
@@ -1020,7 +1079,7 @@ impl ImfsState {
         }
 
         // Follow link nodes until reaching the actual target.
-        while let NodeInfo::Lnk { target } = &self.nodes[node_idx].info {
+        while let NodeInfo::HardLink { target } = &self.nodes[node_idx].info {
             node_idx = *target;
 
             if node_idx >= self.nodes.len() {
@@ -1082,7 +1141,12 @@ impl ImfsState {
     /// xstat
     pub fn stat(&mut self, cage_id: u64, path: &str, statbuf: &mut stat) -> i32 {
         let norm_path = self.normalize_path_for_cage(cage_id, path);
-        self.stat_resolved_path(&norm_path, statbuf)
+        self.stat_resolved_path(&norm_path, statbuf, true)
+    }
+
+    pub fn lstat(&mut self, cage_id: u64, path: &str, statbuf: &mut stat) -> i32 {
+        let norm_path = self.normalize_path_for_cage(cage_id, path);
+        self.stat_resolved_path(&norm_path, statbuf, false)
     }
 
     pub fn statfs(&mut self, cage_id: u64, path: &str, statbuf: &mut FsData) -> i32 {
@@ -1096,16 +1160,57 @@ impl ImfsState {
         }
     }
 
-    pub fn statat(&mut self, cage_id: u64, dirfd: i32, path: &str, statbuf: &mut stat) -> i32 {
+    pub fn statat(
+        &mut self,
+        cage_id: u64,
+        dirfd: i32,
+        path: &str,
+        statbuf: &mut stat,
+        flags: i32,
+    ) -> i32 {
+        let supported_flags = AT_SYMLINK_NOFOLLOW | LIND_AT_NO_AUTOMOUNT | LIND_AT_EMPTY_PATH;
+        if flags & !supported_flags != 0 {
+            println!("[mifs] flag={}, supported={}", flags, supported_flags);
+            return -22; // EINVAL
+        }
+
+        if path.is_empty() && flags & LIND_AT_EMPTY_PATH != 0 {
+            let node_idx = if dirfd == LIND_AT_FDCWD {
+                let norm_path = self.normalize_path_for_cage(cage_id, ".");
+                match self.resolve_path(&norm_path, true) {
+                    Ok(idx) => idx,
+                    Err(e) => return e,
+                }
+            } else {
+                let entry = match fdtables::translate_virtual_fd(cage_id, dirfd as u64) {
+                    Ok(entry) => entry,
+                    Err(_) => return -9, // EBADF
+                };
+                entry.underfd as usize
+            };
+
+            if node_idx >= self.nodes.len() {
+                return -9; // EBADF
+            }
+            self.fill_stat(node_idx, statbuf);
+            self.update_atime(node_idx);
+            return 0;
+        }
+
         let norm_path = match self.normalize_path_at(cage_id, dirfd, path) {
             Ok(path) => path,
             Err(e) => return e,
         };
-        self.stat_resolved_path(&norm_path, statbuf)
+        self.stat_resolved_path(&norm_path, statbuf, flags & libc::AT_SYMLINK_NOFOLLOW == 0)
     }
 
-    fn stat_resolved_path(&mut self, norm_path: &str, statbuf: &mut stat) -> i32 {
-        let node_idx = match self.resolve_path(&norm_path, true) {
+    fn stat_resolved_path(
+        &mut self,
+        norm_path: &str,
+        statbuf: &mut stat,
+        follow_final: bool,
+    ) -> i32 {
+        let node_idx = match self.resolve_path(&norm_path, follow_final) {
             Ok(idx) => idx,
             Err(e) => return e,
         };
@@ -1513,20 +1618,53 @@ impl ImfsState {
         self.update_mtime(parent_idx);
         self.update_ctime(parent_idx);
         self.update_ctime(node_idx);
-        self.nodes[node_idx].doomed = true;
-
-        if self.nodes[node_idx].in_use == 0 {
-            self.reclaim_node(node_idx);
-        }
+        self.unlink_node(node_idx);
 
         0
     }
 
-    /// link: (int cage_id, const char *oldpath, const char *newpath) {
     pub fn link(&mut self, cage_id: u64, oldpath: &str, newpath: &str) -> i32 {
-        // Ensure old path exists.
         let norm_oldpath = self.normalize_path_for_cage(cage_id, oldpath);
-        let old_idx = match self.resolve_path(&norm_oldpath, true) {
+        let norm_newpath = self.normalize_path_for_cage(cage_id, newpath);
+        self.link_resolved_paths(&norm_oldpath, &norm_newpath, true)
+    }
+
+    pub fn linkat(
+        &mut self,
+        cage_id: u64,
+        olddirfd: i32,
+        oldpath: &str,
+        newdirfd: i32,
+        newpath: &str,
+        flags: i32,
+    ) -> i32 {
+        let supported_flags = libc::AT_SYMLINK_FOLLOW;
+        if flags & !supported_flags != 0 {
+            return -22; // EINVAL
+        }
+
+        let norm_oldpath = match self.normalize_path_at(cage_id, olddirfd, oldpath) {
+            Ok(path) => path,
+            Err(e) => return e,
+        };
+        let norm_newpath = match self.normalize_path_at(cage_id, newdirfd, newpath) {
+            Ok(path) => path,
+            Err(e) => return e,
+        };
+        self.link_resolved_paths(
+            &norm_oldpath,
+            &norm_newpath,
+            flags & libc::AT_SYMLINK_FOLLOW != 0,
+        )
+    }
+
+    fn link_resolved_paths(
+        &mut self,
+        norm_oldpath: &str,
+        norm_newpath: &str,
+        follow_old: bool,
+    ) -> i32 {
+        let old_idx = match self.resolve_path(norm_oldpath, follow_old) {
             Ok(idx) => idx,
             Err(e) => return e,
         };
@@ -1536,15 +1674,14 @@ impl ImfsState {
         }
 
         // Ensure newpath does not exist.
-        let norm_newpath = self.normalize_path_for_cage(cage_id, newpath);
-        match self.resolve_path(&norm_newpath, false) {
+        match self.resolve_path(norm_newpath, false) {
             Ok(_) => return -17, // EEXIST
             Err(-2) => {}
             Err(e) => return e,
         };
 
         // open(O_CREAT) behaviour.
-        let (parent_idx, filename) = match self.resolve_parent_and_name(&norm_newpath) {
+        let (parent_idx, filename) = match self.resolve_parent_and_name(norm_newpath) {
             Ok(parts) => parts,
             Err(e) => return e,
         };
@@ -1562,8 +1699,10 @@ impl ImfsState {
         // Create new Lnk, update target.
         let new_idx = self.create_node(&filename, NodeType::Lnk, mode);
         self.add_child(parent_idx, new_idx);
-        if let NodeInfo::Lnk { target } = &mut self.nodes[new_idx].info {
+        if let NodeInfo::HardLink { target } = &mut self.nodes[new_idx].info {
             *target = old_idx;
+        } else {
+            self.nodes[new_idx].info = NodeInfo::HardLink { target: old_idx };
         }
         self.update_mtime(parent_idx);
         self.update_ctime(parent_idx);
@@ -1572,6 +1711,76 @@ impl ImfsState {
         self.update_ctime(new_idx);
 
         0
+    }
+
+    pub fn symlink(&mut self, cage_id: u64, target: &str, linkpath: &str) -> i32 {
+        let norm_linkpath = self.normalize_path_for_cage(cage_id, linkpath);
+        self.symlink_resolved_path(target, &norm_linkpath)
+    }
+
+    pub fn symlinkat(&mut self, cage_id: u64, target: &str, newdirfd: i32, linkpath: &str) -> i32 {
+        let norm_linkpath = match self.normalize_path_at(cage_id, newdirfd, linkpath) {
+            Ok(path) => path,
+            Err(e) => return e,
+        };
+        self.symlink_resolved_path(target, &norm_linkpath)
+    }
+
+    fn symlink_resolved_path(&mut self, target: &str, norm_linkpath: &str) -> i32 {
+        match self.resolve_path(norm_linkpath, false) {
+            Ok(_) => return -17, // EEXIST
+            Err(-2) => {}
+            Err(e) => return e,
+        };
+
+        let (parent_idx, filename) = match self.resolve_parent_and_name(norm_linkpath) {
+            Ok(parts) => parts,
+            Err(e) => return e,
+        };
+
+        if filename == "." || filename == ".." {
+            return -17; // EEXIST
+        }
+
+        if filename.len() >= MAX_NODE_NAME {
+            return -36; // ENAMETOOLONG
+        }
+
+        let new_idx = self.create_node(&filename, NodeType::Lnk, 0o777);
+        self.nodes[new_idx].info = NodeInfo::Symlink {
+            target: target.to_string(),
+        };
+        self.nodes[new_idx].total_size = target.len();
+        self.add_child(parent_idx, new_idx);
+        self.update_mtime(parent_idx);
+        self.update_ctime(parent_idx);
+        self.update_mtime(new_idx);
+        self.update_ctime(new_idx);
+
+        0
+    }
+
+    pub fn readlink(&mut self, cage_id: u64, path: &str) -> Result<String, i32> {
+        let norm_path = self.normalize_path_for_cage(cage_id, path);
+        self.readlink_resolved_path(&norm_path)
+    }
+
+    pub fn readlinkat(&mut self, cage_id: u64, dirfd: i32, path: &str) -> Result<String, i32> {
+        let norm_path = match self.normalize_path_at(cage_id, dirfd, path) {
+            Ok(path) => path,
+            Err(e) => return Err(e),
+        };
+        self.readlink_resolved_path(&norm_path)
+    }
+
+    fn readlink_resolved_path(&mut self, norm_path: &str) -> Result<String, i32> {
+        let node_idx = self.resolve_path(norm_path, false)?;
+        let target = match &self.nodes[node_idx].info {
+            NodeInfo::Symlink { target } => target.clone(),
+            _ => return Err(-22), // EINVAL
+        };
+        self.update_atime(node_idx);
+        Ok(target)
     }
 
     pub fn rename(&mut self, cage_id: u64, oldpath: &str, newpath: &str) -> i32 {
@@ -1694,29 +1903,97 @@ impl ImfsState {
             Err(e) => return e,
         };
 
-        self.nodes[node_idx].mode = (self.nodes[node_idx].mode & !0o777) | (mode & 0o777);
+        self.nodes[node_idx].mode = (self.nodes[node_idx].mode & S_IFMT) | (mode & S_MODE_BITS);
         self.update_ctime(node_idx);
 
         0
     }
 
-    pub fn chown(&mut self, cage_id: u64, path: &str) -> i32 {
+    pub fn fchmod(&mut self, cage_id: u64, fd: u64, mode: u32) -> i32 {
+        let (node_idx, _) = match self.get_node_and_flags(cage_id, fd) {
+            Ok(entry) => entry,
+            Err(e) => return e,
+        };
+
+        self.nodes[node_idx].mode = (self.nodes[node_idx].mode & S_IFMT) | (mode & S_MODE_BITS);
+        self.update_ctime(node_idx);
+
+        0
+    }
+
+    pub fn chown(&mut self, cage_id: u64, path: &str, owner: u32, group: u32) -> i32 {
         let norm_path = self.normalize_path_for_cage(cage_id, path);
         match self.resolve_path(&norm_path, true) {
-            Ok(_) => 0,
+            Ok(node_idx) => self.chown_node(node_idx, owner, group),
             Err(e) => e,
         }
     }
 
-    pub fn chownat(&mut self, cage_id: u64, dirfd: i32, path: &str) -> i32 {
-        let norm_path = match self.normalize_path_at(cage_id, dirfd, path) {
-            Ok(path) => path,
-            Err(e) => return e,
-        };
-        match self.resolve_path(&norm_path, true) {
-            Ok(_) => 0,
+    pub fn lchown(&mut self, cage_id: u64, path: &str, owner: u32, group: u32) -> i32 {
+        let norm_path = self.normalize_path_for_cage(cage_id, path);
+        match self.resolve_path(&norm_path, false) {
+            Ok(node_idx) => self.chown_node(node_idx, owner, group),
             Err(e) => e,
         }
+    }
+
+    pub fn chownat(
+        &mut self,
+        cage_id: u64,
+        dirfd: i32,
+        path: &str,
+        owner: u32,
+        group: u32,
+        flags: i32,
+    ) -> i32 {
+        let follow_final = (flags & AT_SYMLINK_NOFOLLOW) == 0;
+        let node_idx = match self.node_idx_at(cage_id, dirfd, path, follow_final) {
+            Ok(idx) => idx,
+            Err(e) => return e,
+        };
+
+        self.chown_node(node_idx, owner, group)
+    }
+
+    fn node_idx_at(
+        &self,
+        cage_id: u64,
+        dirfd: i32,
+        path: &str,
+        follow_final: bool,
+    ) -> Result<usize, i32> {
+        let norm_path = if path.is_empty() && dirfd != LIND_AT_FDCWD {
+            let entry = fdtables::translate_virtual_fd(cage_id, dirfd as u64).map_err(|_| -9)?;
+            let mut node_idx = entry.underfd as usize;
+            while let NodeInfo::HardLink { target } = &self.nodes[node_idx].info {
+                node_idx = *target;
+            }
+            return Ok(node_idx);
+        } else {
+            self.normalize_path_at(cage_id, dirfd, path)?
+        };
+
+        self.resolve_path(&norm_path, follow_final)
+    }
+
+    fn chown_node(&mut self, node_idx: usize, owner: u32, group: u32) -> i32 {
+        let mut changed = false;
+
+        if owner != CHOWN_NO_CHANGE && self.nodes[node_idx].owner != owner {
+            self.nodes[node_idx].owner = owner;
+            changed = true;
+        }
+        if group != CHOWN_NO_CHANGE && self.nodes[node_idx].group != group {
+            self.nodes[node_idx].group = group;
+            changed = true;
+        }
+
+        if changed {
+            self.nodes[node_idx].mode &= !(S_ISUID | S_ISGID);
+        }
+        self.update_ctime(node_idx);
+
+        0
     }
 
     pub fn utimensat(&mut self, cage_id: u64, dirfd: i32, path: Option<&str>) -> i32 {
@@ -1746,6 +2023,40 @@ impl ImfsState {
         self.update_atime(node_idx);
         self.update_mtime(node_idx);
         self.update_ctime(node_idx);
+        0
+    }
+
+    pub fn mknod(&mut self, cage_id: u64, path: &str, mode: u32) -> i32 {
+        let node_type = match mode & S_IFMT {
+            S_IFIFO => NodeType::Pip,
+            S_IFREG | 0 => NodeType::Reg,
+            _ => return -1, // EPERM
+        };
+
+        let norm_path = self.normalize_path_for_cage(cage_id, path);
+        if self.resolve_path(&norm_path, true).is_ok() {
+            return -17; // EEXIST
+        }
+
+        let (parent_idx, name) = match self.resolve_parent_and_name(&norm_path) {
+            Ok(parent) => parent,
+            Err(e) => return e,
+        };
+
+        if name == "." || name == ".." {
+            return -17; // EEXIST
+        }
+        if name.len() >= MAX_NODE_NAME {
+            return -36; // ENAMETOOLONG
+        }
+
+        let node_idx = self.create_node(&name, node_type, mode);
+        self.add_child(parent_idx, node_idx);
+        self.update_mtime(parent_idx);
+        self.update_ctime(parent_idx);
+        self.update_mtime(node_idx);
+        self.update_ctime(node_idx);
+
         0
     }
 
@@ -1825,11 +2136,11 @@ impl ImfsState {
 
         // Add . and ..
         let dot_idx = self.create_node(".", NodeType::Lnk, 0);
-        self.nodes[dot_idx].info = NodeInfo::Lnk { target: dir_idx };
+        self.nodes[dot_idx].info = NodeInfo::HardLink { target: dir_idx };
         self.add_child(dir_idx, dot_idx);
 
         let dotdot_idx = self.create_node("..", NodeType::Lnk, 0);
-        self.nodes[dotdot_idx].info = NodeInfo::Lnk { target: parent_idx };
+        self.nodes[dotdot_idx].info = NodeInfo::HardLink { target: parent_idx };
         self.add_child(dir_idx, dotdot_idx);
         self.update_mtime(parent_idx);
         self.update_ctime(parent_idx);

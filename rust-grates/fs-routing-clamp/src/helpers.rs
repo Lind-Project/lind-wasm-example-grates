@@ -8,29 +8,36 @@
 
 use grate_rs::constants::*;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use grate_rs::{GrateError, copy_data_between_cages, make_threei_call};
+
+pub const SYS_LINKAT_NR: u64 = 265;
 
 // These are all the calls that the fs-namespace grate cares about. All of the
 // following calls from the target must be routed through the grate regardless
 // of whether the clamp interposed on them.
-pub const FS_CALLS: [u64; 48] = [
+pub const FS_CALLS: [u64; 57] = [
     SYS_OPEN,
     SYS_OPENAT,
     SYS_XSTAT,
-    SYS_GETCWD,
+    SYS_LSTAT,
     SYS_ACCESS,
     SYS_UNLINK,
     SYS_LINK,
+    SYS_LINKAT_NR,
     SYS_MKDIR,
     SYS_RMDIR,
     SYS_RENAME,
     SYS_TRUNCATE,
     SYS_CHMOD,
+    SYS_CHOWN,
+    SYS_LCHOWN,
     SYS_CHDIR,
     SYS_MKNOD,
+    SYS_SYMLINK,
+    SYS_SYMLINKAT,
     SYS_READLINK,
     SYS_UNLINKAT,
     SYS_READLINKAT,
@@ -49,10 +56,15 @@ pub const FS_CALLS: [u64; 48] = [
     SYS_LSEEK,
     SYS_FXSTAT,
     SYS_NEWFSTATAT,
+    SYS_STATX,
+    SYS_FACCESSAT,
     SYS_FCNTL,
     SYS_FTRUNCATE,
     SYS_FCHMOD,
+    SYS_FCHMODAT,
+    SYS_FCHOWNAT,
     SYS_FCHDIR,
+    SYS_UTIMENSAT,
     SYS_READV,
     SYS_WRITEV,
     SYS_FSYNC,
@@ -66,7 +78,6 @@ pub const FS_CALLS: [u64; 48] = [
     SYS_DUP2,
     SYS_DUP3,
     // Lifecycle — interpose so we track child cages
-    SYS_CLONE,
     SYS_GETCWD,
 ];
 
@@ -534,11 +545,7 @@ pub fn is_clamped_mmap(cageid: u64, addr: u64, len: u64) -> bool {
     let maps = clamped_mmaps().lock().unwrap();
 
     maps.get(&cageid)
-        .map(|ranges| {
-            ranges
-                .iter()
-                .any(|r| addr < r.end && end > r.start)
-        })
+        .map(|ranges| ranges.iter().any(|r| addr < r.end && end > r.start))
         .unwrap_or(false)
 }
 
