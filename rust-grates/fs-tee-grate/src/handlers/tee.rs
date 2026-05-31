@@ -4,6 +4,7 @@ use crate::utils;
 use crate::utils::*;
 use grate_rs::constants::fs::F_DUPFD;
 use grate_rs::constants::fs::F_DUPFD_CLOEXEC;
+use grate_rs::constants::mman::MAP_ANON;
 use grate_rs::constants::*;
 use grate_rs::{copy_data_between_cages, getcageid, is_thread_clone};
 
@@ -96,7 +97,7 @@ pub fn tee_dispatch(
 
     // Translate the FD argument before forwarding the call to the secondary stack.
     if fd_arg != -1 {
-        if let Some(secondary_fd) = translate_secondary_fd(cage_id, args[0]) {
+        if let Some(secondary_fd) = translate_secondary_fd(cage_id, args[fd_arg as usize]) {
             secondary_args[fd_arg as usize] = secondary_fd;
         }
     }
@@ -219,7 +220,6 @@ tee_handler!(tee_pwritev, SYS_PWRITEV);
 
 // Path-based handlers that do not need FD translation.
 tee_path_handler!(tee_stat, SYS_XSTAT);
-tee_path_handler!(tee_mmap, SYS_MMAP);
 tee_path_handler!(tee_access, SYS_ACCESS);
 tee_path_handler!(tee_chdir, SYS_CHDIR);
 tee_path_handler!(tee_rename, SYS_RENAME);
@@ -228,6 +228,32 @@ tee_path_handler!(tee_rmdir, SYS_RMDIR);
 tee_path_handler!(tee_unlink, SYS_UNLINK);
 tee_path_handler!(tee_readlink, SYS_READLINK);
 tee_path_handler!(tee_chmod, SYS_CHMOD);
+
+pub extern "C" fn tee_mmap(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    let is_anon = (arg4 & MAP_ANON as u64) != 0;
+    tee_dispatch(
+        "tee_mmap",
+        SYS_MMAP,
+        arg1cage,
+        &mut [arg1, arg2, arg3, arg4, arg5, arg6],
+        &[arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
+        if is_anon { -1 } else { 4 },
+    )
+}
 
 /// Mirror `fork()` to the secondary stack and copy tee state for real process clones.
 pub extern "C" fn tee_fork(
