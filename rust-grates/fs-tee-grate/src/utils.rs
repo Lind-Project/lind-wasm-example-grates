@@ -31,7 +31,7 @@ pub fn get_interposition_request(target_cage: u64, fs_syscall: u64) -> Option<(u
     with_tee(|s| {
         s.interposition_map
             .iter()
-            .find(|(child_cage, syscall_number, _, _)| {
+            .rfind(|(child_cage, syscall_number, _, _)| {
                 *child_cage == target_cage && *syscall_number == fs_syscall
             })
             .map(|(_, _, grate_id, handler_fn)| (*grate_id, *handler_fn))

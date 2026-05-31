@@ -5,7 +5,7 @@ use crate::utils::*;
 use grate_rs::constants::fs::F_DUPFD;
 use grate_rs::constants::fs::F_DUPFD_CLOEXEC;
 use grate_rs::constants::*;
-use grate_rs::is_thread_clone;
+use grate_rs::{copy_data_between_cages, getcageid, is_thread_clone};
 
 /// Call a syscall whose first argument is an FD through both stacks.
 macro_rules! tee_handler {
@@ -81,8 +81,6 @@ pub fn tee_dispatch(
     arg_cages: &[u64; 6],
     fd_arg: i32,
 ) -> i32 {
-    let primary_result = do_syscall(cage_id, syscall_number, args, arg_cages);
-
     // Look up the tee route and the entry cage for the secondary stack.
     let (secondary_path, secondary_entry): (Option<u64>, u64) = with_tee(|s| {
         (
@@ -94,10 +92,12 @@ pub fn tee_dispatch(
         )
     });
 
+    let mut secondary_args = *args;
+
     // Translate the FD argument before forwarding the call to the secondary stack.
     if fd_arg != -1 {
         if let Some(secondary_fd) = translate_secondary_fd(cage_id, args[0]) {
-            args[fd_arg as usize] = secondary_fd;
+            secondary_args[fd_arg as usize] = secondary_fd;
         }
     }
 
@@ -126,10 +126,18 @@ pub fn tee_dispatch(
         // The direct call through `secondary_entry` preserves that behavior by mimicking the
         // regular stack flow.
         match secondary_path {
-            Some(alt) => do_syscall(cage_id, alt, args, arg_cages),
-            None => do_tee_syscall(secondary_entry, cage_id, syscall_number, args, arg_cages),
+            Some(alt) => do_syscall(cage_id, alt, &secondary_args, arg_cages),
+            None => do_tee_syscall(
+                secondary_entry,
+                cage_id,
+                syscall_number,
+                &secondary_args,
+                arg_cages,
+            ),
         }
     };
+
+    let primary_result = do_syscall(cage_id, syscall_number, args, arg_cages);
 
     secondary_log!(
         "{}\tCage={}\tPrimary={}\tSecondary={}\tArgs={}, ArgCage={}",
@@ -156,6 +164,28 @@ fn record_fd_pair(cage_id: u64, primary_result: i32, secondary_result: i32) {
         false,                   // should_cloexec (unused)
         0,                       // perfdinfo (unused)
     );
+}
+
+fn read_pipe_fds(pipefd_ptr: u64, pipefd_cage: u64) -> Option<[i32; 2]> {
+    let tee_cage = getcageid();
+    let mut bytes = [0u8; 8];
+
+    copy_data_between_cages(
+        tee_cage,
+        pipefd_cage,
+        pipefd_ptr,
+        pipefd_cage,
+        bytes.as_mut_ptr() as u64,
+        tee_cage,
+        bytes.len() as u64,
+        0,
+    )
+    .ok()?;
+
+    Some([
+        i32::from_le_bytes(bytes[0..4].try_into().unwrap()),
+        i32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+    ])
 }
 
 /// Retrieve the secondary stack's FD.
@@ -329,14 +359,23 @@ pub extern "C" fn tee_pipe(
         )
     });
 
-    let primary_result = do_syscall(cage_id, SYS_PIPE, &args, &arg_cages);
-
     let secondary_result = match secondary_alt {
         Some(alt) => do_syscall(cage_id, alt, &args, &arg_cages),
-        None => do_tee_syscall(secondary_entry, cage_id, SYS_OPEN, &args, &arg_cages),
+        None => do_tee_syscall(secondary_entry, cage_id, SYS_PIPE, &args, &arg_cages),
     };
+    let secondary_fds = (secondary_result == 0)
+        .then(|| read_pipe_fds(arg1, arg1cage))
+        .flatten();
 
-    // record_fd_pair(arg2cage, primary_result, secondary_result);
+    let primary_result = do_syscall(cage_id, SYS_PIPE, &args, &arg_cages);
+    let primary_fds = (primary_result == 0)
+        .then(|| read_pipe_fds(arg1, arg1cage))
+        .flatten();
+
+    if let (Some(primary_fds), Some(secondary_fds)) = (primary_fds, secondary_fds) {
+        record_fd_pair(arg1cage, primary_fds[0], secondary_fds[0]);
+        record_fd_pair(arg1cage, primary_fds[1], secondary_fds[1]);
+    }
 
     secondary_log!(
         "{}\tCage={}\tPrimary={}\tSecondary={}\tArgs={}, ArgCage={}",
@@ -608,14 +647,23 @@ pub extern "C" fn tee_pipe2(
         )
     });
 
-    let primary_result = do_syscall(cage_id, SYS_PIPE2, &args, &arg_cages);
-
     let secondary_result = match secondary_alt {
         Some(alt) => do_syscall(cage_id, alt, &args, &arg_cages),
-        None => do_tee_syscall(secondary_entry, cage_id, SYS_OPEN, &args, &arg_cages),
+        None => do_tee_syscall(secondary_entry, cage_id, SYS_PIPE2, &args, &arg_cages),
     };
+    let secondary_fds = (secondary_result == 0)
+        .then(|| read_pipe_fds(arg1, arg1cage))
+        .flatten();
 
-    // record_fd_pair(arg2cage, primary_result, secondary_result);
+    let primary_result = do_syscall(cage_id, SYS_PIPE2, &args, &arg_cages);
+    let primary_fds = (primary_result == 0)
+        .then(|| read_pipe_fds(arg1, arg1cage))
+        .flatten();
+
+    if let (Some(primary_fds), Some(secondary_fds)) = (primary_fds, secondary_fds) {
+        record_fd_pair(arg1cage, primary_fds[0], secondary_fds[0]);
+        record_fd_pair(arg1cage, primary_fds[1], secondary_fds[1]);
+    }
 
     secondary_log!(
         "{}\tCage={}\tPrimary={}\tSecondary={}\tArgs={}, ArgCage={}",
