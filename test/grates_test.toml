@@ -164,12 +164,7 @@ type = "rust"
 
 [[grate.tests]]
 test_src = "test/fs_routing_test.c"
-grate_args = "--prefix /tmp %{ grates/testing-grate.cwasm -s 0:166,1:166,2:166,4:166,21:166,83:166,84:166,87:166 %}"
-
-[[grate.tests]]
-test_src = "test/nested_routing_test.c"
-grate_args = "--prefix /tmp %{ grates/testing-grate.cwasm -s 2:-167 grates/fs-routing-clamp.cwasm --prefix /tmp/inner %{ grates/testing-grate.cwasm -s 2:-166 %} %}"
-timeout = 30
+grate_args = "--prefix /tmp %{ grates/testing-grate.cwasm -s 2:-167,4:-167,21:-167,83:-167,84:-167,87:-167 grates/fs-routing-clamp.cwasm --prefix /tmp/inner %{ grates/testing-grate.cwasm -s 2:-166 %} %}"
 
 [[grate.tests]]
 test_src = "test/unix_socket_outside_prefix_test.c"

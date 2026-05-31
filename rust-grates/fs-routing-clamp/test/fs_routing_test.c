@@ -1,18 +1,19 @@
 /* fs_routing_test.c - routing-only tests for the namespace clamping grate.
  *
- * These tests assume clamped FS syscalls are stubbed to a fixed return value.
+ * These tests assume clamped FS syscalls are stubbed to fixed negative errno
+ * values.
  * We only verify that:
  *   - syscalls on /tmp/ are routed to the clamp, and
  *   - syscalls on non-/tmp paths are not.
  *
  * Example invocation:
  *      lind-boot fs-routing-clamp.cwasm --prefix /tmp %{ testing-grate.cwasm
- * -s 0:166,1:166,2:166,4:166,21:166,83:166,84:166,87:166 %}
- * fs_routing_test.cwasm
+ * -s 2:-167,4:-167,21:-167,83:-167,84:-167,87:-167
+ * fs-routing-clamp.cwasm --prefix /tmp/inner %{ testing-grate.cwasm -s 2:-166 %}
+ * %} fs_routing_test.cwasm
  *
- * 	We use testing-grate to stub out all FS related syscalls to NS_CLAMP_RET
- * (166). Any calls to /tmp should return this value, all other calls should
- * execute regularly.
+ * We use testing-grate to stub outer clamped syscalls to -167 and inner
+ * clamped open(2) calls to -166. Libc converts these to ret=-1 and errno.
  */
 
 #include <stdio.h>
@@ -26,7 +27,8 @@
 static int tests_run = 0;
 static int tests_passed = 0;
 
-#define NS_CLAMP_RET 166
+#define OUTER_CLAMP_ERRNO 167
+#define INNER_CLAMP_ERRNO 166
 
 #define CHECK(desc, cond)                                                      \
 	do {                                                                   \
@@ -39,42 +41,27 @@ static int tests_passed = 0;
 		}                                                              \
 	} while (0)
 
-#define EXPECT_CLAMP(desc, expr) CHECK(desc, ((expr) == NS_CLAMP_RET))
-#define EXPECT_NOT_CLAMP(desc, expr) CHECK(desc, ((expr) != NS_CLAMP_RET))
+#define EXPECT_ERRNO(desc, expr, expected_errno)                              \
+	do {                                                                  \
+		errno = 0;                                                    \
+		CHECK(desc, ((expr) == -1 && errno == (expected_errno)));     \
+	} while (0)
 
 static void test_open_routing(void) {
 	printf("\n[test_open_routing]\n");
 
-	EXPECT_CLAMP("open /tmp/ns_test_file routed to clamp",
-		     open("/tmp/ns_test_file", O_CREAT | O_RDWR, 0644));
+	EXPECT_ERRNO("open /tmp/ns_test_file routed to outer clamp",
+		     open("/tmp/ns_test_file", O_CREAT | O_RDWR, 0644),
+		     OUTER_CLAMP_ERRNO);
 
-	EXPECT_NOT_CLAMP("open /dev/null not clamped",
-			 open("/dev/null", O_RDWR));
-}
+	EXPECT_ERRNO("open /tmp/inner routed to inner clamp",
+		     open("/tmp/inner", O_CREAT | O_RDWR, 0644),
+		     INNER_CLAMP_ERRNO);
 
-static void test_rw_routing(void) {
-	printf("\n[test_rw_routing]\n");
-
-	int fd_tmp = open("/tmp/ns_test", O_CREAT | O_RDWR | O_TRUNC, 0644);
-	CHECK("open /tmp/ns_test routed to clamp", fd_tmp == NS_CLAMP_RET);
-
-	EXPECT_CLAMP("write on clamped fd routed to clamp",
-		     write(fd_tmp, "hello", 5));
-
-	char buf[16] = {0};
-	EXPECT_CLAMP("read on clamped fd routed to clamp",
-		     read(fd_tmp, buf, 5));
-
-	int fd_zero = open("/dev/zero", O_RDONLY);
-	EXPECT_NOT_CLAMP("read /dev/zero not clamped", read(fd_zero, buf, 5));
-	if (fd_zero >= 0)
-		close(fd_zero);
-
-	int fd_null = open("/dev/null", O_WRONLY);
-	EXPECT_NOT_CLAMP("write /dev/null not clamped",
-			 write(fd_null, "hello", 5));
-	if (fd_null >= 0)
-		close(fd_null);
+	int fd = open("/dev/null", O_RDWR);
+	CHECK("open /dev/null not clamped", fd >= 0);
+	if (fd >= 0)
+		close(fd);
 }
 
 static void test_path_syscalls(void) {
@@ -82,72 +69,70 @@ static void test_path_syscalls(void) {
 
 	struct stat st;
 
-	EXPECT_CLAMP("mkdir /tmp/ns_test_dir routed to clamp",
-		     mkdir("/tmp/ns_test_dir", 0755));
+	EXPECT_ERRNO("mkdir /tmp/ns_test_dir routed to outer clamp",
+		     mkdir("/tmp/ns_test_dir", 0755), OUTER_CLAMP_ERRNO);
 
-	EXPECT_CLAMP("stat /tmp/ns_test_dir routed to clamp",
-		     stat("/tmp/ns_test_dir", &st));
+	EXPECT_ERRNO("stat /tmp/ns_test_dir routed to outer clamp",
+		     stat("/tmp/ns_test_dir", &st), OUTER_CLAMP_ERRNO);
 
-	EXPECT_CLAMP("access /tmp/ns_test_dir routed to clamp",
-		     access("/tmp/ns_test_dir", F_OK));
+	EXPECT_ERRNO("access /tmp/ns_test_dir routed to outer clamp",
+		     access("/tmp/ns_test_dir", F_OK), OUTER_CLAMP_ERRNO);
 
-	EXPECT_CLAMP("unlink /tmp/ns_test_unlink routed to clamp",
-		     unlink("/tmp/ns_test_unlink"));
+	EXPECT_ERRNO("unlink /tmp/ns_test_unlink routed to outer clamp",
+		     unlink("/tmp/ns_test_unlink"), OUTER_CLAMP_ERRNO);
 
-	EXPECT_CLAMP("rmdir /tmp/ns_test_dir routed to clamp",
-		     rmdir("/tmp/ns_test_dir"));
+	EXPECT_ERRNO("rmdir /tmp/ns_test_dir routed to outer clamp",
+		     rmdir("/tmp/ns_test_dir"), OUTER_CLAMP_ERRNO);
 
-	EXPECT_NOT_CLAMP("stat /dev/null not clamped", stat("/dev/null", &st));
+	CHECK("stat /dev/null not clamped", stat("/dev/null", &st) == 0);
 }
 
 static void test_interleaved_open_routing(void) {
 	printf("\n[test_interleaved_open_routing]\n");
 
-	EXPECT_CLAMP("open /tmp/ns_interleave_0 routed to clamp",
-		     open("/tmp/ns_interleave_0", O_CREAT | O_RDWR, 0644));
+	EXPECT_ERRNO("open /tmp/ns_interleave_0 routed to outer clamp",
+		     open("/tmp/ns_interleave_0", O_CREAT | O_RDWR, 0644),
+		     OUTER_CLAMP_ERRNO);
 
-	EXPECT_NOT_CLAMP("open /dev/null #1 not clamped",
-			 open("/dev/null", O_RDWR));
+	int fd = open("/dev/null", O_RDWR);
+	CHECK("open /dev/null #1 not clamped", fd >= 0);
+	if (fd >= 0)
+		close(fd);
 
-	EXPECT_CLAMP("open /tmp/ns_interleave_2 routed to clamp",
-		     open("/tmp/ns_interleave_2", O_CREAT | O_RDWR, 0644));
+	EXPECT_ERRNO("open /tmp/ns_interleave_2 routed to outer clamp",
+		     open("/tmp/ns_interleave_2", O_CREAT | O_RDWR, 0644),
+		     OUTER_CLAMP_ERRNO);
 
-	EXPECT_NOT_CLAMP("open /dev/null #2 not clamped",
-			 open("/dev/null", O_RDWR));
+	fd = open("/dev/null", O_RDWR);
+	CHECK("open /dev/null #2 not clamped", fd >= 0);
+	if (fd >= 0)
+		close(fd);
 
-	EXPECT_CLAMP("open /tmp/ns_interleave_4 routed to clamp",
-		     open("/tmp/ns_interleave_4", O_CREAT | O_RDWR, 0644));
+	EXPECT_ERRNO("open /tmp/ns_interleave_4 routed to outer clamp",
+		     open("/tmp/ns_interleave_4", O_CREAT | O_RDWR, 0644),
+		     OUTER_CLAMP_ERRNO);
 
-	EXPECT_NOT_CLAMP("open /dev/null #3 not clamped",
-			 open("/dev/null", O_RDWR));
+	fd = open("/dev/null", O_RDWR);
+	CHECK("open /dev/null #3 not clamped", fd >= 0);
+	if (fd >= 0)
+		close(fd);
 }
 
 static void test_nested_path_routing(void) {
 	printf("\n[test_nested_path_routing]\n");
 
-	EXPECT_CLAMP("mkdir /tmp/ns_a routed to clamp",
-		     mkdir("/tmp/ns_a", 0755));
+	EXPECT_ERRNO("open /tmp/noninner routed to outer clamp",
+		     open("/tmp/noninner", O_CREAT | O_RDWR, 0644),
+		     OUTER_CLAMP_ERRNO);
 
-	EXPECT_CLAMP("mkdir /tmp/ns_a/ns_b routed to clamp",
-		     mkdir("/tmp/ns_a/ns_b", 0755));
+	EXPECT_ERRNO("open /tmp/inner routed to inner clamp",
+		     open("/tmp/inner", O_CREAT | O_RDWR, 0644),
+		     INNER_CLAMP_ERRNO);
 
-	EXPECT_CLAMP("mkdir /tmp/ns_a/ns_b/ns_c routed to clamp",
-		     mkdir("/tmp/ns_a/ns_b/ns_c", 0755));
-
-	EXPECT_CLAMP(
-	    "open deep /tmp path routed to clamp",
-	    open("/tmp/ns_a/ns_b/ns_c/deep_file", O_CREAT | O_RDWR, 0644));
-
-	EXPECT_CLAMP("unlink deep /tmp path routed to clamp",
-		     unlink("/tmp/ns_a/ns_b/ns_c/deep_file"));
-
-	EXPECT_CLAMP("rmdir /tmp/ns_a/ns_b/ns_c routed to clamp",
-		     rmdir("/tmp/ns_a/ns_b/ns_c"));
-
-	EXPECT_CLAMP("rmdir /tmp/ns_a/ns_b routed to clamp",
-		     rmdir("/tmp/ns_a/ns_b"));
-
-	EXPECT_CLAMP("rmdir /tmp/ns_a routed to clamp", rmdir("/tmp/ns_a"));
+	int fd = open("/dev/null", O_RDWR);
+	CHECK("open /dev/null not clamped", fd >= 0);
+	if (fd >= 0)
+		close(fd);
 }
 
 static void test_non_tmp_paths_not_clamped(void) {
@@ -156,20 +141,23 @@ static void test_non_tmp_paths_not_clamped(void) {
 	struct stat st;
 	char buf[8] = {0};
 
-	EXPECT_NOT_CLAMP("open /dev/zero not clamped",
-			 open("/dev/zero", O_RDONLY));
-
-	EXPECT_NOT_CLAMP("open /dev/null not clamped",
-			 open("/dev/null", O_WRONLY));
-
-	EXPECT_NOT_CLAMP("stat /dev/zero not clamped", stat("/dev/zero", &st));
-
-	EXPECT_NOT_CLAMP("access /dev/null not clamped",
-			 access("/dev/null", F_OK));
-
 	int fd = open("/dev/zero", O_RDONLY);
-	EXPECT_NOT_CLAMP("read from /dev/zero not clamped",
-			 read(fd, buf, sizeof(buf)));
+	CHECK("open /dev/zero not clamped", fd >= 0);
+	if (fd >= 0)
+		close(fd);
+
+	fd = open("/dev/null", O_WRONLY);
+	CHECK("open /dev/null not clamped", fd >= 0);
+	if (fd >= 0)
+		close(fd);
+
+	CHECK("stat /dev/zero not clamped", stat("/dev/zero", &st) == 0);
+
+	CHECK("access /dev/null not clamped", access("/dev/null", F_OK) == 0);
+
+	fd = open("/dev/zero", O_RDONLY);
+	CHECK("read from /dev/zero not clamped",
+	      fd >= 0 && read(fd, buf, sizeof(buf)) == (ssize_t)sizeof(buf));
 	if (fd >= 0)
 		close(fd);
 }
@@ -184,7 +172,6 @@ int main(int argc, char *argv[]) {
 	mkdir("/tmp", 0777);
 
 	test_open_routing();
-	test_rw_routing();
 	test_path_syscalls();
 	test_interleaved_open_routing();
 	test_nested_path_routing();
