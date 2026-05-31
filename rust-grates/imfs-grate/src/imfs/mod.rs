@@ -62,6 +62,10 @@ pub struct FsData {
 
 const DIRENT64_FIXED_SIZE: usize = 8 + 8 + 2 + 1;
 const IMFS_BLOCK_SIZE: i32 = 512;
+// stat.st_blksize: preferred I/O size that glibc stdio sizes its buffer to.
+// Too small truncates seek-heavy buffered writers (e.g. GNU as). Distinct from
+// IMFS_BLOCK_SIZE, the POSIX-fixed 512-byte unit for st_blocks.
+const IMFS_PREFERRED_IO_SIZE: i32 = 4096;
 const LIND_AT_FDCWD: i32 = -100;
 const LIND_AT_NO_AUTOMOUNT: i32 = 0x800;
 const LIND_AT_EMPTY_PATH: i32 = 0x1000;
@@ -529,7 +533,7 @@ impl ImfsState {
             st_gid: node.group,
             st_rdev: 0,
             st_size: node.total_size as u64,
-            st_blksize: IMFS_BLOCK_SIZE,
+            st_blksize: IMFS_PREFERRED_IO_SIZE,
             st_blocks: (node.total_size / IMFS_BLOCK_SIZE as usize) as u32,
             st_atim: node.atime.as_stat_pair(),
             st_mtim: node.mtime.as_stat_pair(),
