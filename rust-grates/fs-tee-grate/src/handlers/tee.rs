@@ -157,6 +157,10 @@ pub fn tee_dispatch(
 ///
 /// This is used for calls such as `open`, `dup*`, and `pipe*`.
 fn record_fd_pair(cage_id: u64, primary_result: i32, secondary_result: i32) {
+    if primary_result < 0 || secondary_result < 0 {
+        return;
+    }
+
     let _ = fdtables::get_specific_virtual_fd(
         cage_id,
         primary_result as u64,   // virtual fd in primary chain
