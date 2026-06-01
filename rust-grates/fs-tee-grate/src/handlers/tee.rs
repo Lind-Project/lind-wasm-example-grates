@@ -310,16 +310,20 @@ pub extern "C" fn tee_fork(
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
     // Forward the clone to the primary runtime first.
-    let child_cage_id = do_syscall(arg1cage, SYS_CLONE, &args, &arg_cages) as u64;
+    let child_cage_id = do_syscall(arg1cage, SYS_CLONE, &args, &arg_cages);
+
+    if child_cage_id < 0 {
+        return child_cage_id;
+    }
 
     if !is_thread_clone(arg1, arg1cage) {
         // Real process forks need a copied FD table and tee route table in the child.
-        let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
-        copy_route_table(arg1cage, child_cage_id);
+        let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id as u64);
+        copy_route_table(arg1cage, child_cage_id as u64);
     }
 
     // Preserve the primary fork return value so the secondary stack can report the same result.
-    with_tee(|s| s.fork_return = child_cage_id);
+    with_tee(|s| s.fork_return = child_cage_id as u64);
 
     let secondary_entry = with_tee(|s| s.secondary_entry);
     let secondary = with_tee(|s| {
