@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -ou pipefail
+set -eou pipefail
 
 lind_compile -s test/exerciser.c
 
