@@ -1,8 +1,8 @@
 use crate::helpers;
 use grate_rs::constants::error::{EBADF, EINVAL, EMFILE};
-use grate_rs::constants::fs::{F_DUPFD, F_DUPFD_CLOEXEC, F_SETFD, FD_CLOEXEC, O_CLOEXEC};
+use grate_rs::constants::fs::{FD_CLOEXEC, F_DUPFD, F_DUPFD_CLOEXEC, F_SETFD, O_CLOEXEC};
 use grate_rs::constants::mman::MAP_ANON;
-use grate_rs::{SyscallHandler, constants::*, copy_data_between_cages, getcageid, is_thread_clone};
+use grate_rs::{constants::*, copy_data_between_cages, getcageid, is_thread_clone, SyscallHandler};
 
 const AT_FDCWD_I64: i64 = -100;
 
@@ -923,7 +923,7 @@ pub extern "C" fn ns_fcntl_handler(
     };
 
     args[0] = old_fd_entry.underfd; // replace virtual fd with underfd for the syscall
-    // arg_cages[0] = cageid;
+                                    // arg_cages[0] = cageid;
 
     let ret = helpers::do_syscall(arg1cage, nr, &args, &arg_cages);
 
