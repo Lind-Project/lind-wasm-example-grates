@@ -481,7 +481,7 @@ pub extern "C" fn tee_dup(
         (s.secondary_entry, route_entry.secondary_alt)
     });
 
-    let cage_id = arg2cage;
+    let cage_id = arg1cage;
     let primary_result = do_syscall(arg1cage, SYS_DUP, &args, &arg_cages);
 
     let secondary_result = match translate_secondary_fd(cage_id, args[0]) {
@@ -537,7 +537,7 @@ pub extern "C" fn tee_dup2(
         (s.secondary_entry, route_entry.secondary_alt)
     });
 
-    let cage_id = arg2cage;
+    let cage_id = arg1cage;
     let primary_result = do_syscall(arg1cage, SYS_DUP2, &args, &arg_cages);
 
     let secondary_result = match translate_secondary_fd(cage_id, args[0]) {
@@ -594,7 +594,7 @@ pub extern "C" fn tee_fcntl(
         (s.secondary_entry, route_entry.secondary_alt)
     });
 
-    let cage_id = arg2cage;
+    let cage_id = arg1cage;
     let primary_result = do_syscall(arg1cage, SYS_FCNTL, &args, &arg_cages);
 
     let secondary_result = match translate_secondary_fd(cage_id, args[0]) {
@@ -652,7 +652,7 @@ pub extern "C" fn tee_dup3(
         (s.secondary_entry, route_entry.secondary_alt)
     });
 
-    let cage_id = arg2cage;
+    let cage_id = arg1cage;
     let primary_result = do_syscall(arg1cage, SYS_DUP3, &args, &arg_cages);
 
     let secondary_result = match translate_secondary_fd(cage_id, args[0]) {
