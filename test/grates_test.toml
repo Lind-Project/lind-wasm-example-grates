@@ -82,6 +82,17 @@ type = "rust"
 [[grate.tests]]
 test_src = "test/readonly-grate-test.c"
 
+# ── fchmod (Rust) ───────────────────────────────────────────────────
+
+[[grate]]
+name = "fchmod-grate"
+dir = "fchmod-grate"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/fchmod-test.c"
+grate_args = ["--mask", "644"]
+
 # ── Seccomp (C) — whitelist config ──────────────────────────────────
 
 [[grate]]
