@@ -248,7 +248,7 @@ for gi in "${!G_NAMES[@]}"; do
     gskip="${G_SKIPS[$gi]}"
     BUILD_OK[$gi]=0
 
-    if [[ -n "$FILTER" && "$FILTER" != "$gname" && "$FILTER" != "$gdir" ]]; then
+    if [[ -n "$FILTER" && "$FILTER" != "$gname" && "$FILTER" != "$gdir" && "$FILTER" != "$gtype/$gdir" ]]; then
         continue
     fi
 
@@ -356,7 +356,7 @@ for gi in "${!G_NAMES[@]}"; do
     gtype="${G_TYPES[$gi]}"
     gskip="${G_SKIPS[$gi]}"
 
-    if [[ -n "$FILTER" && "$FILTER" != "$gname" && "$FILTER" != "$gdir" ]]; then
+    if [[ -n "$FILTER" && "$FILTER" != "$gname" && "$FILTER" != "$gdir" && "$FILTER" != "$gtype/$gdir" ]]; then
         continue
     fi
 

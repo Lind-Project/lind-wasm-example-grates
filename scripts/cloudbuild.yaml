@@ -9,6 +9,38 @@ options:
   substitution_option: ALLOW_LOOSE
 
 steps:
+  - name: "gcr.io/cloud-builders/git"
+    id: Detect Changed Grates
+    entrypoint: bash
+    env:
+      - "BASE_BRANCH=${_BASE_BRANCH}"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+
+        : > .changed-grates
+
+        if [[ -z "$${BASE_BRANCH}" ]]; then
+          echo "No PR base branch; the full suite will run."
+          exit 0
+        fi
+
+        git fetch --no-tags --unshallow origin \
+          "+refs/heads/$${BASE_BRANCH}:refs/remotes/origin/$${BASE_BRANCH}" || \
+          git fetch --no-tags origin \
+          "+refs/heads/$${BASE_BRANCH}:refs/remotes/origin/$${BASE_BRANCH}"
+
+        bash scripts/detect_changed_grates.sh "origin/$${BASE_BRANCH}" \
+          > .changed-grates
+
+        if [[ -s .changed-grates ]]; then
+          echo "Changed grates:"
+          cat .changed-grates
+        else
+          echo "No specific grate detected; the full suite will run."
+        fi
+
   - name: "gcr.io/cloud-builders/docker"
     id: Build And Test
     entrypoint: bash
@@ -22,19 +54,19 @@ steps:
       - |
         set -euo pipefail
 
-        branch="${HEAD_BRANCH:-${BRANCH_NAME:-unknown}}"
-        commit="${COMMIT_SHA:-}"
+        branch="$${HEAD_BRANCH:-$${BRANCH_NAME:-unknown}}"
+        commit="$${COMMIT_SHA:-}"
 
         # Write outputs outside /workspace.
         out=/tmp/grates-out
-        rm -rf "${out}"
+        rm -rf "$${out}"
 
         # --output type=local requires the docker-container driver.
         docker buildx create --use --name cbuilder --driver docker-container \
           || docker buildx use cbuilder
         docker buildx inspect --bootstrap
 
-        echo "Testing branch=${branch} commit=${commit:-<none>}"
+        echo "Testing branch=$${branch} commit=$${commit:-<none>}"
 
         # The Dockerfile's test stage catches make failures and records the outcome in e2e_status.
         if ! docker buildx build \
@@ -42,29 +74,29 @@ steps:
           --progress=plain \
           --pull \
           --target artifacts \
-          --build-arg BRANCH_NAME="${branch}" \
-          --build-arg COMMIT_SHA="${commit}" \
-          --output type=local,dest="${out}" \
+          --build-arg BRANCH_NAME="$${branch}" \
+          --build-arg COMMIT_SHA="$${commit}" \
+          --output type=local,dest="$${out}" \
           .; then
           echo "Build failed before the test stage could run."
           exit 1
         fi
 
-        if [[ ! -f "${out}/e2e_status" ]]; then
+        if [[ ! -f "$${out}/e2e_status" ]]; then
           echo "e2e_status was not produced. Check the artifacts stage."
           exit 1
         fi
 
         echo "===== test summary ====="
-        cat "${out}/test-artifacts/test-summary.txt" || true
+        cat "$${out}/test-artifacts/test-summary.txt" || true
         echo "========================"
 
-        status="$(tr -d '\r\n' < "${out}/e2e_status")"
-        echo "e2e_status: ${status}"
+        status="$$(tr -d '\r\n' < "$${out}/e2e_status")"
+        echo "e2e_status: $${status}"
 
-        if [[ "${status}" != "E2E_STATUS=pass" ]]; then
+        if [[ "$${status}" != "E2E_STATUS=pass" ]]; then
           echo "===== make-test.log (last 200 lines) ====="
-          tail -n 200 "${out}/test-artifacts/make-test.plain.log" || true
+          tail -n 200 "$${out}/test-artifacts/make-test.plain.log" || true
           echo "=========================================="
           echo "One or more grate tests failed. See the summary above for the"
           echo "full pass/fail breakdown, and the log tail for details."

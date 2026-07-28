@@ -35,7 +35,16 @@ FROM source AS test
 ENV LIND_WASM_ROOT=/home/lind/lind-wasm
 WORKDIR /home/lind/lind-wasm-example-grates
 
-RUN if make test 2>&1 | tee /home/lind/e2e-artifacts/make-test.log; then \
+RUN if { \
+        if [[ -s .changed-grates ]]; then \
+            while IFS= read -r grate; do \
+                echo "Testing ${grate}"; \
+                make test GRATE="${grate}" || exit $?; \
+            done < .changed-grates; \
+        else \
+            make test; \
+        fi; \
+    } 2>&1 | tee /home/lind/e2e-artifacts/make-test.log; then \
         echo "E2E_STATUS=pass" > /home/lind/e2e_status; \
     else \
         status=$?; \

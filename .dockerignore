@@ -1,0 +1,4 @@
+.git
+**/grates
+**/output
+**/target
