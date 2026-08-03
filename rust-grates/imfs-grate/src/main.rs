@@ -7,6 +7,8 @@
 //!
 //! Environment variables:
 //!   PRELOADS — colon-separated list of host files to load into IMFS at startup.
+//!     Each entry is a path, or `imfs_path=host_path` to load into a
+//!     different IMFS path.
 
 mod handlers;
 mod imfs;
@@ -158,30 +160,41 @@ fn main() {
 
 /// Load files from the host filesystem into IMFS.
 ///
-/// The PRELOADS env var is a colon-separated list of paths.
-/// Each file is read from the host and written into IMFS at the same path,
-/// creating parent directories as needed.
+/// The PRELOADS env var is a colon-separated list of entries. Each entry is
+/// either a bare path, loaded into IMFS at the same path, or
+/// `imfs_path=host_path` (mirroring the DUMPS format), which reads the file
+/// from `host_path` and writes it into IMFS at `imfs_path`. Parent
+/// directories are created as needed.
 fn load_preloads(preloads: &str) {
     // Preload/dump utilities use IMFS cage 0 because they run before any
     // application cage exists. Initialize its fd table once for all utility I/O.
     init_utility_cage();
 
-    for path in preloads.split(':') {
-        if path.is_empty() {
+    for entry in preloads.split(':') {
+        if entry.is_empty() {
             continue;
         }
 
-        log!("preloading: {}", path);
+        let (imfs_path, host_path) = match entry.split_once('=') {
+            Some((imfs_path, host_path)) => (imfs_path, host_path),
+            None => (entry, entry),
+        };
 
-        if !preload_is_regular_file(path) {
+        if imfs_path.is_empty() || host_path.is_empty() {
+            continue;
+        }
+
+        log!("preloading: {} -> {}", host_path, imfs_path);
+
+        if !preload_is_regular_file(host_path) {
             continue;
         }
 
         // Read the file from the host filesystem through 3i, bypassing IMFS.
-        let data = match read_preload_file(path) {
+        let data = match read_preload_file(host_path) {
             Ok(d) => d,
             Err(e) => {
-                log!("failed to read {}: {}", path, e);
+                log!("failed to read {}: {}", host_path, e);
                 continue;
             }
         };
@@ -189,19 +202,19 @@ fn load_preloads(preloads: &str) {
         imfs::with_imfs(|state| {
             // Create parent directories.
             let mut dir_path = String::new();
-            for component in path.split('/').filter(|s| !s.is_empty()) {
+            for component in imfs_path.split('/').filter(|s| !s.is_empty()) {
                 dir_path.push('/');
                 dir_path.push_str(component);
 
                 // Try to create as directory — will fail silently if it exists or
                 // if this is the final component (a file).
-                if dir_path != path {
+                if dir_path != imfs_path {
                     let _ = state.mkdir(0, &dir_path, 0o755);
                 }
             }
 
             // Create and write the file.
-            let fd = state.open(0, path, fs::O_CREAT | fs::O_WRONLY, 0o777);
+            let fd = state.open(0, imfs_path, fs::O_CREAT | fs::O_WRONLY, 0o777);
             if fd >= 0 {
                 state.write(0, fd as u64, &data);
                 state.close(0, fd as u64);

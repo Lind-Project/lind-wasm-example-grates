@@ -26,8 +26,14 @@ lind_run grates/imfs-grate.cwasm --log <program> [args...]
 
 ## Preloading Host Files
 
-Set `PRELOADS` to a colon-separated list of host paths. Each regular file is
-read from the host and created in IMFS at the same path.
+Set `PRELOADS` to a colon-separated list of entries. A bare path is read from
+the host and created in IMFS at the same path. An `imfs_path=host_path` entry
+(same with the `DUMPS` format) reads `host_path` from the host and creates it
+in IMFS at `imfs_path`:
+
+```bash
+--env PRELOADS="/hello.c=/home/alice/lind-wasm/lindfs/hello.c"
+```
 
 ```bash
 lind_run \
@@ -134,7 +140,6 @@ errno where possible.
 
 ## Current Limitations
 
-- `PRELOADS` does not yet support `source=target` remapping.
 - Preloaded paths are stored in IMFS using the path string provided.
 - Large preload files are still accumulated in memory before being written into
   IMFS; the host read path is chunked, but the temporary buffer is a `Vec<u8>`.
