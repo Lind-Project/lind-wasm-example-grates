@@ -1,13 +1,11 @@
 # Weekly full-suite CI for lind-wasm-example-grates
 #
-# Invoked by a Manual trigger that Cloud Scheduler fires every Friday at 07:00
-# America/New_York. Runs the complete test suite, publishes the result as a
-# GitHub pre-release, and reports pass/fail.
+# Invoked by a Manual trigger that Cloud Scheduler fires every Friday at 07:00 America/New_York. 
+# Runs the complete test suite, publishes the result as a GitHub pre-release, and reports pass/fail.
 #
 # Step layout:
 #   1. Build And Test   - runs the Dockerfile's test stage, writes to /workspace
-#   2. Publish Release  - creates or updates a date-tagged GitHub pre-release
-#                         and attaches the logs to it as release assets
+#   2. Publish Release  - creates or updates a date-tagged GitHub pre-release and attaches the logs to it as release assets
 #   3. Evaluate         - reads e2e_status and decides the build's pass/fail
 #
 # The pass/fail decision is deliberately the LAST step. The Dockerfile records
@@ -18,12 +16,6 @@
 # Step 2 never fails the build. A publishing problem (expired token, GitHub
 # outage) must not be reported as a test failure, so it exits 0 and explains
 # itself in the log.
-#
-# Step 2 also attaches the logs to the release. The Cloud Build console link
-# needs a GCP account with access to this project, which most readers of the
-# release page do not have. Release assets on a public repo need no login,
-# so they are the copy of the log that anyone can actually open.
-
 
 options:
   logging: CLOUD_LOGGING_ONLY
@@ -167,14 +159,11 @@ steps:
           echo "branch: \`$${branch}\`"
           echo "commit: \`$${commit}\`"
           echo
-          echo "Logs (no login required):"
+          echo "Logs files:"
           echo
           echo "- [make-test.log]($${asset_base}/make-test.log) - full test output"
           echo "- [test-summary.txt]($${asset_base}/test-summary.txt) - pass/fail breakdown"
           echo "- [revision.txt]($${asset_base}/revision.txt) - what was built"
-          echo
-          echo "Cloud Build log (requires access to GCP project \`$${PROJECT_ID}\`):"
-          echo "https://console.cloud.google.com/cloud-build/builds/$${BUILD_ID}?project=$${PROJECT_ID}"
         } > /workspace/release-body.md
 
         # Build the JSON payload in python so the summary text is escaped
