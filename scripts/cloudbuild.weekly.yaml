@@ -7,6 +7,7 @@
 # Step layout:
 #   1. Build And Test   - runs the Dockerfile's test stage, writes to /workspace
 #   2. Publish Release  - creates or updates a date-tagged GitHub pre-release
+#                         and attaches the logs to it as release assets
 #   3. Evaluate         - reads e2e_status and decides the build's pass/fail
 #
 # The pass/fail decision is deliberately the LAST step. The Dockerfile records
@@ -18,9 +19,11 @@
 # outage) must not be reported as a test failure, so it exits 0 and explains
 # itself in the log.
 #
-# Shell variables are written as $$VAR. Cloud Build resolves $VAR itself before
-# handing the script to bash, so the extra $ is what keeps bash's expansion
-# intact. Cloud Build values reach the script through env: instead.
+# Step 2 also attaches the logs to the release. The Cloud Build console link
+# needs a GCP account with access to this project, which most readers of the
+# release page do not have. Release assets on a public repo need no login,
+# so they are the copy of the log that anyone can actually open.
+
 
 options:
   logging: CLOUD_LOGGING_ONLY
@@ -102,6 +105,22 @@ steps:
 
         out=/workspace/out
         api=https://api.github.com
+        # Asset uploads use a different host than the rest of the REST API.
+        uploads=https://uploads.github.com
+
+        # Files attached to the release so the full log is readable without a
+        # GCP account. Parallel arrays: source path on the left, the name the
+        # asset gets on the release page on the right.
+        asset_srcs=(
+          "$${out}/test-artifacts/make-test.plain.log"
+          "$${out}/test-artifacts/test-summary.txt"
+          "$${out}/test-artifacts/revision.txt"
+        )
+        asset_names=(
+          "make-test.log"
+          "test-summary.txt"
+          "revision.txt"
+        )
 
         # Every early exit goes through here so the reason lands in the log.
         skip() { echo "Publish skipped: $$1"; exit 0; }
@@ -132,7 +151,12 @@ steps:
 
         tag="$(date -u +%Y-%m-%d)"
 
-        # Body: the summary verbatim, then the commit and build log needed to
+        # Asset download URLs follow a fixed pattern that depends only on the
+        # tag and the file name, so the body can link them before the upload
+        # happens. On a public repo these links need no login at all.
+        asset_base="https://github.com/$${GITHUB_REPO}/releases/download/$${tag}"
+
+        # Body: the summary verbatim, then the commit and the logs needed to
         # trace this result back. The base image is always lind-wasm-dev:latest;
         # see the pipeline docs.
         {
@@ -142,7 +166,15 @@ steps:
           echo
           echo "branch: \`$${branch}\`"
           echo "commit: \`$${commit}\`"
-          echo "build log: https://console.cloud.google.com/cloud-build/builds/$${BUILD_ID}?project=$${PROJECT_ID}"
+          echo
+          echo "Logs (no login required):"
+          echo
+          echo "- [make-test.log]($${asset_base}/make-test.log) - full test output"
+          echo "- [test-summary.txt]($${asset_base}/test-summary.txt) - pass/fail breakdown"
+          echo "- [revision.txt]($${asset_base}/revision.txt) - what was built"
+          echo
+          echo "Cloud Build log (requires access to GCP project \`$${PROJECT_ID}\`):"
+          echo "https://console.cloud.google.com/cloud-build/builds/$${BUILD_ID}?project=$${PROJECT_ID}"
         } > /workspace/release-body.md
 
         # Build the JSON payload in python so the summary text is escaped
@@ -192,15 +224,70 @@ steps:
             -d @/workspace/release-payload.json)"
         fi
 
-        if [[ "$${code}" == 2* ]]; then
-          url="$(python3 -c 'import sys,json; print(json.load(sys.stdin).get("html_url",""))' \
-            < /workspace/release-response.json 2>/dev/null)"
-          echo "Published: $${url}"
-        else
+        if [[ "$${code}" != 2* ]]; then
           echo "GitHub returned HTTP $${code}. The test result below still stands."
           head -c 2000 /workspace/release-response.json || true
           echo
+          exit 0
         fi
+
+        url="$(python3 -c 'import sys,json; print(json.load(sys.stdin).get("html_url",""))' \
+          < /workspace/release-response.json 2>/dev/null)"
+        echo "Published: $${url}"
+
+        # The create path has no release id yet; read it back from the response.
+        if [[ -z "$${release_id}" ]]; then
+          release_id="$(python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))' \
+            < /workspace/release-response.json 2>/dev/null)"
+        fi
+        [[ -n "$${release_id}" ]] || skip "release id could not be resolved, so no assets were attached."
+
+        # Attach one file. A same-day rerun would collide on the asset name,
+        # so any existing asset with that name is removed first. Failures here
+        # are logged and ignored - a missing attachment must not read as a
+        # failed test.
+        upload_asset() {
+          local src="$$1"
+          local name="$$2"
+
+          if [[ ! -f "$${src}" ]]; then
+            echo "asset $${name}: source $${src} not found, skipping."
+            return 0
+          fi
+
+          local old_id
+          old_id="$(curl -sS "$${auth[@]}" \
+            "$${api}/repos/$${GITHUB_REPO}/releases/$${release_id}/assets?per_page=100" \
+            | python3 -c 'import sys,json; n=sys.argv[1]; print(next((str(a["id"]) for a in json.load(sys.stdin) if a.get("name")==n),""))' \
+              "$${name}" 2>/dev/null)"
+
+          if [[ -n "$${old_id}" ]]; then
+            curl -sS -o /dev/null -w "asset $${name}: delete old HTTP %{http_code}\n" \
+              -X DELETE "$${auth[@]}" \
+              "$${api}/repos/$${GITHUB_REPO}/releases/assets/$${old_id}"
+          fi
+
+          # text/plain so browsers have a chance of showing it inline instead
+          # of forcing a download. Either way the file is publicly readable.
+          local up_code
+          up_code="$(curl -sS -o /workspace/asset-response.json -w '%{http_code}' \
+            -X POST "$${auth[@]}" \
+            -H "Content-Type: text/plain" \
+            --data-binary @"$${src}" \
+            "$${uploads}/repos/$${GITHUB_REPO}/releases/$${release_id}/assets?name=$${name}")"
+
+          if [[ "$${up_code}" == 2* ]]; then
+            echo "asset $${name}: uploaded ($$(wc -c < "$${src}") bytes)."
+          else
+            echo "asset $${name}: upload failed with HTTP $${up_code}."
+            head -c 500 /workspace/asset-response.json || true
+            echo
+          fi
+        }
+
+        for i in "$${!asset_srcs[@]}"; do
+          upload_asset "$${asset_srcs[$$i]}" "$${asset_names[$$i]}"
+        done
 
   - name: "gcr.io/cloud-builders/gcloud"
     id: Evaluate
@@ -240,4 +327,3 @@ steps:
         fi
 
         echo "All tests passed."
-        
