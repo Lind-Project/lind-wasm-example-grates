@@ -5,7 +5,7 @@
 #
 # Step layout:
 #   1. Build And Test   - runs the Dockerfile's test stage, writes to /workspace
-#   2. Publish Release  - creates or updates a date-tagged GitHub pre-release and attaches the logs to it as release assets
+#   2. Publish Release  - creates or updates a date-tagged GitHub pre-release and attaches the logs to it as release assets, then notifies Slack
 #   3. Evaluate         - reads e2e_status and decides the build's pass/fail
 #
 # The pass/fail decision is deliberately the LAST step. The Dockerfile records
@@ -16,6 +16,18 @@
 # Step 2 never fails the build. A publishing problem (expired token, GitHub
 # outage) must not be reported as a test failure, so it exits 0 and explains
 # itself in the log.
+#
+# The Slack notification lives in step 2 for that same reason. The message is
+# deliberately result-neutral - it says the weekly run finished and links to
+# the release - so it does not need the pass/fail verdict and can be sent
+# before step 3 computes it. Because step 2 always reaches its end, the
+# notification goes out whether the tests passed or failed. Every early exit
+# notifies too, so a week where the release could not be published is still
+# visible in Slack instead of being silent.
+#
+# What Slack still cannot report: a failure in step 1, a build timeout, or a
+# cancellation, since step 2 never runs in those cases. Detecting a run that
+# never happened needs monitoring outside this build.
 
 options:
   logging: CLOUD_LOGGING_ONLY
@@ -29,6 +41,11 @@ availableSecrets:
   secretManager:
     - versionName: projects/x-micron-451502-m7/secrets/github-token-grates-ci/versions/latest
       env: GITHUB_TOKEN
+    # versions/latest, not a pinned version: moving the notification to a
+    # different Slack channel means adding a new secret version, and the next
+    # build should pick it up without a change to this file.
+    - versionName: projects/x-micron-451502-m7/secrets/slack-webhook-grates-ci/versions/latest
+      env: SLACK_WEBHOOK
 
 # The full suite is slower than a per-directory PR run, and ipc-grate is a
 # known timeout offender. 60 minutes leaves room without hanging all morning.
@@ -81,7 +98,7 @@ steps:
   - name: "gcr.io/cloud-builders/gcloud"
     id: Publish Release
     entrypoint: bash
-    secretEnv: ["GITHUB_TOKEN"]
+    secretEnv: ["GITHUB_TOKEN", "SLACK_WEBHOOK"]
     env:
       - "BRANCH_NAME=$BRANCH_NAME"
       - "COMMIT_SHA=$COMMIT_SHA"
@@ -114,8 +131,42 @@ steps:
           "revision.txt"
         )
 
-        # Every early exit goes through here so the reason lands in the log.
-        skip() { echo "Publish skipped: $$1"; exit 0; }
+        # Both are needed before the first early exit, because a skipped run
+        # still sends a Slack message that names the week and the repo.
+        tag="$(date -u +%Y-%m-%d)"
+        release_url="https://github.com/$${GITHUB_REPO}/releases/tag/$${tag}"
+
+        # Post one message to Slack. Never fails the step and never prints the
+        # webhook URL: anyone holding that URL can post to the channel, and
+        # this log is readable by everyone with access to the build.
+        notify_slack() {
+          if [[ -z "$${SLACK_WEBHOOK:-}" ]]; then
+            echo "Slack notification skipped: SLACK_WEBHOOK is empty."
+            return 0
+          fi
+
+          # python builds the payload so newlines and quotes in the text are
+          # escaped correctly.
+          local payload
+          payload="$(python3 -c 'import json,sys; print(json.dumps({"text": sys.argv[1]}))' "$$1")"
+
+          curl -sS -o /dev/null -w 'slack: HTTP %{http_code}\n' \
+            -X POST -H 'Content-Type: application/json' \
+            -d "$${payload}" "$${SLACK_WEBHOOK}" \
+            || echo "slack: request failed."
+        }
+
+        # Every early exit goes through here so the reason lands in the log and
+        # in Slack. A week that produced no release is still a week worth
+        # hearing about - silence would look identical to a healthy run.
+        skip() {
+          echo "Publish skipped: $$1"
+          notify_slack "$$(printf '%s\n%s\n%s' \
+            "Weekly grate test completed - $${tag}" \
+            "$${GITHUB_REPO}" \
+            "Release was not published: $$1")"
+          exit 0
+        }
 
         [[ -n "$${GITHUB_TOKEN:-}" ]] || skip "GITHUB_TOKEN is empty."
         [[ -f "$${out}/test-artifacts/test-summary.txt" ]] \
@@ -140,8 +191,6 @@ steps:
         fi
         [[ -n "$${commit}" ]] \
           || skip "could not resolve the head commit of $${branch}."
-
-        tag="$(date -u +%Y-%m-%d)"
 
         # Asset download URLs follow a fixed pattern that depends only on the
         # tag and the file name, so the body can link them before the upload
@@ -214,10 +263,10 @@ steps:
         fi
 
         if [[ "$${code}" != 2* ]]; then
-          echo "GitHub returned HTTP $${code}. The test result below still stands."
+          echo "The test result below still stands."
           head -c 2000 /workspace/release-response.json || true
           echo
-          exit 0
+          skip "GitHub returned HTTP $${code}."
         fi
 
         url="$(python3 -c 'import sys,json; print(json.load(sys.stdin).get("html_url",""))' \
@@ -229,7 +278,12 @@ steps:
           release_id="$(python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))' \
             < /workspace/release-response.json 2>/dev/null)"
         fi
-        [[ -n "$${release_id}" ]] || skip "release id could not be resolved, so no assets were attached."
+        # Past this point the release exists, so a problem here is no longer a
+        # publishing failure - it only costs the attachments. skip() would send
+        # the wrong Slack message, so this path just warns.
+        if [[ -z "$${release_id}" ]]; then
+          echo "release id could not be resolved, so no assets were attached."
+        fi
 
         # Attach one file. A same-day rerun would collide on the asset name,
         # so any existing asset with that name is removed first. Failures here
@@ -274,9 +328,19 @@ steps:
           fi
         }
 
-        for i in "$${!asset_srcs[@]}"; do
-          upload_asset "$${asset_srcs[$$i]}" "$${asset_names[$$i]}"
-        done
+        if [[ -n "$${release_id}" ]]; then
+          for i in "$${!asset_srcs[@]}"; do
+            upload_asset "$${asset_srcs[$$i]}" "$${asset_names[$$i]}"
+          done
+        fi
+
+        # Result-neutral by design. Whether the suite passed is not the weekly
+        # signal - that the run happened, and what changed, is. The release
+        # page carries the detail, and its assets are readable without a login.
+        notify_slack "$$(printf '%s\n%s\n%s' \
+          "Weekly grate test completed - $${tag}" \
+          "$${GITHUB_REPO}" \
+          "Results: $${release_url}")"
 
   - name: "gcr.io/cloud-builders/gcloud"
     id: Evaluate
@@ -316,3 +380,4 @@ steps:
         fi
 
         echo "All tests passed."
+        
