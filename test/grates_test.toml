@@ -16,6 +16,7 @@
 #   grate_args - (optional) extra args between grate and test binary
 #   files      - (optional) extra files to copy into lindfs
 #   lindfs_dir - (optional) also copy test cwasm into this lindfs subdirectory
+#   env        - (optional) NAME=VALUE entries passed as --env before the grate
 #   timeout    - (optional) timeout in seconds (default: 60)
 #   skip       - (optional) skip this test
 
@@ -71,6 +72,16 @@ type = "rust"
 
 [[grate.tests]]
 test_src = "test/imfs_test.c"
+
+# PRELOADS staging. Host paths are relative to the lindfs root, where the
+# fixture files below are copied. The list mixes absolute, nested, relative and
+# repeated IMFS targets with three malformed entries ("", "=preload_rel.txt"
+# and "preload_rel.txt=") that must be skipped without dropping the entries
+# that follow them.
+[[grate.tests]]
+test_src = "test/preload_test.c"
+env = ["PRELOADS=/preload_hello.txt=preload_hello.txt:/preload/nested/data.txt=preload_nested.txt:sub/rel.txt=preload_rel.txt::=preload_rel.txt:preload_rel.txt=:/trunc.txt=preload_long.txt:/trunc.txt=preload_short.txt"]
+files = ["test/preload_hello.txt", "test/preload_nested.txt", "test/preload_rel.txt", "test/preload_long.txt", "test/preload_short.txt"]
 
 # ── Readonly (Rust) ─────────────────────────────────────────────────
 

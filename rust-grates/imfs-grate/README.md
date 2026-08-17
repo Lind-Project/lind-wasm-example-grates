@@ -47,9 +47,17 @@ if `tcc` is invoked with `/hello.c`, preload `/hello.c`, not `hello.c`.
 Preload details:
 
 - Entries are separated with `:`.
-- Empty entries are ignored.
+- Empty entries are ignored, as are entries with an empty path on either side
+  (`=host_path` and `imfs_path=`). A malformed entry is skipped on its own; the
+  entries after it are still staged.
 - Non-regular files are skipped.
-- Parent directories are created in IMFS as needed.
+- Parent directories are created in IMFS as needed. Only the components before
+  the final one become directories, so a relative target such as
+  `sub/rel.txt=host.txt` still ends up as a file.
+- Staging the same IMFS path twice keeps only the last entry's contents; the
+  file is truncated before it is rewritten.
+- Files are staged under IMFS cage 0, before any application cage exists. IMFS
+  keeps a single node tree, so the child cage sees them at the same paths.
 - The Rust implementation reads host files through `make_threei_call`
   (`stat`, `open`, `read`, `close`) instead of `std::fs::read`.
 
@@ -137,6 +145,24 @@ clone, exec
 
 Unsupported or intentionally disabled paths return the appropriate negative
 errno where possible.
+
+## Tests
+
+```bash
+make test GRATE=imfs-grate
+```
+
+Two cage binaries run under the grate:
+
+- `test/imfs_test.c` — the filesystem syscalls themselves.
+- `test/preload_test.c` — `PRELOADS` staging. It checks the contents and modes of the files staged from `test/preload_*.txt`, that parent directories are created while the final component stays a file (for absolute and relative targets alike), that re-staging a path truncates it, and that malformed entries are skipped without dropping the entries after them. The `PRELOADS` value is set in `test/grates_test.toml`.
+
+Run tests individually:
+
+```sh
+lind_run grates/imfs-grate.cwasm imfs_test.cwasm
+lind_run grates/imfs-grate.cwasm preload_test.cwasm
+```
 
 ## Current Limitations
 

@@ -76,6 +76,7 @@ T_FILES=()
 T_TIMEOUT=()
 T_SKIPS=()
 T_LINDFS_DIR=()
+T_ENV=()
 
 parse_config() {
     local config_file="$1"
@@ -112,6 +113,7 @@ parse_config() {
             T_TIMEOUT+=("$DEFAULT_TIMEOUT")
             T_SKIPS+=("false")
             T_LINDFS_DIR+=("")
+            T_ENV+=("")
             in_test=1
             continue
         fi
@@ -132,6 +134,7 @@ parse_config() {
                     timeout)     T_TIMEOUT[$test_idx]="$val" ;;
                     skip)        T_SKIPS[$test_idx]="$val" ;;
                     lindfs_dir)  T_LINDFS_DIR[$test_idx]="$val" ;;
+                    env)         T_ENV[$test_idx]="$val" ;;
                 esac
             elif [[ $in_grate -eq 1 && $grate_idx -ge 0 ]]; then
                 case "$key" in
@@ -403,6 +406,7 @@ for gi in "${!G_NAMES[@]}"; do
         targs="${T_ARGS[$ti]}"
         ttimeout="${T_TIMEOUT[$ti]}"
         tskip="${T_SKIPS[$ti]}"
+        tenv="${T_ENV[$ti]}"
 
         test_label="$gname / $(basename "$tsrc")"
 
@@ -425,15 +429,29 @@ for gi in "${!G_NAMES[@]}"; do
             run_args="$(parse_toml_array "$targs" | tr '\n' ' ')"
         fi
 
+        # Parse env into --env NAME=VALUE pairs. These must precede the grate
+        # binary, which starts the runtime's trailing var-args.
+        # Expansions use ${a[@]+"${a[@]}"} so an empty list is not an unbound
+        # variable error under `set -u`.
+        env_args=()
+        if [[ -n "$tenv" ]]; then
+            while IFS= read -r e; do
+                [[ -z "$e" ]] && continue
+                env_args+=(--env "$e")
+            done <<< "$(parse_toml_array "$tenv")"
+        fi
+
         # Run with timeout; capture output and check for panics
         # Grate binary is in lindfs/grates/, test binary is in lindfs/
         grate_rel="grates/$(basename "$grate_cwasm")"
-        cmd="lind-wasm $grate_rel ${run_args}$(basename "$test_cwasm")"
+        cmd="lind-wasm ${env_args[@]+${env_args[*]} }$grate_rel ${run_args}$(basename "$test_cwasm")"
         echo "  Running: $cmd (timeout=${ttimeout}s)"
 
         tmp_out=$(mktemp)
         exit_code=0
-        timeout -k 5 "$ttimeout" lind-wasm "$grate_rel" \
+        timeout -k 5 "$ttimeout" lind-wasm \
+            ${env_args[@]+"${env_args[@]}"} \
+            "$grate_rel" \
             $run_args \
             "$(basename "$test_cwasm")" \
             > "$tmp_out" 2>&1 || exit_code=$?
