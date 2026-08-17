@@ -8,26 +8,6 @@
 #   2. Publish Release  - creates or updates a date-tagged GitHub pre-release and attaches the logs to it as release assets, then notifies Slack
 #   3. Evaluate         - reads e2e_status and decides the build's pass/fail
 #
-# The pass/fail decision is deliberately the LAST step. The Dockerfile records
-# test failures in e2e_status rather than failing the build, so step 1 succeeds
-# even when tests fail. That ordering is what lets a failing week still reach
-# the release step - those are the weeks most worth recording.
-#
-# Step 2 never fails the build. A publishing problem (expired token, GitHub
-# outage) must not be reported as a test failure, so it exits 0 and explains
-# itself in the log.
-#
-# The Slack notification lives in step 2 for that same reason. The message is
-# deliberately result-neutral - it says the weekly run finished and links to
-# the release - so it does not need the pass/fail verdict and can be sent
-# before step 3 computes it. Because step 2 always reaches its end, the
-# notification goes out whether the tests passed or failed. Every early exit
-# notifies too, so a week where the release could not be published is still
-# visible in Slack instead of being silent.
-#
-# What Slack still cannot report: a failure in step 1, a build timeout, or a
-# cancellation, since step 2 never runs in those cases. Detecting a run that
-# never happened needs monitoring outside this build.
 
 options:
   logging: CLOUD_LOGGING_ONLY
