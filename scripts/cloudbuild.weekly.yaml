@@ -5,7 +5,7 @@
 #
 # Step layout:
 #   1. Build And Test   - runs the Dockerfile's test stage, writes to /workspace
-#   2. Publish Release  - creates or updates a date-tagged GitHub pre-release and attaches the logs to it as release assets, then notifies Slack
+#   2. Publish Release  - creates or updates a date-tagged GitHub pre-release, uploads the logs as release assets, and notifies Slack.
 #   3. Evaluate         - reads e2e_status and decides the build's pass/fail
 #
 
