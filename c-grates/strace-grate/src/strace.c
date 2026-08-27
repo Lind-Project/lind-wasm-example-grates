@@ -61,7 +61,7 @@ DEFINE_HANDLER(getpeername, 52, ARG_INT, ARG_PTR, ARG_PTR)
 DEFINE_HANDLER(socketpair, 53, ARG_INT, ARG_INT, ARG_INT, ARG_PTR)
 DEFINE_HANDLER(setsockopt, 54, ARG_INT, ARG_INT, ARG_INT, ARG_PTR, ARG_INT)
 DEFINE_HANDLER(getsockopt, 55, ARG_INT, ARG_INT, ARG_INT, ARG_PTR, ARG_PTR)
-DEFINE_HANDLER(clone, 56, ARG_INT, ARG_PTR, ARG_PTR, ARG_PTR, ARG_PTR)
+//DEFINE_HANDLER(clone, 56, ARG_INT, ARG_PTR, ARG_PTR, ARG_PTR, ARG_PTR)
 DEFINE_HANDLER(fork, 57)
 DEFINE_HANDLER(exec, 59, ARG_STR, ARG_PTR, ARG_PTR)
 DEFINE_HANDLER(exit, 60, ARG_INT)
@@ -106,6 +106,77 @@ DEFINE_HANDLER(epoll_create1, 291, ARG_INT)
 DEFINE_HANDLER(dup3, 292, ARG_INT, ARG_INT, ARG_INT)
 DEFINE_HANDLER(pipe2, 293, ARG_PTR, ARG_INT)
 DEFINE_HANDLER(getrandom, 318, ARG_PTR, ARG_INT, ARG_INT)
+
+
+// hand-written (non-macro) handler for clone to make things more obvious and  so breakpoints can be set by line number
+int clone_grate(uint64_t cageid, uint64_t arg1, uint64_t arg1cage,
+                 uint64_t arg2, uint64_t arg2cage,
+                 uint64_t arg3, uint64_t arg3cage,
+                 uint64_t arg4, uint64_t arg4cage,
+                 uint64_t arg5, uint64_t arg5cage,
+                 uint64_t arg6, uint64_t arg6cage) {
+    int thiscage = getpid();
+    int types[] = {ARG_INT, ARG_PTR, ARG_PTR, ARG_PTR, ARG_PTR};
+    int argsnum = sizeof(types) / sizeof(int);
+    uint64_t args[] = {arg1, arg2, arg3, arg4, arg5, arg6};
+    uint64_t argcages[] = {arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage};
+
+    char log_buffer[2048];
+    int offset = 0;
+
+    offset += snprintf(log_buffer + offset, sizeof(log_buffer) - offset, "clone(");
+
+    for (int i = 0; i < argsnum; i++) {
+        if (i > 0)
+            offset += snprintf(log_buffer + offset, sizeof(log_buffer) - offset, ", ");
+
+        if (types[i] == ARG_STR && args[i] != 0) {
+            char *buf = malloc(256);
+            if (buf) {
+                copy_data_between_cages(thiscage, argcages[i],
+                                        args[i], argcages[i],
+                                        (uint64_t)buf, thiscage,
+                                        256, 1);
+                offset += snprintf(log_buffer + offset, sizeof(log_buffer) - offset,
+                                   "\"%s\"", buf);
+                free(buf);
+            } else {
+                offset += snprintf(log_buffer + offset, sizeof(log_buffer) - offset,
+                                   "0x%lx", (unsigned long)args[i]);
+            }
+        } else if (types[i] == ARG_PTR) {
+            offset += snprintf(log_buffer + offset, sizeof(log_buffer) - offset,
+                               "0x%lx", (unsigned long)args[i]);
+        } else {
+            offset += snprintf(log_buffer + offset, sizeof(log_buffer) - offset,
+                               "%ld", (long)args[i]);
+        }
+    }
+
+    offset += snprintf(log_buffer + offset, sizeof(log_buffer) - offset, ")");
+
+    int ret = make_threei_call(56, 0,
+                               thiscage, arg1cage,
+                               arg1, arg1cage, arg2, arg2cage,
+                               arg3, arg3cage, arg4, arg4cage,
+                               arg5, arg5cage, arg6, arg6cage, 0);
+
+    fprintf(stderr, "%s = %d\n", log_buffer, ret);
+
+    if (ret > 0) {
+        fprintf(stderr, "clone returned positive value, we're in the parent process\n");
+    }
+    else if (ret == 0) {
+        fprintf(stderr, "clone returned zero, we're in the child process\n");
+    }
+
+    return ret;
+}
+
+__attribute__((constructor)) static void register_clone(void) {
+    syscall_handler_table[56] = &clone_grate;
+}
+
 
 // dispatcher function
 int pass_fptr_to_wt(uint64_t fn_ptr_uint, uint64_t cageid,
