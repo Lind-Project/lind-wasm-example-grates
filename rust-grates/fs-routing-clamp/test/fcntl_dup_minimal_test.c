@@ -38,8 +38,16 @@ int main(void) {
     if (dup_fd >= 0)
         CHECK("write through F_DUPFD fd", write(dup_fd, "x", 1) == 1);
 
-    int read_fd = open("/dev/zero", O_RDONLY);
-    CHECK("open /dev/zero", read_fd >= 0);
+    const char *read_test_path = "/fcntl_dup_read_test";
+    int setup_fd = open(read_test_path, O_CREAT | O_TRUNC | O_WRONLY, 0600);
+    CHECK("create readable test file", setup_fd >= 0);
+    if (setup_fd >= 0) {
+        CHECK("write readable test data", write(setup_fd, "12345678", 8) == 8);
+        close(setup_fd);
+    }
+
+    int read_fd = open(read_test_path, O_RDONLY);
+    CHECK("open readable test file", read_fd >= 0);
     if (read_fd >= 0) {
         int read_dup = fcntl(read_fd, F_DUPFD, 50);
         CHECK("fcntl F_DUPFD read fd returns fd >= minfd", read_dup >= 50);
@@ -53,6 +61,7 @@ int main(void) {
     if (dup_fd >= 0)
         close(dup_fd);
     close(fd);
+    unlink(read_test_path);
 
     printf("\n=== results: %d/%d passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
