@@ -7,3 +7,4 @@ edition = "2024"
 grate-rs = { git = "https://github.com/Lind-Project/lind-wasm-example-grates", branch = "main", subdir = "lib/grate-rs" }
 fdtables = { git = "https://github.com/Lind-Project/lind-wasm", branch = "main", subdir = "src/fdtables", default-features = false, features = ["muthashmax"] }
 libc = "0.2"
+preload-archive = { path = "../../lib/preload-archive" }

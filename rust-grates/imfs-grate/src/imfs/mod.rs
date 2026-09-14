@@ -10,6 +10,7 @@
 //! stored in a HashMap<(cage_id, fd), offset>.
 
 pub mod node;
+pub mod preload;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -103,36 +104,57 @@ pub struct ImfsState {
 
 /// Initialize the global IMFS. Called once at startup.
 pub fn init() {
-    let mut state = ImfsState {
-        nodes: Vec::with_capacity(MAX_NODES),
-        chunks: Vec::new(),
-        node_free_list: Vec::new(),
-        chunk_free_list: Vec::new(),
-        root_idx: 0,
-        fd_info: HashMap::new(),
-        cwd_info: HashMap::new(),
-    };
+    *IMFS.lock().unwrap() = Some(ImfsState::new());
+}
 
-    state.cwd_info.insert(0, "/".to_string());
-
-    // Create root directory.
-    let root_idx = state.create_node("/", NodeType::Dir, 0o755);
-    state.nodes[root_idx].parent_idx = root_idx;
-    state.root_idx = root_idx;
-
-    // Create . and .. in root.
-    let dot_idx = state.create_node(".", NodeType::Lnk, 0);
-    state.nodes[dot_idx].info = NodeInfo::HardLink { target: root_idx };
-    state.add_child(root_idx, dot_idx);
-
-    let dotdot_idx = state.create_node("..", NodeType::Lnk, 0);
-    state.nodes[dotdot_idx].info = NodeInfo::HardLink { target: root_idx };
-    state.add_child(root_idx, dotdot_idx);
-
-    *IMFS.lock().unwrap() = Some(state);
+/// Stage a preload archive (see [`preload`]) into the global IMFS from a raw
+/// `(pointer, size)` pair: the block of memory the grate filled with the
+/// requested host files.
+///
+/// # Safety
+///
+/// `ptr` must be valid for reads of `size` bytes for the duration of the call.
+pub unsafe fn preload_from_ptr(
+    ptr: *const u8,
+    size: usize,
+) -> Result<preload::PreloadStats, preload_archive::ArchiveError> {
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, size) };
+    with_imfs(|state| state.preload_archive(bytes))
 }
 
 impl ImfsState {
+    /// An empty filesystem: just `/` with its `.` and `..` entries, and cage 0
+    /// (the utility cage used for preloading and dumping) at `/`.
+    pub fn new() -> Self {
+        let mut state = ImfsState {
+            nodes: Vec::with_capacity(MAX_NODES),
+            chunks: Vec::new(),
+            node_free_list: Vec::new(),
+            chunk_free_list: Vec::new(),
+            root_idx: 0,
+            fd_info: HashMap::new(),
+            cwd_info: HashMap::new(),
+        };
+
+        state.cwd_info.insert(0, "/".to_string());
+
+        // Create root directory.
+        let root_idx = state.create_node("/", NodeType::Dir, 0o755);
+        state.nodes[root_idx].parent_idx = root_idx;
+        state.root_idx = root_idx;
+
+        // Create . and .. in root.
+        let dot_idx = state.create_node(".", NodeType::Lnk, 0);
+        state.nodes[dot_idx].info = NodeInfo::HardLink { target: root_idx };
+        state.add_child(root_idx, dot_idx);
+
+        let dotdot_idx = state.create_node("..", NodeType::Lnk, 0);
+        state.nodes[dotdot_idx].info = NodeInfo::HardLink { target: root_idx };
+        state.add_child(root_idx, dotdot_idx);
+
+        state
+    }
+
     // =====================================================================
     //  Timestamp helpers
     // =====================================================================
@@ -2133,10 +2155,17 @@ impl ImfsState {
             return -17; // EEXIST
         }
 
-        let dir_idx = self.create_node(&dirname, NodeType::Dir, mode);
+        self.create_dir_node(parent_idx, &dirname, mode);
+        0
+    }
+
+    /// Create a directory named `name` under `parent_idx`, complete with its
+    /// `.` and `..` entries, and return its node index. The caller has already
+    /// checked that no such child exists.
+    fn create_dir_node(&mut self, parent_idx: usize, name: &str, mode: u32) -> usize {
+        let dir_idx = self.create_node(name, NodeType::Dir, mode);
         self.add_child(parent_idx, dir_idx);
 
-        // Add . and ..
         let dot_idx = self.create_node(".", NodeType::Lnk, 0);
         self.nodes[dot_idx].info = NodeInfo::HardLink { target: dir_idx };
         self.add_child(dir_idx, dot_idx);
@@ -2144,11 +2173,12 @@ impl ImfsState {
         let dotdot_idx = self.create_node("..", NodeType::Lnk, 0);
         self.nodes[dotdot_idx].info = NodeInfo::HardLink { target: parent_idx };
         self.add_child(dir_idx, dotdot_idx);
+
         self.update_mtime(parent_idx);
         self.update_ctime(parent_idx);
         self.update_mtime(dir_idx);
         self.update_ctime(dir_idx);
 
-        0
+        dir_idx
     }
 }

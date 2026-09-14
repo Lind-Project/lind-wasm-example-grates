@@ -1,0 +1,8 @@
+[package]
+name = "mkpreload"
+version = "0.1.0"
+edition = "2024"
+description = "Pack host files into an IMFS preload archive ahead of running the IMFS grate"
+
+[dependencies]
+preload-archive = { path = "../../lib/preload-archive", default-features = false }
