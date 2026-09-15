@@ -7,7 +7,7 @@
 
 use grate_rs::constants::*;
 use grate_rs::ffi::{iovec, stat};
-use grate_rs::{copy_data_between_cages, getcageid, is_thread_clone, make_threei_call};
+use grate_rs::{GrateError, copy_data_between_cages, getcageid, is_thread_clone, make_threei_call};
 
 use crate::imfs;
 
@@ -2066,6 +2066,10 @@ pub extern "C" fn exec_handler(
         0,
     ) {
         Ok(r) => r,
+        // Preserve the negative errno the runtime returned. Collapsing every
+        // failure to -1 makes glibc report EPERM, which hides the real reason
+        // exec failed (e.g. -ENOENT for a missing exec image).
+        Err(GrateError::MakeSyscallError(e)) => e,
         Err(_) => -1,
     }
 }

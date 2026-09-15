@@ -1,0 +1,17 @@
+[package]
+name = "preload-archive"
+version = "0.1.0"
+edition = "2024"
+description = "Preload archive format shared by the IMFS grate and the native mkpreload tool"
+
+[features]
+default = ["lind"]
+# Cage-side helpers that read host files through 3i. On by default for grates.
+lind = ["dep:grate-rs"]
+# Untrusted-side packer that reads host files with std::fs. For native tools
+# and ocall handlers; build with `default-features = false, features = ["native"]`.
+native = []
+
+[dependencies]
+grate-rs = { git = "https://github.com/Lind-Project/lind-wasm-example-grates", branch = "main", subdir = "lib/grate-rs", optional = true }
+sha2 = { version = "0.10", default-features = false }
