@@ -24,8 +24,9 @@ Add `--log` immediately after the grate to enable IMFS logging:
 lind_run grates/imfs-grate.cwasm --log <program> [args...]
 ```
 
-Grate options (`--log`, `--preload-file`) may appear in any order; the first
-argument that is not one of them starts the program's command line.
+Grate options (`--log`, `--preload-file`, `--preload-digest`) may appear in any
+order; the first argument that is not one of them starts the program's command
+line.
 
 ## Preloading Host Files
 
@@ -78,7 +79,8 @@ memory holding every file to stage, in the format defined by the shared
 `lib/preload-archive` crate:
 
 ```text
-header  magic "LINDPRLD", version u32, entry count u32
+header  magic "LINDPRLD", version u32 (2), entry count u32,
+        payload_len u64, sha256(payload) [32 bytes]           = 56 bytes
 entry   path_len u32, mode u32, data_len u64, path bytes, data bytes
 ```
 
@@ -90,7 +92,9 @@ and builds its nodes straight from the bytes (`src/imfs/preload.rs`):
   layer, so no fd table, `open()`, or `write()` is involved.
 - Each directory prefix is resolved once and cached instead of being walked
   from `/` again for every path component.
-- A malformed archive is rejected as a whole before any node is created.
+- A malformed archive is rejected as a whole before any node is created:
+  every length is bounds-checked and the payload must hash to the digest in
+  the header.
 
 There are two ways to get the archive to IMFS:
 
@@ -119,8 +123,35 @@ There are two ways to get the archive to IMFS:
    file is the only thing that can carry the archive between the two steps;
    a tmpfs path keeps it in memory.
 
+   The blob was built outside the grate, so it is treated as untrusted input.
+   It is capped at 48 MiB, its header and payload digest are verified, and
+   with `--preload-digest <hex>` it must be exactly the blob whose SHA-256
+   `mkpreload` printed:
+
+   ```bash
+   DIGEST=$(mkpreload --print-digest lindfs/dev/shm/preload.mem "/hello.c=/home/alice/hello.c")
+   lind_run grates/imfs-grate.cwasm --preload-file /dev/shm/preload.mem --preload-digest "$DIGEST" bin/tcc /hello.c
+   ```
+
+   A blob that fails any of these checks stages nothing.
+
 If both are given, the `--preload-file` archive is staged first and `PRELOADS`
 entries are layered on top.
+
+### Staging from an enclave
+
+The same split is what an SGX build of the grate needs, with the ocall in place
+of the file: the enclave issues one ocall carrying its preload list, the
+untrusted side runs `preload_archive::pack::pack` and hands back a
+`(pointer, size)` pair in untrusted memory, and the enclave calls
+`imfs::preload_from_untrusted(ptr, size, max_len, expected_digest)`. That entry
+point copies the bytes into enclave memory before looking at them, so the
+producer cannot change them under the check, then applies the same size cap,
+digest verification and expected-digest comparison as `--preload-file`, and
+only then stages. The expected digest is the one thing that has to reach the
+enclave through a trusted channel (configuration or measurement); everything
+else about the blob is checked from the blob itself. The single ocall itself
+has to be provided by the runtime; it is not part of this repository.
 
 ## Dumping IMFS Files Back
 

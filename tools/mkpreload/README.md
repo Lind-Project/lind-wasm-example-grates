@@ -6,7 +6,7 @@ A plain native program (no Lind involved) that packs host files into an IMFS
 the IMFS grate's `--preload-file` option is the other half.
 
 ```text
-mkpreload [--mode OCTAL] <out> <entry>...
+mkpreload [--mode OCTAL] [--print-digest] <out> <entry>...
 ```
 
 - `<out>` is where the archive is written. Point it at a memory-backed
@@ -17,6 +17,10 @@ mkpreload [--mode OCTAL] <out> <entry>...
   colon-separated list, so `mkpreload out "$PRELOADS"` works as-is.
 - `--mode` sets the permission bits of every packed file (default `777`, the
   same as `PRELOADS`).
+- The archive's SHA-256 is always reported on stderr; `--print-digest` also
+  writes just the hex digest to stdout so a script can capture it. Give it to
+  the IMFS grate as `--preload-digest <hex>` and the grate refuses any other
+  blob.
 
 Non-regular and unreadable files are reported and skipped; the rest are still
 packed. Staging the same IMFS path twice keeps the last entry, as `PRELOADS`
@@ -40,7 +44,15 @@ tools/mkpreload/target/release/mkpreload \
 
 # 2. Run the IMFS grate against the blob, as many times as you like.
 lind_run grates/imfs-grate.cwasm --preload-file /dev/shm/tcc.mem bin/tcc /hello.c -o /hello-3i
+
+# Or pin the exact blob: capture the digest at pack time and require it at run time.
+DIGEST=$(tools/mkpreload/target/release/mkpreload --print-digest lindfs/dev/shm/tcc.mem "/hello.c=/home/alice/hello.c")
+lind_run grates/imfs-grate.cwasm --preload-file /dev/shm/tcc.mem --preload-digest "$DIGEST" bin/tcc /hello.c
 ```
+
+The packing logic lives in `lib/preload-archive` (`pack::pack`, behind the
+`native` feature); this binary is only the command-line wrapper. An ocall
+handler that packs preloads for an enclave calls the same function.
 
 The grate reads the blob into its own memory with a single open/read/close and
 builds its filesystem from that pointer. Each `lind_run` is a separate host
@@ -49,7 +61,7 @@ from step 1 to step 2; a tmpfs path keeps it off the disk.
 
 ## Tests
 
-`cargo test` covers argument parsing and packing, and pins
+`cargo test` covers argument parsing and pins
 `rust-grates/imfs-grate/test/preload_test.mem`, the blob the IMFS grate's
 `preload_test.c` loads in the test suite. Regenerate that fixture after
 changing the format or the fixture files:

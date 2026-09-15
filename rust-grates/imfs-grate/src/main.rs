@@ -3,7 +3,7 @@
 //! This grate intercepts filesystem syscalls (open, close, read, write, lseek,
 //! fcntl, unlink, pread, pwrite) and handles them with an in-memory filesystem.
 //!
-//! Usage: imfs-grate [--log] [--preload-file <path>] <cage_binary> [args...]
+//! Usage: imfs-grate [--log] [--preload-file <path> [--preload-digest <hex>]] <cage_binary> [args...]
 //!
 //! Preloading always goes through a *preload archive*: one contiguous block
 //! of memory holding every file to stage (see the `preload-archive` crate).
@@ -13,7 +13,11 @@
 //!   --preload-file <path> — an archive built ahead of time by the native
 //!     `tools/mkpreload` program, placed where the runtime can see it
 //!     (typically a tmpfs path under lindfs such as /dev/shm/...). It is read
-//!     into this cage's memory in one go and then staged.
+//!     into this cage's memory in one go, verified, and then staged. The blob
+//!     was built outside this cage, so it is treated as untrusted input: it is
+//!     size-capped and its digest is checked, and with --preload-digest it
+//!     must be exactly the blob whose SHA-256 (as printed by mkpreload) is
+//!     given.
 //!   PRELOADS — colon-separated list of host files. Each entry is a path, or
 //!     `imfs_path=host_path` to load into a different IMFS path. This grate
 //!     reads them into an archive itself, then stages it the same way.
@@ -32,11 +36,15 @@ use grate_rs::constants::lind::GRATE_MEMORY_FLAG;
 use grate_rs::constants::*;
 use grate_rs::{GrateBuilder, GrateError, getcageid};
 use preload_archive::host::raw_threei_syscall;
+use preload_archive::{ArchiveDigest, parse_digest_hex};
 use std::ffi::CString;
 
 const SYS_LINKAT: u64 = 265;
 /// Permission bits given to every file preloaded from PRELOADS.
 const PRELOAD_FILE_MODE: u32 = 0o777;
+/// Largest --preload-file archive accepted. The archive and the IMFS chunks
+/// built from it coexist in this cage's linear memory during staging.
+const PRELOAD_MAX_ARCHIVE_BYTES: usize = 48 << 20;
 const DUMP_WRITE_CHUNK_SIZE: usize = 1024;
 
 struct Config {
@@ -44,6 +52,8 @@ struct Config {
     log_enabled: bool,
     /// Prebuilt archive to stage, from `--preload-file`.
     preload_file: Option<String>,
+    /// SHA-256 the prebuilt archive must have, from `--preload-digest`.
+    preload_digest: Option<ArchiveDigest>,
 }
 
 /// Split the grate's own options from the cage command line. Options are
@@ -52,6 +62,7 @@ struct Config {
 fn parse_argv(args: Vec<String>) -> Result<Config, String> {
     let mut log_enabled = false;
     let mut preload_file = None;
+    let mut preload_digest = None;
     let mut i = 0;
 
     while i < args.len() {
@@ -68,14 +79,29 @@ fn parse_argv(args: Vec<String>) -> Result<Config, String> {
                 preload_file = Some(value.clone());
                 i += 2;
             }
+            "--preload-digest" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or("--preload-digest needs a 64-character hex SHA-256")?;
+                preload_digest = Some(
+                    parse_digest_hex(value)
+                        .ok_or_else(|| format!("invalid --preload-digest value: {}", value))?,
+                );
+                i += 2;
+            }
             _ => break,
         }
+    }
+
+    if preload_digest.is_some() && preload_file.is_none() {
+        return Err("--preload-digest needs --preload-file".to_string());
     }
 
     Ok(Config {
         argv: args[i..].to_vec(),
         log_enabled,
         preload_file,
+        preload_digest,
     })
 }
 
@@ -96,7 +122,7 @@ fn main() {
     // Stage files into IMFS before cage execution: first a prebuilt archive,
     // then anything listed in PRELOADS on top.
     if let Some(path) = config.preload_file.as_deref() {
-        preload_from_file(path);
+        preload_from_file(path, config.preload_digest.as_ref());
     }
     if let Ok(preloads) = std::env::var("PRELOADS") {
         preload_from_list(&preloads);
@@ -198,9 +224,9 @@ fn main() {
 
 /// Stage an archive that was built ahead of time (by `tools/mkpreload`) and
 /// placed at `path`. The whole archive is read into this cage's memory with
-/// one open/read/close sequence, then IMFS stages the files out of that
-/// buffer; no other host access happens.
-fn preload_from_file(path: &str) {
+/// one open/read/close sequence and verified there, then IMFS stages the
+/// files out of that buffer; no other host access happens.
+fn preload_from_file(path: &str, expected: Option<&ArchiveDigest>) {
     log!("preload: reading archive {}", path);
 
     if !preload_archive::host::is_regular_file(path) {
@@ -208,10 +234,20 @@ fn preload_from_file(path: &str) {
         return;
     }
 
-    match preload_archive::host::read_file(path) {
-        Ok(archive) => stage_archive(&archive),
-        Err(e) => log!("preload: cannot read {}: {}", path, e),
-    }
+    let archive = match preload_archive::host::read_file(path) {
+        Ok(archive) => archive,
+        Err(e) => {
+            log!("preload: cannot read {}: {}", path, e);
+            return;
+        }
+    };
+
+    // The blob was produced outside this cage: cap it, check its digest, and
+    // insist on the expected digest if one was given, before staging.
+    let result = imfs::with_imfs(|state| {
+        state.preload_archive_verified(&archive, PRELOAD_MAX_ARCHIVE_BYTES, expected)
+    });
+    report_preload(archive.len(), result);
 }
 
 /// Stage the PRELOADS list: read each host file through 3i into one archive
@@ -230,18 +266,24 @@ fn preload_from_list(preloads: &str) {
     }
 }
 
-/// Hand an archive to IMFS as a `(pointer, size)` pair.
+/// Hand an archive this cage built itself to IMFS as a `(pointer, size)` pair.
 fn stage_archive(archive: &[u8]) {
-    log!("preload: staging {} byte archive", archive.len());
-
     // SAFETY: `archive` is a live slice for the whole call, so the pointer is
     // valid for `archive.len()` bytes.
     let result = unsafe { imfs::preload_from_ptr(archive.as_ptr(), archive.len()) };
+    report_preload(archive.len(), result);
+}
+
+fn report_preload(
+    archive_len: usize,
+    result: Result<imfs::preload::PreloadStats, preload_archive::ArchiveError>,
+) {
     match result {
         Ok(stats) => log!(
-            "preloaded {} files ({} bytes), skipped {}",
+            "preloaded {} files ({} bytes) from a {} byte archive, skipped {}",
             stats.staged,
             stats.bytes,
+            archive_len,
             stats.skipped
         ),
         Err(e) => log!("preload failed: {}", e),
@@ -474,5 +516,35 @@ mod tests {
     fn missing_preload_file_value_is_an_error() {
         assert!(parse_argv(args(&["--preload-file"])).is_err());
         assert!(parse_argv(args(&["--preload-file", "", "prog"])).is_err());
+    }
+
+    #[test]
+    fn preload_digest_is_parsed_and_needs_preload_file() {
+        let hex = "0123456789abcdef".repeat(4);
+        let config = parse_argv(args(&[
+            "--preload-digest",
+            &hex,
+            "--preload-file",
+            "p.mem",
+            "prog",
+        ]))
+        .unwrap();
+        let digest = config.preload_digest.unwrap();
+        assert_eq!(digest[0], 0x01);
+        assert_eq!(digest[31], 0xef);
+        assert_eq!(config.argv, args(&["prog"]));
+
+        assert!(parse_argv(args(&["--preload-digest", &hex, "prog"])).is_err());
+        assert!(
+            parse_argv(args(&[
+                "--preload-file",
+                "p",
+                "--preload-digest",
+                "zz",
+                "prog"
+            ]))
+            .is_err()
+        );
+        assert!(parse_argv(args(&["--preload-file", "p", "--preload-digest"])).is_err());
     }
 }

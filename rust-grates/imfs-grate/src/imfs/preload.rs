@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use preload_archive::{ArchiveError, parse_archive};
+use preload_archive::{ArchiveDigest, ArchiveError, parse_archive, verify_archive};
 
 use super::ImfsState;
 use super::node::*;
@@ -62,6 +62,20 @@ impl ImfsState {
         }
 
         Ok(stats)
+    }
+
+    /// [`preload_archive`](Self::preload_archive) for a buffer that came from
+    /// outside the trust boundary: it is size-capped, its digest is checked,
+    /// and it must carry `expected` if one is given. `bytes` must already be a
+    /// copy this cage owns (see `imfs::preload_from_untrusted`).
+    pub fn preload_archive_verified(
+        &mut self,
+        bytes: &[u8],
+        max_len: usize,
+        expected: Option<&ArchiveDigest>,
+    ) -> Result<PreloadStats, ArchiveError> {
+        verify_archive(bytes, max_len, expected)?;
+        self.preload_archive(bytes)
     }
 
     /// Create or rewrite one regular file directly in the arenas.
@@ -349,13 +363,72 @@ mod tests {
     #[test]
     fn a_corrupt_archive_leaves_the_filesystem_untouched() {
         let mut bad = archive(&[("/a", 0o644, b"abc")]);
-        bad.push(0);
+        *bad.last_mut().unwrap() ^= 1;
         let mut state = ImfsState::new();
         assert_eq!(
             state.preload_archive(&bad),
-            Err(ArchiveError::TrailingBytes(1))
+            Err(ArchiveError::DigestMismatch)
         );
         assert_eq!(state.nodes.len(), 3);
         assert_eq!(cat(&mut state, "/a"), Err(-2));
+    }
+
+    #[test]
+    fn verified_staging_enforces_cap_and_expected_digest() {
+        let good = archive(&[("/a", 0o644, b"abc"), ("/d/b", 0o644, &pattern(1500))]);
+        let digest = preload_archive::read_header(&good).unwrap().digest;
+
+        let mut state = ImfsState::new();
+        assert_eq!(
+            state.preload_archive_verified(&good, good.len() - 1, Some(&digest)),
+            Err(ArchiveError::TooLarge {
+                len: good.len(),
+                max: good.len() - 1
+            })
+        );
+        let other = [0x5au8; preload_archive::DIGEST_LEN];
+        assert_eq!(
+            state.preload_archive_verified(&good, good.len(), Some(&other)),
+            Err(ArchiveError::UnexpectedDigest)
+        );
+        assert_eq!(state.nodes.len(), 3);
+
+        let stats = state
+            .preload_archive_verified(&good, good.len(), Some(&digest))
+            .unwrap();
+        assert_eq!(stats.staged, 2);
+        assert_eq!(cat(&mut state, "/a").unwrap(), b"abc");
+        assert_eq!(cat(&mut state, "/d/b").unwrap(), pattern(1500));
+    }
+
+    #[test]
+    fn untrusted_entry_point_copies_then_verifies() {
+        let good = archive(&[("/u", 0o644, b"untrusted")]);
+        let digest = preload_archive::read_header(&good).unwrap().digest;
+        // The global IMFS is shared by every test in this binary; only touch
+        // a path no other test uses.
+        if super::super::IMFS.lock().unwrap().is_none() {
+            super::super::init();
+        }
+
+        let too_small = unsafe {
+            super::super::preload_from_untrusted(good.as_ptr(), good.len(), 8, Some(&digest))
+        };
+        assert!(matches!(too_small, Err(ArchiveError::TooLarge { .. })));
+
+        let stats = unsafe {
+            super::super::preload_from_untrusted(
+                good.as_ptr(),
+                good.len(),
+                good.len(),
+                Some(&digest),
+            )
+        }
+        .unwrap();
+        assert_eq!(stats.staged, 1);
+        assert_eq!(
+            super::super::with_imfs(|s| cat(s, "/u")).unwrap(),
+            b"untrusted"
+        );
     }
 }

@@ -108,8 +108,8 @@ pub fn init() {
 }
 
 /// Stage a preload archive (see [`preload`]) into the global IMFS from a raw
-/// `(pointer, size)` pair: the block of memory the grate filled with the
-/// requested host files.
+/// `(pointer, size)` pair in memory this cage trusts: a block it filled
+/// itself, or one it already copied in and verified.
 ///
 /// # Safety
 ///
@@ -120,6 +120,40 @@ pub unsafe fn preload_from_ptr(
 ) -> Result<preload::PreloadStats, preload_archive::ArchiveError> {
     let bytes = unsafe { std::slice::from_raw_parts(ptr, size) };
     with_imfs(|state| state.preload_archive(bytes))
+}
+
+/// Stage a preload archive that sits in memory this cage does *not* trust:
+/// a buffer an untrusted runtime handed back from an ocall, for example.
+///
+/// The bytes are copied into memory this cage owns before anything looks at
+/// them, so the producer cannot change them under the check. The copy is
+/// then size-capped, its header and payload digest are verified, and, when
+/// `expected` is given, its digest must match that value obtained through a
+/// trusted channel. Only after all of that is anything staged; a rejected
+/// archive leaves the filesystem untouched.
+///
+/// # Safety
+///
+/// `ptr` must be valid for reads of `size` bytes for the duration of the call.
+/// `size` is checked against `max_len` before any byte is read.
+// Not called by the Lind build: --preload-file already owns its buffer and
+// goes through preload_archive_verified directly. This is the entry point
+// for the enclave build, where the buffer comes back from an ocall.
+#[allow(dead_code)]
+pub unsafe fn preload_from_untrusted(
+    ptr: *const u8,
+    size: usize,
+    max_len: usize,
+    expected: Option<&preload_archive::ArchiveDigest>,
+) -> Result<preload::PreloadStats, preload_archive::ArchiveError> {
+    if size > max_len {
+        return Err(preload_archive::ArchiveError::TooLarge {
+            len: size,
+            max: max_len,
+        });
+    }
+    let owned = unsafe { std::slice::from_raw_parts(ptr, size) }.to_vec();
+    with_imfs(|state| state.preload_archive_verified(&owned, max_len, expected))
 }
 
 impl ImfsState {
