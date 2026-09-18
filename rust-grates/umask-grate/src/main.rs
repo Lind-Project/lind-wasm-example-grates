@@ -1,56 +1,55 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use grate_rs::{
-    GrateBuilder, GrateError,
     constants::SYS_UMASK,
-    make_threei_call,
+    getcageid, make_threei_call, GrateBuilder, GrateError,
 };
 
-/// The "ceiling" mask: any bits NOT in this mask will be forced into
-/// every umask the cage sets. Default 0o000 = no restriction (pass through).
+/// Bits forced into every umask the cage sets.
+/// Default 0o000 adds no restriction to the requested mask.
 static FORCE_BITS: AtomicU64 = AtomicU64::new(0o000);
 
 extern "C" fn umask_handler(
     cageid: u64,
     mask: u64,
-    mask_cage: u64,
-    arg2: u64,
-    arg2cage: u64,
-    arg3: u64,
-    arg3cage: u64,
-    arg4: u64,
-    arg4cage: u64,
-    arg5: u64,
-    arg5cage: u64,
-    arg6: u64,
-    arg6cage: u64,
+    _mask_cage: u64,
+    _arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
 ) -> i32 {
-    // Force any required bits into the cage's requested umask.
-    // e.g. with --force-bits 022, the cage can never set a umask
-    // that would allow group-write or other-write.
-    let enforced_mask = mask | FORCE_BITS.load(Ordering::Relaxed);
+    let enforced_mask = (mask | FORCE_BITS.load(Ordering::Relaxed)) & 0o777;
+    // 3i dispatches by self_cageid. Forward as this grate so the call uses
+    // the grate's RawPOSIX entry instead of re-entering this handler.
+    let grate_cageid = getcageid();
 
     match make_threei_call(
         SYS_UMASK as u32,
         0,
+        grate_cageid,
         cageid,
-        mask_cage,
         enforced_mask,
-        mask_cage,
-        arg2,
-        arg2cage,
-        arg3,
-        arg3cage,
-        arg4,
-        arg4cage,
-        arg5,
-        arg5cage,
-        arg6,
-        arg6cage,
+        cageid,
+        0,
+        cageid,
+        0,
+        cageid,
+        0,
+        cageid,
+        0,
+        cageid,
+        0,
+        cageid,
         0,
     ) {
-        Ok(r) => r,
-        Err(GrateError::MakeSyscallError(n)) => n,
+        Ok(result) => result,
+        Err(GrateError::MakeSyscallError(errno)) => errno,
         Err(_) => -1,
     }
 }
@@ -71,8 +70,9 @@ fn parse_args() -> Result<Config, String> {
             if i + 1 >= args.len() {
                 return Err("--force-bits requires an argument".to_string());
             }
-            force_bits = u64::from_str_radix(&args[i + 1], 8)
-                .map_err(|_| format!("--force-bits: '{}' is not a valid octal value", args[i + 1]))?;
+            force_bits = u64::from_str_radix(&args[i + 1], 8).map_err(|_| {
+                format!("--force-bits: '{}' is not a valid octal value", args[i + 1])
+            })?;
             i += 2;
         } else {
             remaining_args.push(args[i].clone());
@@ -80,7 +80,10 @@ fn parse_args() -> Result<Config, String> {
         }
     }
 
-    Ok(Config { force_bits, remaining_args })
+    Ok(Config {
+        force_bits,
+        remaining_args,
+    })
 }
 
 fn main() {
@@ -93,7 +96,8 @@ fn main() {
         }
     };
 
-    FORCE_BITS.store(config.force_bits, Ordering::Relaxed);
+    let force_bits = config.force_bits & 0o777;
+    FORCE_BITS.store(force_bits, Ordering::Relaxed);
 
     GrateBuilder::new()
         .register(SYS_UMASK, umask_handler)

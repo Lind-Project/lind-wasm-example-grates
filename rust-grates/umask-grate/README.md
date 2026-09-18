@@ -10,18 +10,22 @@ restrictive mask.
 
 ## How it works
 
-1. **Mask enforcement**: When the cage calls `umask(mask)`, the grate computes
-   `enforced_mask = mask | force_bits` and forwards the syscall using the
-   enforced value.
+1. **Mask enforcement**: The grate intercepts `SYS_UMASK` only. When the cage
+   calls `umask(mask)`, it computes `enforced_mask = (mask | force_bits) &
+   0777` and forwards that value to Lind's real `SYS_UMASK` implementation.
 
-2. **Configurable restrictions**: The `--force-bits` option accepts an octal
+2. **Lind-owned umask semantics**: Lind stores the resulting umask and applies
+   it to normal filesystem creation operations such as `open`, `openat`, and
+   `mkdir`. The grate does not intercept those syscalls or alter file modes.
+
+3. **Configurable restrictions**: The `--force-bits` option accepts an octal
    mask. For example, `022` always removes group-write and other-write
    permissions from newly created files and directories.
 
-3. **Pass-through by default**: The default forced mask is `0000`, so the
+4. **Pass-through by default**: The default forced mask is `0000`, so the
    cage's requested umask is forwarded unchanged when no option is provided.
 
-4. **Return value**: The cage receives the previous effective umask returned
+5. **Return value**: The cage receives the previous effective umask returned
    by the forwarded syscall. Because forced bits are applied to every call,
    the returned mask may already include those bits. All other syscalls pass
    through without modification.
@@ -40,8 +44,8 @@ Prevent a program from creating group- or other-writable files:
 lind-wasm grates/umask-grate.cwasm --force-bits 022 myapp.cwasm
 ```
 
-If the program requests a mask of `0000`, the grate forwards `0022`, so a file
-created with mode `0666` is expected to receive mode `0644` under POSIX umask
+If the program requests a mask of `0000`, the grate forwards `0022`; Lind then
+creates a file requested as `0666` with mode `0644` under normal POSIX umask
 semantics. A more restrictive request such as `0077` remains `0077`.
 
 ## Intercepted syscalls
@@ -59,7 +63,7 @@ cargo lind_compile --output-dir grates
 
 ## Code layout
 
-- `src/main.rs`: argument parsing, forced-mask storage, handler registration
-  through `GrateBuilder`, umask enforcement, and child execution.
-- `test/umask_test.c`: file-creation tests covering several requested masks
+- `src/main.rs`: argument parsing, forced-mask storage, `SYS_UMASK` handler
+  registration, and child execution.
+- `test/umask_test.c`: libc `umask()` tests for `open`, `mkdir`, and `openat`
   with `--force-bits 022`.
