@@ -930,6 +930,75 @@ impl ImfsState {
         );
     }
 
+    fn bump_pipe_ref(&self, node_idx: usize, fd_info: &Arc<Mutex<FDInfo>>) {
+        if let NodeInfo::Pip = &self.nodes[node_idx].info {
+            if let Some(pipe) = crate::pipe::get(node_idx) {
+                pipe.incr_ref(fd_info.lock().unwrap().flags as i32);
+            }
+        }
+    }
+
+    fn reclaim_dead_pipes(&mut self) {
+        for idx in crate::pipe::take_dead() {
+            if let NodeInfo::Pip = &self.nodes[idx].info {
+                self.reclaim_node(idx);
+            }
+        }
+    }
+
+    /// Returns (read_fd, write_fd).
+    pub fn create_pipe(&mut self, cage_id: u64, flags: i32) -> Result<(i32, i32), i32> {
+        self.reclaim_dead_pipes();
+
+        let cloexec = (flags & O_CLOEXEC) != 0;
+        let nonblock = flags & crate::pipe::O_NONBLOCK;
+        let rflags = (O_RDONLY | nonblock) as u64;
+        let wflags = (O_WRONLY | nonblock) as u64;
+
+        let node_idx = self.create_node("pipe", NodeType::Pip, 0o600);
+        let pipe = Arc::new(crate::pipe::PipeBuffer::new(crate::pipe::PIPE_CAPACITY));
+        crate::pipe::register(node_idx, pipe);
+
+        let rfd = match fdtables::get_unused_virtual_fd(
+            cage_id,
+            IMFS_FDKIND,
+            node_idx as u64,
+            cloexec,
+            rflags,
+        ) {
+            Ok(fd) => fd,
+            Err(_) => {
+                self.reclaim_node(node_idx);
+                return Err(-24); // EMFILE
+            }
+        };
+        let wfd = match fdtables::get_unused_virtual_fd(
+            cage_id,
+            IMFS_FDKIND,
+            node_idx as u64,
+            cloexec,
+            wflags,
+        ) {
+            Ok(fd) => fd,
+            Err(_) => {
+                let _ = fdtables::close_virtualfd(cage_id, rfd);
+                self.reclaim_dead_pipes();
+                return Err(-24);
+            }
+        };
+
+        self.nodes[node_idx].in_use = 2;
+        self.insert_perfdinfo(cage_id, rfd, rflags);
+        self.insert_perfdinfo(cage_id, wfd, wflags);
+
+        Ok((rfd as i32, wfd as i32))
+    }
+
+    pub fn forget_cage(&mut self, cage_id: u64) {
+        self.fd_info.retain(|(c, _), _| *c != cage_id);
+        self.cwd_info.remove(&cage_id);
+    }
+
     pub fn dup(&mut self, cage_id: u64, oldfd: u64) -> i32 {
         let entry = match fdtables::translate_virtual_fd(cage_id, oldfd) {
             Ok(entry) => entry,
@@ -946,20 +1015,16 @@ impl ImfsState {
             return -9;
         }
 
-        if let NodeInfo::Pip {
-            readers, writers, ..
-        } = &mut self.nodes[node_idx].info
-        {
-            let flags = fd_info.lock().unwrap().flags as i32;
-            match flags & O_ACCMODE {
-                O_WRONLY => *writers += 1,
-                _ => *readers += 1,
-            }
-        }
-
-        match fdtables::get_unused_virtual_fd(cage_id, IMFS_FDKIND, entry.underfd, false, 0) {
+        match fdtables::get_unused_virtual_fd(
+            cage_id,
+            IMFS_FDKIND,
+            entry.underfd,
+            false,
+            entry.perfdinfo,
+        ) {
             Ok(newfd) => {
                 self.nodes[node_idx].in_use += 1;
+                self.bump_pipe_ref(node_idx, &fd_info);
                 self.fd_info.insert((cage_id, newfd), fd_info);
                 newfd as i32
             }
@@ -1000,20 +1065,11 @@ impl ImfsState {
             IMFS_FDKIND,
             entry.underfd,
             cloexec,
-            0,
+            entry.perfdinfo,
         ) {
             Ok(_) => {
                 self.nodes[node_idx].in_use += 1;
-                if let NodeInfo::Pip {
-                    readers, writers, ..
-                } = &mut self.nodes[node_idx].info
-                {
-                    let flags = fd_info.lock().unwrap().flags as i32;
-                    match flags & O_ACCMODE {
-                        O_WRONLY => *writers += 1,
-                        _ => *readers += 1,
-                    }
-                }
+                self.bump_pipe_ref(node_idx, &fd_info);
                 self.fd_info.insert((cage_id, newfd), fd_info);
                 newfd as i32
             }
@@ -1046,21 +1102,12 @@ impl ImfsState {
             IMFS_FDKIND,
             entry.underfd,
             cloexec,
-            0,
+            entry.perfdinfo,
             startfd as u64,
         ) {
             Ok(newfd) => {
                 self.nodes[node_idx].in_use += 1;
-                if let NodeInfo::Pip {
-                    readers, writers, ..
-                } = &mut self.nodes[node_idx].info
-                {
-                    let flags = fd_info.lock().unwrap().flags as i32;
-                    match flags & O_ACCMODE {
-                        O_WRONLY => *writers += 1,
-                        _ => *readers += 1,
-                    }
-                }
+                self.bump_pipe_ref(node_idx, &fd_info);
                 self.fd_info.insert((cage_id, newfd), fd_info);
                 newfd as i32
             }
@@ -1080,7 +1127,9 @@ impl ImfsState {
     pub fn fork(&mut self, parent_cage: u64, child_cage: u64) {
         for ((cage_id, fd), underfd_arc) in self.fd_info.clone().iter() {
             if *cage_id == parent_cage {
-                self.fd_info.insert((child_cage, *fd), underfd_arc.clone());
+                self.fd_info
+                    .entry((child_cage, *fd))
+                    .or_insert_with(|| underfd_arc.clone());
             }
         }
 
