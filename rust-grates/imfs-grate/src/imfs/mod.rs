@@ -99,6 +99,10 @@ pub struct ImfsState {
 
     /// List of current working directories for each cage.
     pub cwd_info: HashMap<u64, String>,
+
+    /// Node indices standing in for the cage's inherited host stdin/stdout/stderr.
+    /// fds that resolve to one of these are forwarded to the host instead of IMFS.
+    pub host_std_nodes: [usize; 3],
 }
 
 /// Initialize the global IMFS. Called once at startup.
@@ -111,6 +115,7 @@ pub fn init() {
         root_idx: 0,
         fd_info: HashMap::new(),
         cwd_info: HashMap::new(),
+        host_std_nodes: [0; 3],
     };
 
     state.cwd_info.insert(0, "/".to_string());
@@ -128,6 +133,14 @@ pub fn init() {
     let dotdot_idx = state.create_node("..", NodeType::Lnk, 0);
     state.nodes[dotdot_idx].info = NodeInfo::HardLink { target: root_idx };
     state.add_child(root_idx, dotdot_idx);
+
+    // Host standard streams. Not linked into any directory; reachable only through
+    // fds registered by `register_host_std` (and whatever dup/dup2/fcntl derive from them).
+    for (i, name) in ["stdin", "stdout", "stderr"].iter().enumerate() {
+        let idx = state.create_node(name, NodeType::Chr, 0o620);
+        state.nodes[idx].info = NodeInfo::HostStd { hostfd: i as i32 };
+        state.host_std_nodes[i] = idx;
+    }
 
     *IMFS.lock().unwrap() = Some(state);
 }
@@ -882,6 +895,31 @@ impl ImfsState {
         return Ok((idx as usize, flags));
     }
 
+    /// If `fd` resolves to one of the host standard-stream nodes, return the host fd
+    /// the grate should forward to. `None` means the fd is an ordinary IMFS entry
+    /// (or not open at all) and must go through the IMFS path.
+    pub fn host_std_fd(&mut self, cage_id: u64, fd: u64) -> Option<i32> {
+        let entry = fdtables::translate_virtual_fd(cage_id, fd).ok()?;
+        let node_idx = entry.underfd as usize;
+        if node_idx >= self.nodes.len() {
+            return None;
+        }
+        match &self.nodes[node_idx].info {
+            NodeInfo::HostStd { hostfd } => Some(*hostfd),
+            _ => None,
+        }
+    }
+
+    /// Point virtual `fd` (0, 1 or 2) of `cage_id` at the matching host standard stream.
+    /// Replaces whatever was registered at that fd.
+    pub fn register_host_std(&mut self, cage_id: u64, fd: u64) {
+        let which = (fd as usize).min(2);
+        let node_idx = self.host_std_nodes[which];
+        let _ = fdtables::get_specific_virtual_fd(cage_id, fd, IMFS_FDKIND, node_idx as u64, false, 0);
+        self.nodes[node_idx].in_use += 1;
+        self.insert_perfdinfo(cage_id, fd, O_RDWR as u64);
+    }
+
     pub fn insert_perfdinfo(&mut self, cageid: u64, fd: u64, flags: u64) {
         self.fd_info.insert(
             (cageid, fd),
@@ -1456,6 +1494,7 @@ impl ImfsState {
         match &self.nodes[node_idx].info {
             NodeInfo::Reg { .. } => {}
             NodeInfo::Pip { .. } => return -29, // EISPIPE
+            NodeInfo::HostStd { .. } => return -29, // ESPIPE: host streams are not seekable
             NodeInfo::Dir { .. } => return offset as i32, // On directory lseeks, we return offset
             // immediately.
             _ => return -9, // EBADF on Free/Lnk (will never be hit)
