@@ -23,8 +23,9 @@ pub enum NodeType {
     /// Link node.
     Lnk,
     /// Pipe.
-    #[allow(unused)]
     Pip,
+    /// Character device backed by a host fd (the cage's inherited stdin/stdout/stderr).
+    Chr,
     /// Free / unallocated slot.
     Free,
 }
@@ -66,12 +67,10 @@ pub enum NodeInfo {
     HardLink { target: usize },
     /// Symbolic link: stored target path.
     Symlink { target: String },
-    /// Pipe (limited implementation).
-    Pip {
-        data: Vec<u8>,
-        readers: u32,
-        writers: u32,
-    },
+    /// Pipe. Buffer and refcounts live in `crate::pipe`.
+    Pip,
+    /// Host standard stream: reads and writes are forwarded to `hostfd` on the grate's host side.
+    HostStd { hostfd: i32 },
     /// Free slot.
     Free,
 }
@@ -114,6 +113,7 @@ impl Node {
             NodeType::Dir => 0o040000 | (mode & 0o7777), // S_IFDIR
             NodeType::Lnk => 0o120000 | (mode & 0o7777), // S_IFLNK
             NodeType::Pip => 0o010000 | (mode & 0o7777), // S_IFIFO
+            NodeType::Chr => 0o020000 | (mode & 0o7777), // S_IFCHR
             NodeType::Free => mode & 0o7777,
         };
 
@@ -128,11 +128,8 @@ impl Node {
             NodeType::Lnk => NodeInfo::Symlink {
                 target: String::new(),
             },
-            NodeType::Pip => NodeInfo::Pip {
-                data: Vec::new(),
-                readers: 0,
-                writers: 0,
-            },
+            NodeType::Pip => NodeInfo::Pip,
+            NodeType::Chr => NodeInfo::HostStd { hostfd: -1 },
             NodeType::Free => NodeInfo::Free,
         };
 

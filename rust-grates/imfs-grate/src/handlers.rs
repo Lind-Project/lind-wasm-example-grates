@@ -10,6 +10,7 @@ use grate_rs::ffi::{iovec, stat};
 use grate_rs::{copy_data_between_cages, getcageid, is_thread_clone, make_threei_call};
 
 use crate::imfs;
+use crate::pipe;
 
 const MAX_PATH_LEN: usize = 256;
 const IOV_MAX: usize = 1024;
@@ -369,7 +370,14 @@ pub extern "C" fn read_handler(
     // Allocate a local buffer, read into it, then copy to cage.
     let mut buf = vec![0u8; count];
 
-    let ret = imfs::with_imfs(|state| state.read(cage_id, fd, &mut buf));
+    // Host standard streams (and anything dup'd from them) read from the real fd.
+    let ret = if let Some(hfd) = imfs::with_imfs(|state| state.host_std_fd(cage_id, fd)) {
+        unsafe { libc::read(hfd, buf.as_mut_ptr() as *mut _, count) as i32 }
+    } else if let Some((pipe, pflags)) = pipe::pipe_for_fd(cage_id, fd) {
+        pipe_read(&pipe, pflags, &mut buf)
+    } else {
+        imfs::with_imfs(|state| state.read(cage_id, fd, &mut buf))
+    };
 
     // Copy result to the cage's buffer (if buf ptr is non-null and read succeeded).
     if ret > 0 && arg2 != 0 {
@@ -430,13 +438,17 @@ pub extern "C" fn write_handler(
         0,
     );
 
-    // Special case: fd 0/1/2 (stdin/stdout/stderr) pass through to real write.
-    if fd < 3 {
-        // Write directly to the real fd.
+    // Host standard streams (and anything dup'd from them) pass through to the real fd.
+    // A std fd that bash redirected to an IMFS file resolves to that file instead.
+    if let Some(hfd) = imfs::with_imfs(|state| state.host_std_fd(cage_id, fd)) {
         unsafe {
-            let ret = libc::write(fd as i32, buf.as_ptr() as *const _, count);
+            let ret = libc::write(hfd, buf.as_ptr() as *const _, count);
             return ret as i32;
         }
+    }
+
+    if let Some((pipe, pflags)) = pipe::pipe_for_fd(cage_id, fd) {
+        return pipe_write(&pipe, pflags, &buf);
     }
 
     imfs::with_imfs(|state| state.write(cage_id, fd, &buf))
@@ -1443,10 +1455,9 @@ pub extern "C" fn pwrite_handler(
         0,
     );
 
-    // fd < 3 passthrough.
-    if fd < 3 {
+    if let Some(hfd) = imfs::with_imfs(|state| state.host_std_fd(cage_id, fd)) {
         unsafe {
-            let ret = libc::write(fd as i32, buf.as_ptr() as *const _, count);
+            let ret = libc::pwrite(hfd, buf.as_ptr() as *const _, count, offset);
             return ret as i32;
         }
     }
@@ -1483,8 +1494,10 @@ pub extern "C" fn readv_handler(
 
     let this_cage = getcageid();
     let mut buf = vec![0u8; total_len];
-    let ret = if fd < 3 {
-        unsafe { libc::read(fd as i32, buf.as_mut_ptr() as *mut _, total_len) as i32 }
+    let ret = if let Some(hfd) = imfs::with_imfs(|state| state.host_std_fd(cage_id, fd)) {
+        unsafe { libc::read(hfd, buf.as_mut_ptr() as *mut _, total_len) as i32 }
+    } else if let Some((pipe, pflags)) = pipe::pipe_for_fd(cage_id, fd) {
+        pipe_read(&pipe, pflags, &mut buf)
     } else {
         imfs::with_imfs(|state| state.read(cage_id, fd, &mut buf))
     };
@@ -1583,8 +1596,10 @@ pub extern "C" fn writev_handler(
         }
     }
 
-    if fd < 3 {
-        unsafe { libc::write(fd as i32, buf.as_ptr() as *const _, buf.len()) as i32 }
+    if let Some(hfd) = imfs::with_imfs(|state| state.host_std_fd(cage_id, fd)) {
+        unsafe { libc::write(hfd, buf.as_ptr() as *const _, buf.len()) as i32 }
+    } else if let Some((pipe, pflags)) = pipe::pipe_for_fd(cage_id, fd) {
+        pipe_write(&pipe, pflags, &buf)
     } else {
         imfs::with_imfs(|state| state.write(cage_id, fd, &buf))
     }
@@ -1620,8 +1635,8 @@ pub extern "C" fn preadv_handler(
 
     let this_cage = getcageid();
     let mut buf = vec![0u8; total_len];
-    let ret = if fd < 3 {
-        unsafe { libc::pread(fd as i32, buf.as_mut_ptr() as *mut _, total_len, offset) as i32 }
+    let ret = if let Some(hfd) = imfs::with_imfs(|state| state.host_std_fd(cage_id, fd)) {
+        unsafe { libc::pread(hfd, buf.as_mut_ptr() as *mut _, total_len, offset) as i32 }
     } else {
         imfs::with_imfs(|state| state.pread(cage_id, fd, &mut buf, offset))
     };
@@ -1721,8 +1736,8 @@ pub extern "C" fn pwritev_handler(
         }
     }
 
-    if fd < 3 {
-        unsafe { libc::pwrite(fd as i32, buf.as_ptr() as *const _, buf.len(), offset) as i32 }
+    if let Some(hfd) = imfs::with_imfs(|state| state.host_std_fd(cage_id, fd)) {
+        unsafe { libc::pwrite(hfd, buf.as_ptr() as *const _, buf.len(), offset) as i32 }
     } else {
         imfs::with_imfs(|state| state.pwrite(cage_id, fd, &buf, offset))
     }
@@ -1984,12 +1999,49 @@ pub extern "C" fn fork_handler(
     let child_cage_id = ret as u64;
 
     if !is_thread_clone(arg1, arg1cage) {
-        // Clone the fdtables for the child — inherits all open fds.
-        let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
+        // The child may already be running; keep any fds it created itself.
+        let parent_fds = fdtables::return_fdtable_copy(arg1cage);
+        let existed = fdtables::check_cage_exists(child_cage_id);
+        if !existed {
+            fdtables::init_empty_cage(child_cage_id);
+        }
+        let mut inherited = 0usize;
+        for (fd, entry) in &parent_fds {
+            if fdtables::translate_virtual_fd(child_cage_id, *fd).is_ok() {
+                continue;
+            }
+            if fdtables::get_specific_virtual_fd(
+                child_cage_id,
+                *fd,
+                entry.fdkind,
+                entry.underfd,
+                entry.should_cloexec,
+                entry.perfdinfo,
+            )
+            .is_ok()
+            {
+                inherited += 1;
+                pipe::add_ref_for_entry(entry);
+            }
+        }
 
         imfs::with_imfs(|state| {
             state.fork(arg1cage, child_cage_id);
         });
+
+        crate::log!(
+            "fork: {} -> {} table-existed={} inherited={}",
+            arg1cage,
+            child_cage_id,
+            existed,
+            inherited
+        );
+
+        if pipe::take_early_exit(child_cage_id) {
+            crate::log!("fork: child {} already exited, releasing its fds", child_cage_id);
+            fdtables::remove_cage_from_fdtable(child_cage_id);
+            imfs::with_imfs(|state| state.forget_cage(child_cage_id));
+        }
     }
 
     child_cage_id as i32
@@ -2032,17 +2084,13 @@ pub extern "C" fn exec_handler(
     // it calls the registered close handlers for each closed fd.
     fdtables::empty_fds_for_exec(cage_id);
 
-    // fdtables allocates virtual FDs, which start from 0 instead of 3.
-    // Unlike regular lind, `underfd` does not point to an actual FD allocation mechanism,
-    // so we need to manually open stdin/stdout/stderr file descriptors to reserve them.
-    for _fd in 0..3 {
-        let _ = fdtables::get_unused_virtual_fd(
-            cage_id,
-            crate::imfs::IMFS_FDKIND,
-            0, // underfd: which node
-            false,
-            0,
-        );
+    // Make sure fds 0..3 exist after exec. `empty_fds_for_exec` keeps non-cloexec
+    // entries, so an inherited (possibly redirected) std fd survives as-is; only a
+    // missing one is re-pointed at the host stream.
+    for fd in 0..3 {
+        if fdtables::translate_virtual_fd(cage_id, fd).is_err() {
+            imfs::with_imfs(|s| s.register_host_std(cage_id, fd));
+        }
     }
 
     // Forward the exec to the runtime.
@@ -2068,4 +2116,172 @@ pub extern "C" fn exec_handler(
         Ok(r) => r,
         Err(_) => -1,
     }
+}
+
+// =====================================================================
+//  pipes (syscalls 22 / 293) and cage exit (60 / 231)
+// =====================================================================
+
+fn pipe_read(pipe: &pipe::PipeBuffer, pflags: i32, buf: &mut [u8]) -> i32 {
+    if pipe::is_write_end(pflags) {
+        return -9; // EBADF: read on the write end
+    }
+    let ret = pipe.read(buf, (pflags & pipe::O_NONBLOCK) != 0);
+    crate::log!("pipe read: want {} -> {}", buf.len(), ret);
+    ret
+}
+
+fn pipe_write(pipe: &pipe::PipeBuffer, pflags: i32, buf: &[u8]) -> i32 {
+    if !pipe::is_write_end(pflags) {
+        return -9; // EBADF: write on the read end
+    }
+    let ret = pipe.write(buf, (pflags & pipe::O_NONBLOCK) != 0);
+    crate::log!("pipe write: {} -> {}", buf.len(), ret);
+    ret
+}
+
+fn pipe_impl(cage_id: u64, pipefd_ptr: u64, pipefd_cage: u64, flags: i32) -> i32 {
+    if pipefd_ptr == 0 {
+        return -14; // EFAULT
+    }
+
+    let (rfd, wfd) = match imfs::with_imfs(|state| state.create_pipe(cage_id, flags)) {
+        Ok(fds) => fds,
+        Err(e) => return e,
+    };
+
+    let this_cage = getcageid();
+    let fds: [i32; 2] = [rfd, wfd];
+    let _ = copy_data_between_cages(
+        this_cage,
+        pipefd_cage,
+        fds.as_ptr() as u64,
+        this_cage,
+        pipefd_ptr,
+        pipefd_cage,
+        8,
+        0,
+    );
+
+    crate::log!("pipe: cage {} -> ({}, {})", cage_id, rfd, wfd);
+    0
+}
+
+pub extern "C" fn pipe_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    _arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    pipe_impl(arg1cage, arg1, arg1cage, 0)
+}
+
+pub extern "C" fn pipe2_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
+) -> i32 {
+    pipe_impl(arg1cage, arg1, arg1cage, arg2 as i32)
+}
+
+/// Release the cage's fds in this grate's own fdtables, so a pipe write end
+/// held by an exiting cage is dropped and readers see EOF. Then forward.
+fn exit_impl(syscall: u64, args: [u64; 6], arg_cages: [u64; 6]) -> i32 {
+    let cage_id = arg_cages[0];
+    let this_cage = getcageid();
+
+    let existed = fdtables::check_cage_exists(cage_id);
+    if existed {
+        fdtables::remove_cage_from_fdtable(cage_id);
+    } else {
+        pipe::note_early_exit(cage_id);
+    }
+    imfs::with_imfs(|state| state.forget_cage(cage_id));
+    crate::log!("exit: cage {} table-existed={}", cage_id, existed);
+
+    match make_threei_call(
+        syscall as u32,
+        0,
+        this_cage,
+        cage_id,
+        args[0],
+        arg_cages[0],
+        args[1],
+        arg_cages[1],
+        args[2],
+        arg_cages[2],
+        args[3],
+        arg_cages[3],
+        args[4],
+        arg_cages[4],
+        args[5],
+        arg_cages[5],
+        0,
+    ) {
+        Ok(r) => r,
+        Err(_) => -1,
+    }
+}
+
+pub extern "C" fn exit_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    exit_impl(
+        SYS_EXIT,
+        [arg1, arg2, arg3, arg4, arg5, arg6],
+        [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
+    )
+}
+
+pub extern "C" fn exit_group_handler(
+    _cageid: u64,
+    arg1: u64,
+    arg1cage: u64,
+    arg2: u64,
+    arg2cage: u64,
+    arg3: u64,
+    arg3cage: u64,
+    arg4: u64,
+    arg4cage: u64,
+    arg5: u64,
+    arg5cage: u64,
+    arg6: u64,
+    arg6cage: u64,
+) -> i32 {
+    exit_impl(
+        SYS_EXIT_GROUP,
+        [arg1, arg2, arg3, arg4, arg5, arg6],
+        [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage],
+    )
 }

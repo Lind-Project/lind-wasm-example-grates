@@ -99,6 +99,10 @@ pub struct ImfsState {
 
     /// List of current working directories for each cage.
     pub cwd_info: HashMap<u64, String>,
+
+    /// Node indices standing in for the cage's inherited host stdin/stdout/stderr.
+    /// fds that resolve to one of these are forwarded to the host instead of IMFS.
+    pub host_std_nodes: [usize; 3],
 }
 
 /// Initialize the global IMFS. Called once at startup.
@@ -111,6 +115,7 @@ pub fn init() {
         root_idx: 0,
         fd_info: HashMap::new(),
         cwd_info: HashMap::new(),
+        host_std_nodes: [0; 3],
     };
 
     state.cwd_info.insert(0, "/".to_string());
@@ -128,6 +133,14 @@ pub fn init() {
     let dotdot_idx = state.create_node("..", NodeType::Lnk, 0);
     state.nodes[dotdot_idx].info = NodeInfo::HardLink { target: root_idx };
     state.add_child(root_idx, dotdot_idx);
+
+    // Host standard streams. Not linked into any directory; reachable only through
+    // fds registered by `register_host_std` (and whatever dup/dup2/fcntl derive from them).
+    for (i, name) in ["stdin", "stdout", "stderr"].iter().enumerate() {
+        let idx = state.create_node(name, NodeType::Chr, 0o620);
+        state.nodes[idx].info = NodeInfo::HostStd { hostfd: i as i32 };
+        state.host_std_nodes[i] = idx;
+    }
 
     *IMFS.lock().unwrap() = Some(state);
 }
@@ -882,6 +895,31 @@ impl ImfsState {
         return Ok((idx as usize, flags));
     }
 
+    /// If `fd` resolves to one of the host standard-stream nodes, return the host fd
+    /// the grate should forward to. `None` means the fd is an ordinary IMFS entry
+    /// (or not open at all) and must go through the IMFS path.
+    pub fn host_std_fd(&mut self, cage_id: u64, fd: u64) -> Option<i32> {
+        let entry = fdtables::translate_virtual_fd(cage_id, fd).ok()?;
+        let node_idx = entry.underfd as usize;
+        if node_idx >= self.nodes.len() {
+            return None;
+        }
+        match &self.nodes[node_idx].info {
+            NodeInfo::HostStd { hostfd } => Some(*hostfd),
+            _ => None,
+        }
+    }
+
+    /// Point virtual `fd` (0, 1 or 2) of `cage_id` at the matching host standard stream.
+    /// Replaces whatever was registered at that fd.
+    pub fn register_host_std(&mut self, cage_id: u64, fd: u64) {
+        let which = (fd as usize).min(2);
+        let node_idx = self.host_std_nodes[which];
+        let _ = fdtables::get_specific_virtual_fd(cage_id, fd, IMFS_FDKIND, node_idx as u64, false, 0);
+        self.nodes[node_idx].in_use += 1;
+        self.insert_perfdinfo(cage_id, fd, O_RDWR as u64);
+    }
+
     pub fn insert_perfdinfo(&mut self, cageid: u64, fd: u64, flags: u64) {
         self.fd_info.insert(
             (cageid, fd),
@@ -890,6 +928,75 @@ impl ImfsState {
                 offset: 0,
             })),
         );
+    }
+
+    fn bump_pipe_ref(&self, node_idx: usize, fd_info: &Arc<Mutex<FDInfo>>) {
+        if let NodeInfo::Pip = &self.nodes[node_idx].info {
+            if let Some(pipe) = crate::pipe::get(node_idx) {
+                pipe.incr_ref(fd_info.lock().unwrap().flags as i32);
+            }
+        }
+    }
+
+    fn reclaim_dead_pipes(&mut self) {
+        for idx in crate::pipe::take_dead() {
+            if let NodeInfo::Pip = &self.nodes[idx].info {
+                self.reclaim_node(idx);
+            }
+        }
+    }
+
+    /// Returns (read_fd, write_fd).
+    pub fn create_pipe(&mut self, cage_id: u64, flags: i32) -> Result<(i32, i32), i32> {
+        self.reclaim_dead_pipes();
+
+        let cloexec = (flags & O_CLOEXEC) != 0;
+        let nonblock = flags & crate::pipe::O_NONBLOCK;
+        let rflags = (O_RDONLY | nonblock) as u64;
+        let wflags = (O_WRONLY | nonblock) as u64;
+
+        let node_idx = self.create_node("pipe", NodeType::Pip, 0o600);
+        let pipe = Arc::new(crate::pipe::PipeBuffer::new(crate::pipe::PIPE_CAPACITY));
+        crate::pipe::register(node_idx, pipe);
+
+        let rfd = match fdtables::get_unused_virtual_fd(
+            cage_id,
+            IMFS_FDKIND,
+            node_idx as u64,
+            cloexec,
+            rflags,
+        ) {
+            Ok(fd) => fd,
+            Err(_) => {
+                self.reclaim_node(node_idx);
+                return Err(-24); // EMFILE
+            }
+        };
+        let wfd = match fdtables::get_unused_virtual_fd(
+            cage_id,
+            IMFS_FDKIND,
+            node_idx as u64,
+            cloexec,
+            wflags,
+        ) {
+            Ok(fd) => fd,
+            Err(_) => {
+                let _ = fdtables::close_virtualfd(cage_id, rfd);
+                self.reclaim_dead_pipes();
+                return Err(-24);
+            }
+        };
+
+        self.nodes[node_idx].in_use = 2;
+        self.insert_perfdinfo(cage_id, rfd, rflags);
+        self.insert_perfdinfo(cage_id, wfd, wflags);
+
+        Ok((rfd as i32, wfd as i32))
+    }
+
+    pub fn forget_cage(&mut self, cage_id: u64) {
+        self.fd_info.retain(|(c, _), _| *c != cage_id);
+        self.cwd_info.remove(&cage_id);
     }
 
     pub fn dup(&mut self, cage_id: u64, oldfd: u64) -> i32 {
@@ -908,20 +1015,16 @@ impl ImfsState {
             return -9;
         }
 
-        if let NodeInfo::Pip {
-            readers, writers, ..
-        } = &mut self.nodes[node_idx].info
-        {
-            let flags = fd_info.lock().unwrap().flags as i32;
-            match flags & O_ACCMODE {
-                O_WRONLY => *writers += 1,
-                _ => *readers += 1,
-            }
-        }
-
-        match fdtables::get_unused_virtual_fd(cage_id, IMFS_FDKIND, entry.underfd, false, 0) {
+        match fdtables::get_unused_virtual_fd(
+            cage_id,
+            IMFS_FDKIND,
+            entry.underfd,
+            false,
+            entry.perfdinfo,
+        ) {
             Ok(newfd) => {
                 self.nodes[node_idx].in_use += 1;
+                self.bump_pipe_ref(node_idx, &fd_info);
                 self.fd_info.insert((cage_id, newfd), fd_info);
                 newfd as i32
             }
@@ -962,20 +1065,11 @@ impl ImfsState {
             IMFS_FDKIND,
             entry.underfd,
             cloexec,
-            0,
+            entry.perfdinfo,
         ) {
             Ok(_) => {
                 self.nodes[node_idx].in_use += 1;
-                if let NodeInfo::Pip {
-                    readers, writers, ..
-                } = &mut self.nodes[node_idx].info
-                {
-                    let flags = fd_info.lock().unwrap().flags as i32;
-                    match flags & O_ACCMODE {
-                        O_WRONLY => *writers += 1,
-                        _ => *readers += 1,
-                    }
-                }
+                self.bump_pipe_ref(node_idx, &fd_info);
                 self.fd_info.insert((cage_id, newfd), fd_info);
                 newfd as i32
             }
@@ -1008,21 +1102,12 @@ impl ImfsState {
             IMFS_FDKIND,
             entry.underfd,
             cloexec,
-            0,
+            entry.perfdinfo,
             startfd as u64,
         ) {
             Ok(newfd) => {
                 self.nodes[node_idx].in_use += 1;
-                if let NodeInfo::Pip {
-                    readers, writers, ..
-                } = &mut self.nodes[node_idx].info
-                {
-                    let flags = fd_info.lock().unwrap().flags as i32;
-                    match flags & O_ACCMODE {
-                        O_WRONLY => *writers += 1,
-                        _ => *readers += 1,
-                    }
-                }
+                self.bump_pipe_ref(node_idx, &fd_info);
                 self.fd_info.insert((cage_id, newfd), fd_info);
                 newfd as i32
             }
@@ -1042,7 +1127,9 @@ impl ImfsState {
     pub fn fork(&mut self, parent_cage: u64, child_cage: u64) {
         for ((cage_id, fd), underfd_arc) in self.fd_info.clone().iter() {
             if *cage_id == parent_cage {
-                self.fd_info.insert((child_cage, *fd), underfd_arc.clone());
+                self.fd_info
+                    .entry((child_cage, *fd))
+                    .or_insert_with(|| underfd_arc.clone());
             }
         }
 
@@ -1456,6 +1543,7 @@ impl ImfsState {
         match &self.nodes[node_idx].info {
             NodeInfo::Reg { .. } => {}
             NodeInfo::Pip { .. } => return -29, // EISPIPE
+            NodeInfo::HostStd { .. } => return -29, // ESPIPE: host streams are not seekable
             NodeInfo::Dir { .. } => return offset as i32, // On directory lseeks, we return offset
             // immediately.
             _ => return -9, // EBADF on Free/Lnk (will never be hit)

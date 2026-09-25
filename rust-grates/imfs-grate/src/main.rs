@@ -13,8 +13,8 @@
 mod handlers;
 mod imfs;
 mod logging;
+mod pipe;
 
-use grate_rs::constants::fs::O_RDWR;
 use grate_rs::constants::lind::GRATE_MEMORY_FLAG;
 use grate_rs::constants::*;
 use grate_rs::ffi::stat;
@@ -54,6 +54,7 @@ fn parse_argv(args: Vec<String>) -> Config {
 fn main() {
     let config = parse_argv(std::env::args().skip(1).collect());
     logging::init(config.log_enabled);
+    logging::install_panic_hook();
     let dump_files = std::env::var("DUMPS").ok();
 
     // Initialize the in-memory filesystem.
@@ -64,7 +65,10 @@ fn main() {
         load_preloads(&preloads);
     }
 
-    imfs::with_imfs(|s| s.mkdir(0, "/tmp", 0755));
+    imfs::with_imfs(|s| s.mkdir(0, "/tmp", 0o755));
+
+    // Fires on close, dup2 overwrite, exec and cage exit.
+    fdtables::register_close_handlers(imfs::IMFS_FDKIND, pipe::on_fd_closed, pipe::on_fd_closed);
 
     // Build and run the grate. Registers handlers for all filesystem syscalls,
     // forks a child cage, and waits for it to exit.
@@ -78,8 +82,10 @@ fn main() {
         .register(SYS_DUP, handlers::dup_handler)
         .register(SYS_DUP2, handlers::dup2_handler)
         .register(SYS_DUP3, handlers::dup3_handler)
-        .register(SYS_PIPE, handlers::enosys_handler)
-        .register(SYS_PIPE2, handlers::enosys_handler)
+        .register(SYS_PIPE, handlers::pipe_handler)
+        .register(SYS_PIPE2, handlers::pipe2_handler)
+        .register(SYS_EXIT, handlers::exit_handler)
+        .register(SYS_EXIT_GROUP, handlers::exit_group_handler)
         .register(SYS_READ, handlers::read_handler)
         .register(SYS_WRITE, handlers::write_handler)
         .register(SYS_LSEEK, handlers::lseek_handler)
@@ -136,17 +142,10 @@ fn main() {
             fdtables::init_empty_cage(cageid as u64);
             log!("init-ing {}", cageid);
 
+            // fds 0..3 are the cage's inherited host streams. Reads and writes on them
+            // (or on any fd dup'd from them) are forwarded to the host by the handlers.
             for fd in 0..3 {
-                let _ = fdtables::get_specific_virtual_fd(
-                    cageid as u64,
-                    fd,
-                    imfs::IMFS_FDKIND,
-                    0,
-                    false,
-                    0,
-                );
-
-                imfs::with_imfs(|s| s.insert_perfdinfo(cageid as u64, fd, O_RDWR as u64));
+                imfs::with_imfs(|s| s.register_host_std(cageid as u64, fd));
             }
         })
         .teardown(move |result: Result<i32, GrateError>| {
