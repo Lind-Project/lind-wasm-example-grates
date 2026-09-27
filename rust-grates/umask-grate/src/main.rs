@@ -1,58 +1,53 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 
-use grate_rs::{
-    GrateBuilder, GrateError,
-    constants::SYS_UMASK,
-    make_threei_call,
-};
+use grate_rs::{GrateBuilder, constants::SYS_UMASK};
 
-/// The "ceiling" mask: any bits NOT in this mask will be forced into
-/// every umask the cage sets. Default 0o000 = no restriction (pass through).
+/// Bits forced into every umask the cage sets.
+/// Default 0o000 adds no restriction to the requested mask.
 static FORCE_BITS: AtomicU64 = AtomicU64::new(0o000);
 
+/// The default effective umask for a newly observed cage.
+const INITIAL_UMASK: u64 = 0o022;
+
+/// Effective umasks keyed by the cage currently making the syscall.
+///
+/// The grate handler receives the destination grate ID as its first argument.
+/// The `mask_cage` metadata identifies the cage that owns the syscall argument,
+/// which is the calling cage for `umask`. Keep the state keyed by that ID so
+/// calls from different cages cannot overwrite one another's umask. The mutex
+/// also makes the read-and-replace operation equivalent to the old atomic swap
+/// when grate calls execute concurrently.
+static CAGE_UMASKS: LazyLock<Mutex<HashMap<u64, u64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 extern "C" fn umask_handler(
-    cageid: u64,
+    _grate_id: u64,
     mask: u64,
     mask_cage: u64,
-    arg2: u64,
-    arg2cage: u64,
-    arg3: u64,
-    arg3cage: u64,
-    arg4: u64,
-    arg4cage: u64,
-    arg5: u64,
-    arg5cage: u64,
-    arg6: u64,
-    arg6cage: u64,
+    _arg2: u64,
+    _arg2cage: u64,
+    _arg3: u64,
+    _arg3cage: u64,
+    _arg4: u64,
+    _arg4cage: u64,
+    _arg5: u64,
+    _arg5cage: u64,
+    _arg6: u64,
+    _arg6cage: u64,
 ) -> i32 {
-    // Force any required bits into the cage's requested umask.
-    // e.g. with --force-bits 022, the cage can never set a umask
-    // that would allow group-write or other-write.
-    let enforced_mask = mask | FORCE_BITS.load(Ordering::Relaxed);
+    let enforced_mask = (mask | FORCE_BITS.load(Ordering::Relaxed)) & 0o777;
+    let cage_id = mask_cage;
 
-    match make_threei_call(
-        SYS_UMASK as u32,
-        0,
-        cageid,
-        mask_cage,
-        enforced_mask,
-        mask_cage,
-        arg2,
-        arg2cage,
-        arg3,
-        arg3cage,
-        arg4,
-        arg4cage,
-        arg5,
-        arg5cage,
-        arg6,
-        arg6cage,
-        0,
-    ) {
-        Ok(r) => r,
-        Err(GrateError::MakeSyscallError(n)) => n,
-        Err(_) => -1,
-    }
+    let mut cage_umasks = CAGE_UMASKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous_mask = cage_umasks
+        .insert(cage_id, enforced_mask)
+        .unwrap_or(INITIAL_UMASK);
+
+    previous_mask as i32
 }
 
 struct Config {
@@ -71,8 +66,9 @@ fn parse_args() -> Result<Config, String> {
             if i + 1 >= args.len() {
                 return Err("--force-bits requires an argument".to_string());
             }
-            force_bits = u64::from_str_radix(&args[i + 1], 8)
-                .map_err(|_| format!("--force-bits: '{}' is not a valid octal value", args[i + 1]))?;
+            force_bits = u64::from_str_radix(&args[i + 1], 8).map_err(|_| {
+                format!("--force-bits: '{}' is not a valid octal value", args[i + 1])
+            })?;
             i += 2;
         } else {
             remaining_args.push(args[i].clone());
@@ -80,7 +76,10 @@ fn parse_args() -> Result<Config, String> {
         }
     }
 
-    Ok(Config { force_bits, remaining_args })
+    Ok(Config {
+        force_bits,
+        remaining_args,
+    })
 }
 
 fn main() {
