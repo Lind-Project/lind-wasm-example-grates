@@ -1,8 +1,10 @@
 //! IMFS node and chunk types.
 //!
 //! The filesystem is a tree of Nodes (directories, regular files, symlinks, pipes).
-//! Regular file data is stored in linked-list chains of 1024-byte Chunks.
-//! All nodes and chunks live in arena-style Vec storage and are referenced by index.
+//! Regular file data is stored in 1024-byte Chunks; each file keeps the
+//! indices of its chunks in file order, so the chunk holding byte `off` is
+//! `chunks[off / CHUNK_SIZE]`. All nodes and chunks live in arena-style Vec
+//! storage and are referenced by index.
 
 pub const CHUNK_SIZE: usize = 1024;
 pub const MAX_NODE_NAME: usize = 65;
@@ -55,11 +57,9 @@ impl NodeTime {
 /// Type-specific data for a node.
 #[derive(Clone, Debug)]
 pub enum NodeInfo {
-    /// Regular file: linked list of chunks.
-    Reg {
-        head: Option<usize>,
-        tail: Option<usize>,
-    },
+    /// Regular file: arena indices of its chunks, in file order. Bytes past
+    /// the file size in the last chunk are always zero.
+    Reg { chunks: Vec<usize> },
     /// Directory: list of child entries.
     Dir { children: Vec<DirEntry> },
     /// Hard link: index of the target node.
@@ -118,10 +118,7 @@ impl Node {
         };
 
         let info = match node_type {
-            NodeType::Reg => NodeInfo::Reg {
-                head: None,
-                tail: None,
-            },
+            NodeType::Reg => NodeInfo::Reg { chunks: Vec::new() },
             NodeType::Dir => NodeInfo::Dir {
                 children: Vec::new(),
             },
@@ -188,21 +185,6 @@ impl Node {
     }
 }
 
-/// A 1024-byte chunk of file data, part of a linked list.
-#[derive(Clone)]
-pub struct Chunk {
-    pub data: [u8; CHUNK_SIZE],
-    pub used: usize,
-    /// Index of the next chunk in the chain, or None.
-    pub next: Option<usize>,
-}
-
-impl Chunk {
-    pub fn new() -> Self {
-        Chunk {
-            data: [0u8; CHUNK_SIZE],
-            used: 0,
-            next: None,
-        }
-    }
-}
+/// A 1024-byte chunk of file data. A plain array, so chunks with adjacent
+/// arena indices are adjacent in memory and can be copied as one run.
+pub type Chunk = [u8; CHUNK_SIZE];

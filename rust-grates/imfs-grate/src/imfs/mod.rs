@@ -1,7 +1,7 @@
 //! In-Memory Filesystem (IMFS).
 //!
 //! The filesystem is a tree of Nodes stored in an arena-style Vec.
-//! File data is stored in chains of 1024-byte Chunks.
+//! File data is stored in 1024-byte Chunks indexed by file offset.
 //!
 //! fd management is handled entirely by the fdtables library:
 //!   - underfd  = node index (which file this fd points to)
@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use grate_rs::ffi::stat;
+use grate_rs::{copy_data_between_cages, getcageid};
 use node::*;
 
 use grate_rs::constants::fs::*;
@@ -36,6 +37,63 @@ where
 {
     let mut guard = IMFS.lock().unwrap();
     f(guard.as_mut().expect("IMFS not initialized"))
+}
+
+/// `len` bytes at `addr` in cage `cage`. read and write copy file data to and
+/// from such a buffer directly with 3i, without a buffer in the grate.
+#[derive(Clone, Copy)]
+pub struct CageBuf {
+    pub addr: u64,
+    pub cage: u64,
+    pub len: usize,
+}
+
+fn copy_to_slice(buf: &mut [u8]) -> impl FnMut(&[u8], usize) -> Result<(), i32> + '_ {
+    |data, pos| {
+        buf[pos..pos + data.len()].copy_from_slice(data);
+        Ok(())
+    }
+}
+
+fn copy_from_slice(buf: &[u8]) -> impl FnMut(&mut [u8], usize) -> Result<(), i32> + '_ {
+    |data, pos| {
+        data.copy_from_slice(&buf[pos..pos + data.len()]);
+        Ok(())
+    }
+}
+
+fn copy_to_cage(buf: CageBuf) -> impl FnMut(&[u8], usize) -> Result<(), i32> {
+    let this_cage = getcageid();
+    move |data, pos| {
+        copy_data_between_cages(
+            this_cage,
+            buf.cage,
+            data.as_ptr() as u64,
+            this_cage,
+            buf.addr + pos as u64,
+            buf.cage,
+            data.len() as u64,
+            0, // copytype=0 means raw memcpy
+        )
+        .map_err(|_| -14) // EFAULT
+    }
+}
+
+fn copy_from_cage(buf: CageBuf) -> impl FnMut(&mut [u8], usize) -> Result<(), i32> {
+    let this_cage = getcageid();
+    move |data, pos| {
+        copy_data_between_cages(
+            this_cage,
+            buf.cage,
+            buf.addr + pos as u64,
+            buf.cage,
+            data.as_mut_ptr() as u64,
+            this_cage,
+            data.len() as u64,
+            0,
+        )
+        .map_err(|_| -14) // EFAULT
+    }
 }
 
 pub struct FDInfo {
@@ -235,16 +293,10 @@ impl ImfsState {
 
     /// Mark a node slot as free and return it to the free list for reuse.
     fn reclaim_node(&mut self, idx: usize) {
-        let chunk_head = match &mut self.nodes[idx].info {
-            NodeInfo::Reg { head, tail } => {
-                let old_head = *head;
-                *head = None;
-                *tail = None;
-                old_head
-            }
-            _ => None,
-        };
-        self.reclaim_chunk_chain(chunk_head);
+        if let NodeInfo::Reg { chunks } = &mut self.nodes[idx].info {
+            let chunks = std::mem::take(chunks);
+            self.reclaim_chunks(chunks);
+        }
 
         self.nodes[idx].node_type = NodeType::Free;
         self.nodes[idx].info = NodeInfo::Free;
@@ -306,30 +358,24 @@ impl ImfsState {
     //  Chunk management
     // =====================================================================
 
-    /// Allocate a new empty chunk. Reuses from free list or appends.
+    /// Allocate a new zeroed chunk. Reuses from free list or appends.
     /// Returns the chunk index in self.chunks.
     fn alloc_chunk(&mut self) -> usize {
         if let Some(free_idx) = self.chunk_free_list.pop() {
-            self.chunks[free_idx] = Chunk::new();
+            self.chunks[free_idx] = [0u8; CHUNK_SIZE];
             free_idx
         } else {
             let idx = self.chunks.len();
-            self.chunks.push(Chunk::new());
+            self.chunks.push([0u8; CHUNK_SIZE]);
             idx
         }
     }
 
-    fn reclaim_chunk(&mut self, idx: usize) {
-        self.chunks[idx] = Chunk::new();
-        self.chunk_free_list.push(idx);
-    }
-
-    fn reclaim_chunk_chain(&mut self, mut chunk_idx: Option<usize>) {
-        while let Some(ci) = chunk_idx {
-            let next = self.chunks[ci].next;
-            self.reclaim_chunk(ci);
-            chunk_idx = next;
-        }
+    /// Return a file's chunks to the free list. They are pushed in reverse so
+    /// that a file rewritten from scratch gets them back in ascending order,
+    /// which keeps its chunks adjacent in memory (see `for_each_run`).
+    fn reclaim_chunks(&mut self, chunks: Vec<usize>) {
+        self.chunk_free_list.extend(chunks.into_iter().rev());
     }
 
     // =====================================================================
@@ -655,200 +701,108 @@ impl ImfsState {
     //  Internal chunk read/write
     // =====================================================================
 
-    /// Read bytes from a regular file's chunk chain starting at the given byte offset.
-    /// Walks the linked list of chunks, skipping past the offset, then copies data
-    /// into buf. Returns the number of bytes actually read (may be less than buf.len()
-    /// if EOF is reached).
-    fn read_from_node(&self, node_idx: usize, offset: usize, buf: &mut [u8]) -> usize {
-        let node = &self.nodes[node_idx];
-        if offset >= node.total_size {
-            return 0;
-        }
-
-        let count = buf.len().min(node.total_size - offset);
-        let head = match &node.info {
-            NodeInfo::Reg { head, .. } => *head,
-            _ => return 0,
+    /// Calls `f(run, pos)` for each piece of the byte range
+    /// [offset, offset + len) of a regular file, in order: `run` is the file
+    /// data for that piece and `pos` its offset from the start of the range.
+    /// Chunks with consecutive arena indices sit next to each other in memory
+    /// and are passed as one run, so a sequentially written file is usually
+    /// handled in a single piece. The range must already be covered by chunks.
+    ///
+    /// Returns the number of bytes handled. If `f` fails, returns the bytes
+    /// handled before it, or its error if that is none.
+    fn for_each_run<F>(&mut self, node_idx: usize, offset: usize, len: usize, mut f: F) -> Result<usize, i32>
+    where
+        F: FnMut(&mut [u8], usize) -> Result<(), i32>,
+    {
+        let NodeInfo::Reg { chunks } = &self.nodes[node_idx].info else {
+            return Ok(0);
         };
 
-        let mut chunk_idx = head;
-        let mut local_offset = offset;
-
-        // Skip chunks before the read offset.
-        while let Some(ci) = chunk_idx {
-            if local_offset < CHUNK_SIZE {
-                break;
+        let end = offset + len;
+        let mut pos = offset;
+        while pos < end {
+            let first = pos / CHUNK_SIZE;
+            let mut last = first;
+            while (last + 1) * CHUNK_SIZE < end && chunks[last + 1] == chunks[last] + 1 {
+                last += 1;
             }
-            local_offset -= CHUNK_SIZE;
-            chunk_idx = self.chunks[ci].next;
+
+            let run_end = ((last + 1) * CHUNK_SIZE).min(end);
+            let data = self.chunks[chunks[first]..=chunks[last]].as_flattened_mut();
+            let start = pos - first * CHUNK_SIZE;
+            if let Err(e) = f(&mut data[start..start + (run_end - pos)], pos - offset) {
+                return if pos == offset { Err(e) } else { Ok(pos - offset) };
+            }
+            pos = run_end;
         }
 
-        let mut read = 0;
-        while read < count {
-            let ci = match chunk_idx {
-                Some(ci) => ci,
-                None => break,
-            };
-            let available = self.chunks[ci].used.saturating_sub(local_offset);
-            let to_copy = (count - read).min(available);
-            buf[read..read + to_copy]
-                .copy_from_slice(&self.chunks[ci].data[local_offset..local_offset + to_copy]);
-            read += to_copy;
-            local_offset = 0;
-            chunk_idx = self.chunks[ci].next;
-        }
-
-        read
+        Ok(len)
     }
 
-    /// Write bytes to a regular file's chunk chain starting at the given byte offset.
-    /// Allocates new chunks as needed when writing past the end. Zero-fills any holes
-    /// between the chunk's current used size and the write offset. Updates the node's
-    /// total_size if the write extends the file. Returns the number of bytes written.
-    fn write_to_node(&mut self, node_idx: usize, offset: usize, buf: &[u8]) -> usize {
-        if buf.is_empty() {
-            return 0;
-        }
-
-        let mut chunk_idx = match &self.nodes[node_idx].info {
-            NodeInfo::Reg { head, .. } => *head,
-            _ => return 0,
+    /// Allocate chunks so that a regular file covers its first `size` bytes.
+    fn ensure_chunks(&mut self, node_idx: usize, size: usize) {
+        let have = match &self.nodes[node_idx].info {
+            NodeInfo::Reg { chunks } => chunks.len(),
+            _ => return,
         };
 
-        let mut local_offset = offset;
-
-        // Skip to the chunk containing the write offset.
-        while let Some(ci) = chunk_idx {
-            if local_offset < CHUNK_SIZE {
-                break;
+        for _ in have..size.div_ceil(CHUNK_SIZE) {
+            let ci = self.alloc_chunk();
+            if let NodeInfo::Reg { chunks } = &mut self.nodes[node_idx].info {
+                chunks.push(ci);
             }
-            self.chunks[ci].used = CHUNK_SIZE;
-            local_offset -= CHUNK_SIZE;
-            chunk_idx = self.chunks[ci].next;
+        }
+    }
+
+    /// Read up to `len` bytes of a regular file at `offset`, passing the data
+    /// to `copy_out(data, pos)` piece by piece. Returns the bytes read, which
+    /// is fewer than `len` at end of file.
+    fn read_node<F>(&mut self, node_idx: usize, offset: usize, len: usize, mut copy_out: F) -> Result<usize, i32>
+    where
+        F: FnMut(&[u8], usize) -> Result<(), i32>,
+    {
+        let len = len.min(self.nodes[node_idx].total_size.saturating_sub(offset));
+        self.for_each_run(node_idx, offset, len, |data, pos| copy_out(data, pos))
+    }
+
+    /// Write `len` bytes to a regular file at `offset`, filling the file
+    /// piece by piece with `copy_in(data, pos)` and growing it as needed. A
+    /// hole before `offset` reads back as zeros because new chunks are zeroed.
+    /// Returns the bytes written.
+    fn write_node<F>(&mut self, node_idx: usize, offset: usize, len: usize, copy_in: F) -> Result<usize, i32>
+    where
+        F: FnMut(&mut [u8], usize) -> Result<(), i32>,
+    {
+        if len == 0 {
+            return Ok(0);
         }
 
-        let mut written = 0;
+        self.ensure_chunks(node_idx, offset + len);
+        let written = self.for_each_run(node_idx, offset, len, copy_in)?;
 
-        while written < buf.len() {
-            let ci = match chunk_idx {
-                Some(ci) => ci,
-                None => {
-                    // Allocate a new chunk and link it.
-                    let new_ci = self.alloc_chunk();
-                    match &mut self.nodes[node_idx].info {
-                        NodeInfo::Reg { head, tail } => {
-                            if let Some(t) = *tail {
-                                self.chunks[t].next = Some(new_ci);
-                            }
-                            if head.is_none() {
-                                *head = Some(new_ci);
-                            }
-                            *tail = Some(new_ci);
-                        }
-                        _ => return written,
-                    }
-                    new_ci
-                }
-            };
-
-            if local_offset >= CHUNK_SIZE {
-                self.chunks[ci].used = CHUNK_SIZE;
-                local_offset -= CHUNK_SIZE;
-                chunk_idx = self.chunks[ci].next;
-                continue;
-            }
-
-            let space = CHUNK_SIZE - local_offset;
-            let to_copy = (buf.len() - written).min(space);
-
-            // Zero-fill holes.
-            let used = self.chunks[ci].used;
-            if local_offset > used {
-                self.chunks[ci].data[used..local_offset].fill(0);
-            }
-
-            self.chunks[ci].data[local_offset..local_offset + to_copy]
-                .copy_from_slice(&buf[written..written + to_copy]);
-
-            if local_offset + to_copy > self.chunks[ci].used {
-                self.chunks[ci].used = local_offset + to_copy;
-            }
-
-            written += to_copy;
-            local_offset = 0;
-            chunk_idx = self.chunks[ci].next;
-        }
-
-        if offset + written > self.nodes[node_idx].total_size {
-            self.nodes[node_idx].total_size = offset + written;
-        }
-
-        written
+        let node = &mut self.nodes[node_idx];
+        node.total_size = node.total_size.max(offset + written);
+        Ok(written)
     }
 
     fn truncate_node(&mut self, node_idx: usize, new_size: usize) {
         let old_size = self.nodes[node_idx].total_size;
-
-        if new_size == old_size {
+        let NodeInfo::Reg { chunks } = &mut self.nodes[node_idx].info else {
             return;
-        }
-
-        if new_size > old_size {
-            let zero = [0u8; 1];
-            let _ = self.write_to_node(node_idx, new_size - 1, &zero);
-            return;
-        }
-
-        if new_size == 0 {
-            let head = match &mut self.nodes[node_idx].info {
-                NodeInfo::Reg { head, tail } => {
-                    let old_head = *head;
-                    *head = None;
-                    *tail = None;
-                    old_head
-                }
-                _ => return,
-            };
-
-            self.reclaim_chunk_chain(head);
-            self.nodes[node_idx].total_size = 0;
-            return;
-        }
-
-        let mut remaining = new_size;
-        let mut current = match &self.nodes[node_idx].info {
-            NodeInfo::Reg { head, .. } => *head,
-            _ => return,
         };
 
-        let mut last_keep = None;
+        if new_size < old_size {
+            let dropped = chunks.split_off(new_size.div_ceil(CHUNK_SIZE).min(chunks.len()));
+            let last = chunks.len().checked_sub(1).map(|i| (i, chunks[i]));
+            self.reclaim_chunks(dropped);
 
-        while let Some(ci) = current {
-            if remaining > CHUNK_SIZE {
-                remaining -= CHUNK_SIZE;
-                last_keep = Some(ci);
-                current = self.chunks[ci].next;
-                continue;
+            // Zero the cut-off tail so that growing the file again reads zeros.
+            if let Some((i, ci)) = last {
+                self.chunks[ci][(new_size - i * CHUNK_SIZE).min(CHUNK_SIZE)..].fill(0);
             }
-
-            self.chunks[ci].used = remaining;
-            let to_reclaim = self.chunks[ci].next;
-            self.chunks[ci].next = None;
-            self.reclaim_chunk_chain(to_reclaim);
-
-            if let NodeInfo::Reg { tail, .. } = &mut self.nodes[node_idx].info {
-                *tail = Some(ci);
-            }
-
-            self.nodes[node_idx].total_size = new_size;
-            return;
-        }
-
-        if let Some(ci) = last_keep {
-            self.chunks[ci].next = None;
-            if let NodeInfo::Reg { tail, .. } = &mut self.nodes[node_idx].info {
-                *tail = Some(ci);
-            }
+        } else {
+            // Bytes past the old end are already zero.
+            self.ensure_chunks(node_idx, new_size);
         }
 
         self.nodes[node_idx].total_size = new_size;
@@ -1318,43 +1272,12 @@ impl ImfsState {
         }
     }
 
-    /// read: read from a file at the current offset.
-    pub fn read(&mut self, cage_id: u64, fd: u64, buf: &mut [u8]) -> i32 {
-        // Look up fd in fdtables — get node index and flags.
-        let (node_idx, flags) = match self.get_node_and_flags(cage_id, fd) {
-            Ok((n, f)) => (n, f),
-            Err(e) => return e,
-        };
-
-        match &self.nodes[node_idx].info {
-            NodeInfo::Reg { head: _, tail: _ } => {}
-            _ => return -9,
-        };
-
-        if (flags & O_ACCMODE) == O_WRONLY {
-            return -9;
-        }
-
-        // Get the current offset from our tracking.
-        let offset = self.get_offset(cage_id, fd);
-
-        let n = self.read_from_node(node_idx, offset as usize, buf);
-        if n > 0 {
-            self.update_atime(node_idx);
-        }
-
-        // Advance the offset.
-        self.set_offset(cage_id, fd, offset + n as i64);
-
-        n as i32
-    }
-
-    /// pread: read at a specific offset without changing the fd offset.
-    pub fn pread(&mut self, cage_id: u64, fd: u64, buf: &mut [u8], offset: i64) -> i32 {
-        if offset < 0 {
-            return -22; // EINVAL
-        }
-
+    /// Shared part of read and pread: check the fd, then read `len` bytes at
+    /// `offset`, or at the fd offset (and advance it) when `offset` is None.
+    fn read_fd<F>(&mut self, cage_id: u64, fd: u64, offset: Option<i64>, len: usize, copy_out: F) -> i32
+    where
+        F: FnMut(&[u8], usize) -> Result<(), i32>,
+    {
         // Look up fd in fdtables — get node index and flags.
         let (node_idx, flags) = match self.get_node_and_flags(cage_id, fd) {
             Ok((n, f)) => (n, f),
@@ -1363,54 +1286,108 @@ impl ImfsState {
 
         // Return EBADF for reads on non regular files.
         // TODO: Implement pipe reads.
-        match &self.nodes[node_idx].info {
-            NodeInfo::Reg { head: _, tail: _ } => {}
-            _ => return -9,
-        };
+        if !matches!(self.nodes[node_idx].info, NodeInfo::Reg { .. }) {
+            return -9;
+        }
 
         if (flags & O_ACCMODE) == O_WRONLY {
             return -9;
         }
 
-        let n = self.read_from_node(node_idx, offset as usize, buf);
+        let pos = offset.unwrap_or_else(|| self.get_offset(cage_id, fd));
+        let n = match self.read_node(node_idx, pos as usize, len, copy_out) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
         if n > 0 {
             self.update_atime(node_idx);
+        }
+
+        if offset.is_none() {
+            self.set_offset(cage_id, fd, pos + n as i64);
         }
 
         n as i32
     }
 
-    /// write: write to a file at the current offset.
-    pub fn write(&mut self, cage_id: u64, fd: u64, buf: &[u8]) -> i32 {
+    /// Shared part of write and pwrite: check the fd, then write `len` bytes
+    /// at `offset`, or at the fd offset (or end of file with O_APPEND) and
+    /// advance it when `offset` is None.
+    fn write_fd<F>(&mut self, cage_id: u64, fd: u64, offset: Option<i64>, len: usize, copy_in: F) -> i32
+    where
+        F: FnMut(&mut [u8], usize) -> Result<(), i32>,
+    {
         let (node_idx, flags) = match self.get_node_and_flags(cage_id, fd) {
             Ok((n, f)) => (n, f),
             Err(e) => return e,
         };
 
-        match &self.nodes[node_idx].info {
-            NodeInfo::Reg { head: _, tail: _ } => {}
-            _ => return -9,
-        };
+        // Return EBADF for writes on non regular files.
+        if !matches!(self.nodes[node_idx].info, NodeInfo::Reg { .. }) {
+            return -9;
+        }
 
         if (flags & O_ACCMODE) == O_RDONLY {
             return -9;
         }
 
-        let offset = if (flags & O_APPEND) != 0 {
-            self.nodes[node_idx].total_size as i64
-        } else {
-            self.get_offset(cage_id, fd)
+        let pos = match offset {
+            Some(o) => o,
+            None if (flags & O_APPEND) != 0 => self.nodes[node_idx].total_size as i64,
+            None => self.get_offset(cage_id, fd),
         };
-
-        let n = self.write_to_node(node_idx, offset as usize, buf);
+        let n = match self.write_node(node_idx, pos as usize, len, copy_in) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
         if n > 0 {
             self.update_mtime(node_idx);
             self.update_ctime(node_idx);
         }
 
-        self.set_offset(cage_id, fd, offset + n as i64);
+        if offset.is_none() {
+            self.set_offset(cage_id, fd, pos + n as i64);
+        }
 
         n as i32
+    }
+
+    /// read: read from a file at the current offset.
+    pub fn read(&mut self, cage_id: u64, fd: u64, buf: &mut [u8]) -> i32 {
+        let len = buf.len();
+        self.read_fd(cage_id, fd, None, len, copy_to_slice(buf))
+    }
+
+    /// read straight into a buffer in another cage.
+    pub fn read_to_cage(&mut self, cage_id: u64, fd: u64, buf: CageBuf) -> i32 {
+        self.read_fd(cage_id, fd, None, buf.len, copy_to_cage(buf))
+    }
+
+    /// pread: read at a specific offset without changing the fd offset.
+    pub fn pread(&mut self, cage_id: u64, fd: u64, buf: &mut [u8], offset: i64) -> i32 {
+        if offset < 0 {
+            return -22; // EINVAL
+        }
+        let len = buf.len();
+        self.read_fd(cage_id, fd, Some(offset), len, copy_to_slice(buf))
+    }
+
+    /// pread straight into a buffer in another cage.
+    pub fn pread_to_cage(&mut self, cage_id: u64, fd: u64, buf: CageBuf, offset: i64) -> i32 {
+        if offset < 0 {
+            return -22; // EINVAL
+        }
+        self.read_fd(cage_id, fd, Some(offset), buf.len, copy_to_cage(buf))
+    }
+
+    /// write: write to a file at the current offset.
+    pub fn write(&mut self, cage_id: u64, fd: u64, buf: &[u8]) -> i32 {
+        self.write_fd(cage_id, fd, None, buf.len(), copy_from_slice(buf))
+    }
+
+    /// write straight from a buffer in another cage.
+    pub fn write_from_cage(&mut self, cage_id: u64, fd: u64, buf: CageBuf) -> i32 {
+        self.write_fd(cage_id, fd, None, buf.len, copy_from_cage(buf))
     }
 
     /// pwrite: write at a specific offset without changing the fd offset.
@@ -1418,31 +1395,15 @@ impl ImfsState {
         if offset < 0 {
             return -22; // EINVAL
         }
+        self.write_fd(cage_id, fd, Some(offset), buf.len(), copy_from_slice(buf))
+    }
 
-        // Look up fd in fdtables — get node index and flags.
-        let (node_idx, flags) = match self.get_node_and_flags(cage_id, fd) {
-            Ok((n, f)) => (n, f),
-            Err(e) => return e,
-        };
-
-        // Return EBADF for writes on non regular files.
-        // TODO: Implement pipe reads.
-        match &self.nodes[node_idx].info {
-            NodeInfo::Reg { head: _, tail: _ } => {}
-            _ => return -9,
-        };
-
-        if (flags & O_ACCMODE) == O_RDONLY {
-            return -9;
+    /// pwrite straight from a buffer in another cage.
+    pub fn pwrite_from_cage(&mut self, cage_id: u64, fd: u64, buf: CageBuf, offset: i64) -> i32 {
+        if offset < 0 {
+            return -22; // EINVAL
         }
-
-        let n = self.write_to_node(node_idx, offset as usize, buf);
-        if n > 0 {
-            self.update_mtime(node_idx);
-            self.update_ctime(node_idx);
-        }
-
-        n as i32
+        self.write_fd(cage_id, fd, Some(offset), buf.len, copy_from_cage(buf))
     }
 
     /// lseek: reposition the fd offset.

@@ -40,6 +40,24 @@ fn copy_path_from_cage(path_ptr: u64, path_cage: u64) -> Option<String> {
     String::from_utf8(buf[..len].to_vec()).ok()
 }
 
+/// Copy `len` bytes at `ptr` in `cage` into a local buffer. Copy errors are
+/// ignored, as the stdio passthrough always did.
+fn copy_buf_from_cage(ptr: u64, cage: u64, len: usize) -> Vec<u8> {
+    let this_cage = getcageid();
+    let mut buf = vec![0u8; len];
+    let _ = copy_data_between_cages(
+        this_cage,
+        cage,
+        ptr,
+        cage,
+        buf.as_mut_ptr() as u64,
+        this_cage,
+        len as u64,
+        0,
+    );
+    buf
+}
+
 fn copy_iovecs_from_cage(iov_ptr: u64, iov_cage: u64, iovcnt: usize) -> Result<Vec<iovec>, i32> {
     if iovcnt > IOV_MAX {
         return Err(-22); // EINVAL
@@ -364,28 +382,14 @@ pub extern "C" fn read_handler(
     let cage_id = arg1cage;
     let fd = arg1;
     let count = arg3 as usize;
-    let this_cage = getcageid();
 
-    // Allocate a local buffer, read into it, then copy to cage.
-    let mut buf = vec![0u8; count];
-
-    let ret = imfs::with_imfs(|state| state.read(cage_id, fd, &mut buf));
-
-    // Copy result to the cage's buffer (if buf ptr is non-null and read succeeded).
-    if ret > 0 && arg2 != 0 {
-        let _ = copy_data_between_cages(
-            this_cage,
-            arg2cage,
-            buf.as_ptr() as u64,
-            this_cage,
-            arg2,
-            arg2cage,
-            count as u64,
-            0, // copytype=0 means raw memcpy
-        );
+    if arg2 == 0 && count > 0 {
+        return -14; // EFAULT
     }
 
-    ret
+    // Copy file data straight into the cage's buffer.
+    let buf = imfs::CageBuf { addr: arg2, cage: arg2cage, len: count };
+    imfs::with_imfs(|state| state.read_to_cage(cage_id, fd, buf))
 }
 
 // =====================================================================
@@ -414,24 +418,10 @@ pub extern "C" fn write_handler(
     let cage_id = arg1cage;
     let fd = arg1;
     let count = arg3 as usize;
-    let this_cage = getcageid();
-
-    // Copy the write data from the cage's buffer into a local buffer.
-    let mut buf = vec![0u8; count];
-
-    let _ = copy_data_between_cages(
-        this_cage,
-        arg2cage,
-        arg2,
-        arg2cage,
-        buf.as_mut_ptr() as u64,
-        this_cage,
-        count as u64,
-        0,
-    );
 
     // Special case: fd 0/1/2 (stdin/stdout/stderr) pass through to real write.
     if fd < 3 {
+        let buf = copy_buf_from_cage(arg2, arg2cage, count);
         // Write directly to the real fd.
         unsafe {
             let ret = libc::write(fd as i32, buf.as_ptr() as *const _, count);
@@ -439,7 +429,9 @@ pub extern "C" fn write_handler(
         }
     }
 
-    imfs::with_imfs(|state| state.write(cage_id, fd, &buf))
+    // Copy the cage's data straight into the file.
+    let buf = imfs::CageBuf { addr: arg2, cage: arg2cage, len: count };
+    imfs::with_imfs(|state| state.write_from_cage(cage_id, fd, buf))
 }
 
 // =====================================================================
@@ -1379,26 +1371,13 @@ pub extern "C" fn pread_handler(
     let fd = arg1;
     let count = arg3 as usize;
     let offset = arg4 as i64;
-    let this_cage = getcageid();
 
-    let mut buf = vec![0u8; count];
-
-    let ret = imfs::with_imfs(|state| state.pread(cage_id, fd, &mut buf, offset));
-
-    if ret > 0 && arg2 != 0 {
-        let _ = copy_data_between_cages(
-            this_cage,
-            arg2cage,
-            buf.as_ptr() as u64,
-            this_cage,
-            arg2,
-            arg2cage,
-            count as u64,
-            0,
-        );
+    if arg2 == 0 && count > 0 {
+        return -14; // EFAULT
     }
 
-    ret
+    let buf = imfs::CageBuf { addr: arg2, cage: arg2cage, len: count };
+    imfs::with_imfs(|state| state.pread_to_cage(cage_id, fd, buf, offset))
 }
 
 // =====================================================================
@@ -1428,30 +1407,18 @@ pub extern "C" fn pwrite_handler(
     let fd = arg1;
     let count = arg3 as usize;
     let offset = arg4 as i64;
-    let this_cage = getcageid();
-
-    let mut buf = vec![0u8; count];
-
-    let _ = copy_data_between_cages(
-        this_cage,
-        arg2cage,
-        arg2,
-        arg2cage,
-        buf.as_mut_ptr() as u64,
-        this_cage,
-        count as u64,
-        0,
-    );
 
     // fd < 3 passthrough.
     if fd < 3 {
+        let buf = copy_buf_from_cage(arg2, arg2cage, count);
         unsafe {
             let ret = libc::write(fd as i32, buf.as_ptr() as *const _, count);
             return ret as i32;
         }
     }
 
-    imfs::with_imfs(|state| state.pwrite(cage_id, fd, &buf, offset))
+    let buf = imfs::CageBuf { addr: arg2, cage: arg2cage, len: count };
+    imfs::with_imfs(|state| state.pwrite_from_cage(cage_id, fd, buf, offset))
 }
 
 pub extern "C" fn readv_handler(
