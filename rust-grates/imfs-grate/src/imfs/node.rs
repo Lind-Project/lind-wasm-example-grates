@@ -6,6 +6,8 @@
 //! `chunks[off / CHUNK_SIZE]`. All nodes and chunks live in arena-style Vec
 //! storage and are referenced by index.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 pub const CHUNK_SIZE: usize = 1024;
 pub const MAX_NODE_NAME: usize = 65;
 pub const MAX_NODES: usize = 1024;
@@ -44,9 +46,19 @@ pub struct NodeTime {
     pub nanos: u64,
 }
 
+/// IMFS keeps no wall clock (reading one costs a host call under SGX), so
+/// node times come from a logical clock that ticks on every update. A later
+/// change always gets a later time, which is what make's freshness checks
+/// and the runtime's exec module cache (keyed on mtime/ctime) rely on.
+static CLOCK: AtomicU64 = AtomicU64::new(0);
+
 impl NodeTime {
     pub fn now() -> Self {
-        Self { secs: 0, nanos: 0 }
+        let tick = CLOCK.fetch_add(1, Ordering::Relaxed) + 1;
+        Self {
+            secs: tick / 1_000_000_000,
+            nanos: tick % 1_000_000_000,
+        }
     }
 
     pub fn as_stat_pair(self) -> [u64; 2] {
