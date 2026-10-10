@@ -378,6 +378,78 @@ static void test_sparse_write(void) {
 	close(fd);
 }
 
+static void test_truncate_regrow(void) {
+	printf("\n[test_truncate_regrow]\n");
+
+	char wbuf[3000];
+	for (int i = 0; i < 3000; i++) {
+		wbuf[i] = 'a' + (i % 26);
+	}
+
+	int fd = open("/test_truncate", O_CREAT | O_RDWR, 0644);
+	CHECK("create /test_truncate", fd >= 0);
+	if (fd < 0)
+		return;
+
+	CHECK("write 3000 bytes", write(fd, wbuf, 3000) == 3000);
+	CHECK("shrink to 1500 bytes", ftruncate(fd, 1500) == 0);
+	CHECK("grow back to 3000 bytes", ftruncate(fd, 3000) == 0);
+
+	struct stat st;
+	CHECK("fstat regrown file", fstat(fd, &st) == 0);
+	CHECK("regrown size is 3000", st.st_size == 3000);
+
+	char rbuf[3000];
+	memset(rbuf, 'X', sizeof(rbuf));
+	CHECK("read regrown file", pread(fd, rbuf, 3000, 0) == 3000);
+	CHECK("kept bytes preserved", memcmp(rbuf, wbuf, 1500) == 0);
+	CHECK("byte after cut reads as zero", rbuf[1500] == '\0');
+	CHECK("end of cut chunk reads as zero", rbuf[2047] == '\0');
+	CHECK("regrown chunk reads as zero", rbuf[2999] == '\0');
+
+	close(fd);
+}
+
+static void test_unaligned_rw(void) {
+	printf("\n[test_unaligned_rw]\n");
+
+	/* Rewriting after O_TRUNC reuses freed chunks. */
+	char wbuf[5000];
+	for (int i = 0; i < 5000; i++) {
+		wbuf[i] = 'A' + (i % 23);
+	}
+
+	int fd = open("/test_unaligned", O_CREAT | O_RDWR, 0644);
+	CHECK("create /test_unaligned", fd >= 0);
+	if (fd < 0)
+		return;
+	CHECK("first write 5000 bytes", write(fd, wbuf, 5000) == 5000);
+	close(fd);
+
+	fd = open("/test_unaligned", O_RDWR | O_TRUNC);
+	CHECK("reopen with O_TRUNC", fd >= 0);
+	if (fd < 0)
+		return;
+	for (int i = 0; i < 5000; i++) {
+		wbuf[i] = 'a' + (i % 19);
+	}
+	CHECK("rewrite 5000 bytes", write(fd, wbuf, 5000) == 5000);
+
+	char rbuf[2100] = {0};
+	CHECK("pread across three chunks", pread(fd, rbuf, 2100, 1020) == 2100);
+	CHECK("unaligned read matches", memcmp(rbuf, wbuf + 1020, 2100) == 0);
+
+	CHECK("pwrite across a chunk boundary", pwrite(fd, "0123456789", 10, 2043) == 10);
+	CHECK("pread it back", pread(fd, rbuf, 12, 2042) == 12);
+	CHECK("bytes around it untouched",
+	      rbuf[0] == wbuf[2042] && rbuf[11] == wbuf[2053]);
+	CHECK("pwrite data matches", memcmp(rbuf + 1, "0123456789", 10) == 0);
+
+	CHECK("short read at end of file", pread(fd, rbuf, 100, 4990) == 10);
+
+	close(fd);
+}
+
 /*  Test 11: Write to stdout passes through (fd < 3)  */
 
 static void test_stdout_passthrough(void) {
@@ -659,6 +731,8 @@ int main(void) {
 	test_large_write();
 	test_read_eof();
 	test_sparse_write();
+	test_truncate_regrow();
+	test_unaligned_rw();
 	test_stdout_passthrough();
 	test_fork();
 	test_wrong_write();
