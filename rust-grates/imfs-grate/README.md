@@ -138,20 +138,35 @@ There are two ways to get the archive to IMFS:
 If both are given, the `--preload-file` archive is staged first and `PRELOADS`
 entries are layered on top.
 
-### Staging from an enclave
+### Staging from shared memory, with attestation
 
-The same split is what an SGX build of the grate needs, with the ocall in place
-of the file: the enclave issues one ocall carrying its preload list, the
-untrusted side runs `preload_archive::pack::pack` and hands back a
-`(pointer, size)` pair in untrusted memory, and the enclave calls
-`imfs::preload_from_untrusted(ptr, size, max_len, expected_digest)`. That entry
-point copies the bytes into enclave memory before looking at them, so the
-producer cannot change them under the check, then applies the same size cap,
-digest verification and expected-digest comparison as `--preload-file`, and
-only then stages. The expected digest is the one thing that has to reach the
-enclave through a trusted channel (configuration or measurement); everything
-else about the blob is checked from the blob itself. The single ocall itself
-has to be provided by the runtime; it is not part of this repository.
+Inside an enclave, reading a host file costs an ocall per read. With
+`--preload-shm` the runtime maps a *bundle* (archives back to back, built on
+the host with `mkpreload ... --section ...`) before the first cage starts:
+lind-boot `--preload-shm <path>`, or the `[shm]` section of a TriSeal keep's
+Enarx.toml. IMFS takes the archives one at a time: it copies the next one into
+its own memory with one runtime call (`LIND_SHM_READ`, a memory copy made by
+the runtime, so it does not leave the enclave), verifies it and stages it. A
+bundle, archive or attestation that fails stops the grate.
+
+With `--attest`, IMFS stops after each archive and asks the in-toto grate it
+runs under to attest it (`rust-grates/intoto-grate`): that grate reads the
+archive out of IMFS's memory, hashes every file, signs an in-toto statement
+over them and writes the DSSE envelope back. The envelopes are kept in
+`/attest/<n>-<step>.intoto.json`, the signer's public key in
+`/attest/signer.pub.json`. Steps are named after `--attest-steps` (default
+`pipeline,sources`):
+
+```bash
+mkpreload build.prld "$PIPELINE" --section "$SOURCES"     # host
+# in the keep:
+intoto-grate imfs-grate.cwasm --preload-shm --attest --dump-shm make ...
+```
+
+`imfs::preload_from_untrusted(ptr, size, max_len, expected_digest)` remains
+for a runtime that hands back an archive in untrusted memory instead: it copies
+the bytes into the grate before checking them, applies the size cap and digest
+checks, and only then stages.
 
 ## Dumping IMFS Files Back
 
@@ -188,6 +203,12 @@ Dump details:
 - Host parent directories are created before writing the dump target.
 - Host-side `mkdir`, `open`, `write`, and `close` are performed through
   `make_threei_call`.
+
+With `--dump-shm`, the `DUMPS` files (and, with `--attest`, the files in
+`/attest`, under `attest/`) are packed into one archive instead and handed to
+the runtime's dump region in a single call (`LIND_SHM_DUMP`); inside an
+enclave that is one ocall for the whole dump. Each file is stored under its
+host path, and `mkpreload unpack <dump> <dir>` writes them out on the host.
 
 ## Common tcc Example
 
