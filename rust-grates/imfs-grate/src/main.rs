@@ -206,6 +206,12 @@ fn main() {
 
     imfs::with_imfs(|s| s.mkdir(0, "/tmp", 0o755));
 
+    // Staging is over and the program starts: mark it for the runtime,
+    // which can count what the run asks of the host from here.
+    if let Err(e) = preload_archive::shm::phase(preload_archive::shm::PHASE_RUN) {
+        log!("phase mark not supported by the runtime ({})", e);
+    }
+
     // Build and run the grate. Registers handlers for all filesystem syscalls,
     // forks a child cage, and waits for it to exit.
     GrateBuilder::new()
