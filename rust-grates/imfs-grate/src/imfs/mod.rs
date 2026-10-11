@@ -16,7 +16,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use grate_rs::ffi::stat;
-use grate_rs::{copy_data_between_cages, getcageid};
+use crate::cageid::getcageid;
+use grate_rs::copy_data_between_cages;
 use node::*;
 
 use grate_rs::constants::fs::*;

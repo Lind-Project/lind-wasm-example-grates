@@ -43,13 +43,15 @@
 //!     into one archive and handed to the runtime's dump region in a single
 //!     call instead; `mkpreload unpack` writes them out on the host.
 
+mod cageid;
 mod handlers;
 mod imfs;
 mod logging;
 
 use grate_rs::constants::lind::GRATE_MEMORY_FLAG;
 use grate_rs::constants::*;
-use grate_rs::{GrateBuilder, GrateError, getcageid};
+use cageid::getcageid;
+use grate_rs::{GrateBuilder, GrateError};
 use preload_archive::attest::{MAX_STEP_NAME, OP_ATTEST, OP_PUBLIC_KEY, SYS_INTOTO_ATTEST};
 use preload_archive::host::raw_threei_syscall;
 use preload_archive::{ArchiveBuilder, ArchiveDigest, bundle_archives, parse_digest_hex};

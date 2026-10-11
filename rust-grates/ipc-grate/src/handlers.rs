@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 
 use grate_rs::constants::*;
-use grate_rs::{copy_data_between_cages, copy_handler_table_to_cage, getcageid, is_thread_clone};
+use crate::cageid::getcageid;
+use grate_rs::{copy_data_between_cages, copy_handler_table_to_cage, is_thread_clone};
 
 use crate::helpers::forward_syscall;
 use crate::ipc::{self, *};
