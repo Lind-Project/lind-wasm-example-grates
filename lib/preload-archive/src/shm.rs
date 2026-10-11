@@ -11,8 +11,12 @@
 //!
 //! Inside an enclave both regions are outside it: the runtime copies between
 //! them and cage memory directly, so neither reading a preload nor writing a
-//! dump leaves the enclave. Committing a dump is the one call that does: it
-//! tells the host how long the dump archive is.
+//! dump leaves the enclave. (A TriSeal keep does not even ask the host to
+//! commit a dump: the host reads its length from the archive after the keep
+//! exits.)
+//!
+//! [`phase`] is here too: the runtime-level mark of where a run's phases
+//! begin, such as the build after the preloads are staged.
 
 use grate_rs::constants::lind::GRATE_MEMORY_FLAG;
 use grate_rs::getcageid;
@@ -28,6 +32,11 @@ pub const SYS_LIND_SHM_READ: u64 = 2002;
 /// `SHM_DUMP(src, len)`: copy `len` bytes from `src` to the start of the dump
 /// region and commit them. Returns 0.
 pub const SYS_LIND_SHM_DUMP: u64 = 2003;
+/// `PHASE(n)`: the workload entered phase `n`. Returns 0.
+pub const SYS_LIND_PHASE: u64 = 2004;
+
+/// The phase that starts when IMFS runs the program, after staging.
+pub const PHASE_RUN: u64 = 1;
 
 /// Sizes of the runtime's regions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -97,5 +106,13 @@ pub fn dump(bytes: &[u8]) -> Result<(), i32> {
         [bytes.as_ptr() as u64, bytes.len() as u64, 0],
         [true, false, false],
     );
+    if ret < 0 { Err(ret) } else { Ok(()) }
+}
+
+/// Tell the runtime that the workload entered phase `n`, so that it can
+/// count from there what the run asks of the host. A runtime without phase
+/// marks fails the call, which is harmless.
+pub fn phase(n: u64) -> Result<(), i32> {
+    let ret = call(SYS_LIND_PHASE, [n, 0, 0], [false, false, false]);
     if ret < 0 { Err(ret) } else { Ok(()) }
 }
