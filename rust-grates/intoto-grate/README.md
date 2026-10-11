@@ -9,10 +9,11 @@ intoto-grate imfs-grate.cwasm --preload-shm --attest [--dump-shm] [imfs options]
 
 The grate runs the IMFS grate as its child and handles one syscall for it,
 `SYS_INTOTO_ATTEST` (2101, see `lib/preload-archive/src/attest.rs`). With
-`--preload-shm --attest`, IMFS stages its preload bundle one archive at a
-time and, after each, stops and issues that call:
+`--preload-shm --attest`, IMFS copies its whole preload bundle out of shared
+memory, then stages it one archive at a time and, after each, stops and
+issues that call:
 
-1. IMFS copies the compiler pipeline out of shared memory and stages it.
+1. IMFS stages the compiler pipeline.
 2. IMFS stops and requests an attestation. This grate reads the archive
    straight out of IMFS's memory (in 1 MiB pieces, so it never holds a copy),
    hashes every file and the whole payload (which must match the archive's

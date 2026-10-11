@@ -24,9 +24,10 @@ mkpreload unpack <archive> [<root>]
   blob.
 
 - `--section` starts another archive in the same output, which makes it a
-  *bundle*: archives back to back. The IMFS grate's `--preload-shm` stages a
-  bundle one archive at a time, with an attestation after each under
-  `--attest` (for example the compiler pipeline, then the source files).
+  *bundle*: archives back to back. The IMFS grate's `--preload-shm` copies a
+  bundle in one go and stages it one archive at a time, with an attestation
+  after each under `--attest` (for example the compiler pipeline, then the
+  source files).
   Each archive's digest is reported (one line each with `--print-digest`).
 - `unpack` writes the files of an archive or bundle under `<root>` (default
   `.`); absolute entry paths are taken relative to it. This is how the dump

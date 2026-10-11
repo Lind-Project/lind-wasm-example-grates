@@ -23,14 +23,15 @@
 //!   --preload-shm — a *bundle* of archives (archives back to back, built by
 //!     `mkpreload ... --section ...`) that the runtime mapped before any cage
 //!     started (lind-boot `--preload-shm`, or a TriSeal keep's `[shm]`
-//!     config). Each archive is copied out of that memory in one call,
-//!     verified and staged; the runtime does the copy, so inside an enclave
-//!     staging the preloads never leaves it. With `--attest`, IMFS stops after
-//!     each archive and asks the in-toto grate running it to sign a statement
-//!     over the archive's files (see `preload_archive::attest`); the DSSE
-//!     envelopes and the signer's public key are kept in /attest. The archives
-//!     are named after `--attest-steps` (default `pipeline,sources`: the
-//!     compiler pipeline, then the source files).
+//!     config). The whole bundle is copied into this cage's memory in one
+//!     call (the runtime does the copy, so inside an enclave it never leaves
+//!     it), and its archives are verified and staged from that copy one at a
+//!     time. With `--attest`, IMFS stops after each archive and asks the
+//!     in-toto grate running it to sign a statement over the archive's files
+//!     (see `preload_archive::attest`); the DSSE envelopes and the signer's
+//!     public key are kept in /attest. The archives are named after
+//!     `--attest-steps` (default `pipeline,sources`: the compiler pipeline,
+//!     then the source files).
 //!   PRELOADS — colon-separated list of host files. Each entry is a path, or
 //!     `imfs_path=host_path` to load into a different IMFS path. This grate
 //!     reads them into an archive itself, then stages it the same way.
@@ -51,7 +52,7 @@ use grate_rs::constants::*;
 use grate_rs::{GrateBuilder, GrateError, getcageid};
 use preload_archive::attest::{MAX_STEP_NAME, OP_ATTEST, OP_PUBLIC_KEY, SYS_INTOTO_ATTEST};
 use preload_archive::host::raw_threei_syscall;
-use preload_archive::{ArchiveBuilder, ArchiveDigest, HEADER_LEN, archive_len, parse_digest_hex};
+use preload_archive::{ArchiveBuilder, ArchiveDigest, bundle_archives, parse_digest_hex};
 use std::ffi::CString;
 
 const SYS_LINKAT: u64 = 265;
@@ -325,21 +326,38 @@ fn fatal(msg: &str) -> ! {
     std::process::exit(1);
 }
 
-/// Stage the bundle in the runtime's preload region, one archive at a time.
-/// Each archive is copied into this cage's memory in one call, so the host
-/// cannot change it after it is checked, verified and staged; with
-/// `--attest`, the in-toto grate then signs a statement over its files before
-/// the next archive is read. A region, archive or attestation that fails
+/// Stage the bundle in the runtime's preload region. The whole region is
+/// copied into this cage's memory with one call before anything looks at it;
+/// from then on the host has no part in staging, and cannot change what is
+/// checked. The copy is split into its archives, and each is verified and
+/// staged in turn; with `--attest`, IMFS stops after each archive and the
+/// in-toto grate signs a statement over its files (read from the same copy)
+/// before the next one is staged. A region, archive or attestation that fails
 /// stops the grate: nothing runs on a partly staged or unattested tree.
 /// Returns the IMFS paths of the attestation files written.
 fn preload_from_shm(config: &Config) -> Vec<String> {
     let info = preload_archive::shm::info()
         .unwrap_or_else(|e| fatal(&format!("--preload-shm: no shared-memory region ({})", e)));
-    let total = info.preload_len;
-    if total == 0 {
+    if info.preload_len == 0 {
         fatal("--preload-shm: the runtime has no preload region");
     }
-    log!("preload: {} byte bundle in shared memory", total);
+    let total = usize::try_from(info.preload_len).unwrap_or_else(|_| {
+        fatal(&format!(
+            "--preload-shm: the {} byte bundle does not fit in memory",
+            info.preload_len
+        ))
+    });
+
+    // Load: the one copy out of shared memory.
+    log!(
+        "preload: copying the {} byte bundle out of shared memory",
+        total
+    );
+    let mut bundle = vec![0u8; total];
+    preload_archive::shm::read(0, &mut bundle)
+        .unwrap_or_else(|e| fatal(&format!("preload: cannot copy the bundle ({})", e)));
+    let archives =
+        bundle_archives(&bundle).unwrap_or_else(|e| fatal(&format!("preload: bad bundle: {}", e)));
 
     let mut attested = Vec::new();
     if config.attest {
@@ -348,39 +366,16 @@ fn preload_from_shm(config: &Config) -> Vec<String> {
         attested.push(stage_attest_file("signer.pub.json", &key));
     }
 
-    let mut offset = 0u64;
-    let mut index = 0usize;
-    while offset < total {
-        index += 1;
+    for (i, archive) in archives.into_iter().enumerate() {
+        let index = i + 1;
         let step = config
             .attest_steps
-            .get(index - 1)
+            .get(i)
             .cloned()
             .unwrap_or_else(|| format!("archive-{}", index));
 
-        // Start / resume: copy the next archive out of shared memory.
-        let mut header = [0u8; HEADER_LEN];
-        if total - offset < HEADER_LEN as u64 {
-            fatal(&format!(
-                "preload: {} trailing bytes in the bundle",
-                total - offset
-            ));
-        }
-        preload_archive::shm::read(offset, &mut header)
-            .unwrap_or_else(|e| fatal(&format!("preload: cannot read archive {} ({})", index, e)));
-        let len = archive_len(&header)
-            .unwrap_or_else(|e| fatal(&format!("preload: archive {}: {}", index, e)));
-        if len as u64 > total - offset {
-            fatal(&format!(
-                "preload: archive {} runs past the end of the bundle",
-                index
-            ));
-        }
-        let mut archive = vec![0u8; len];
-        preload_archive::shm::read(offset, &mut archive)
-            .unwrap_or_else(|e| fatal(&format!("preload: cannot read archive {} ({})", index, e)));
-
-        let result = imfs::with_imfs(|state| state.preload_archive_verified(&archive, len, None));
+        let result =
+            imfs::with_imfs(|state| state.preload_archive_verified(archive, archive.len(), None));
         if let Err(e) = &result {
             fatal(&format!("preload: archive {} ({}): {}", index, step, e));
         }
@@ -393,14 +388,13 @@ fn preload_from_shm(config: &Config) -> Vec<String> {
                 index,
                 step
             );
-            let envelope = request_attestation(OP_ATTEST, &archive, &step)
+            let envelope = request_attestation(OP_ATTEST, archive, &step)
                 .unwrap_or_else(|e| fatal(&format!("attestation of {} failed: {}", step, e)));
             attested.push(stage_attest_file(
                 &format!("{}-{}.intoto.json", index, step),
                 &envelope,
             ));
         }
-        offset += len as u64;
     }
     attested
 }

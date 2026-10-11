@@ -144,10 +144,12 @@ Inside an enclave, reading a host file costs an ocall per read. With
 `--preload-shm` the runtime maps a *bundle* (archives back to back, built on
 the host with `mkpreload ... --section ...`) before the first cage starts:
 lind-boot `--preload-shm <path>`, or the `[shm]` section of a TriSeal keep's
-Enarx.toml. IMFS takes the archives one at a time: it copies the next one into
-its own memory with one runtime call (`LIND_SHM_READ`, a memory copy made by
-the runtime, so it does not leave the enclave), verifies it and stages it. A
-bundle, archive or attestation that fails stops the grate.
+Enarx.toml. IMFS copies the whole bundle into its own memory with one runtime
+call (`LIND_SHM_READ`, a memory copy made by the runtime, so it does not leave
+the enclave) before looking at it; everything after that works on the copy,
+which the host cannot change. IMFS splits it into its archives and verifies
+and stages them one at a time. A bundle, archive or attestation that fails
+stops the grate.
 
 With `--attest`, IMFS stops after each archive and asks the in-toto grate it
 runs under to attest it (`rust-grates/intoto-grate`): that grate reads the
