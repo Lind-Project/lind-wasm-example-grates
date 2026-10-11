@@ -25,6 +25,8 @@ pub enum NodeType {
     /// Pipe.
     #[allow(unused)]
     Pip,
+    /// Character device backed by a host fd (the cage's inherited stdin/stdout/stderr).
+    Chr,
     /// Free / unallocated slot.
     Free,
 }
@@ -72,6 +74,8 @@ pub enum NodeInfo {
         readers: u32,
         writers: u32,
     },
+    /// Host standard stream: reads and writes are forwarded to `hostfd` on the grate's host side.
+    HostStd { hostfd: i32 },
     /// Free slot.
     Free,
 }
@@ -114,6 +118,7 @@ impl Node {
             NodeType::Dir => 0o040000 | (mode & 0o7777), // S_IFDIR
             NodeType::Lnk => 0o120000 | (mode & 0o7777), // S_IFLNK
             NodeType::Pip => 0o010000 | (mode & 0o7777), // S_IFIFO
+            NodeType::Chr => 0o020000 | (mode & 0o7777), // S_IFCHR
             NodeType::Free => mode & 0o7777,
         };
 
@@ -133,6 +138,7 @@ impl Node {
                 readers: 0,
                 writers: 0,
             },
+            NodeType::Chr => NodeInfo::HostStd { hostfd: -1 },
             NodeType::Free => NodeInfo::Free,
         };
 

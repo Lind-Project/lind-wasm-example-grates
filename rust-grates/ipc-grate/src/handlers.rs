@@ -1717,11 +1717,13 @@ pub extern "C" fn fork_handler(
             let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id);
         }
 
-        // Propagate our registered syscall handlers to the new cage so
-        // its read/write/close/etc. continue to flow through us instead
-        // of crashing the runtime with "no handler for cage N syscall M".
-        let grate_cage = getcageid();
-        let _ = copy_handler_table_to_cage(grate_cage, child_cage_id);
+        // Give the child the parent's handler table so its read/write/
+        // close/etc. keep flowing through us instead of crashing the
+        // runtime with "no handler for cage N syscall M".  Copy from the
+        // parent, not from this grate's cage: the grate's own table routes
+        // the grate's syscalls to the grate stacked above it, so copying it
+        // would make the child bypass this grate whenever grates are stacked.
+        let _ = copy_handler_table_to_cage(cage_id, child_cage_id);
     }
 
 

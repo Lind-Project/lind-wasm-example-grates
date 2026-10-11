@@ -100,60 +100,50 @@ pub struct ImfsState {
 
     /// List of current working directories for each cage.
     pub cwd_info: HashMap<u64, String>,
+
+    /// Node indices standing in for the cage's inherited host stdin/stdout/stderr.
+    /// fds that resolve to one of these are forwarded to the host instead of IMFS.
+    pub host_std_nodes: [usize; 3],
 }
 
 /// Initialize the global IMFS. Called once at startup.
 pub fn init() {
-    *IMFS.lock().unwrap() = Some(ImfsState::new());
-}
+    let mut state = ImfsState {
+        nodes: Vec::with_capacity(MAX_NODES),
+        chunks: Vec::new(),
+        node_free_list: Vec::new(),
+        chunk_free_list: Vec::new(),
+        root_idx: 0,
+        fd_info: HashMap::new(),
+        cwd_info: HashMap::new(),
+        host_std_nodes: [0; 3],
+    };
 
-/// Stage a preload archive (see [`preload`]) into the global IMFS from a raw
-/// `(pointer, size)` pair in memory this cage trusts: a block it filled
-/// itself, or one it already copied in and verified.
-///
-/// # Safety
-///
-/// `ptr` must be valid for reads of `size` bytes for the duration of the call.
-pub unsafe fn preload_from_ptr(
-    ptr: *const u8,
-    size: usize,
-) -> Result<preload::PreloadStats, preload_archive::ArchiveError> {
-    let bytes = unsafe { std::slice::from_raw_parts(ptr, size) };
-    with_imfs(|state| state.preload_archive(bytes))
-}
+    state.cwd_info.insert(0, "/".to_string());
 
-/// Stage a preload archive that sits in memory this cage does *not* trust:
-/// a buffer an untrusted runtime handed back from an ocall, for example.
-///
-/// The bytes are copied into memory this cage owns before anything looks at
-/// them, so the producer cannot change them under the check. The copy is
-/// then size-capped, its header and payload digest are verified, and, when
-/// `expected` is given, its digest must match that value obtained through a
-/// trusted channel. Only after all of that is anything staged; a rejected
-/// archive leaves the filesystem untouched.
-///
-/// # Safety
-///
-/// `ptr` must be valid for reads of `size` bytes for the duration of the call.
-/// `size` is checked against `max_len` before any byte is read.
-// Not called by the Lind build: --preload-file already owns its buffer and
-// goes through preload_archive_verified directly. This is the entry point
-// for the enclave build, where the buffer comes back from an ocall.
-#[allow(dead_code)]
-pub unsafe fn preload_from_untrusted(
-    ptr: *const u8,
-    size: usize,
-    max_len: usize,
-    expected: Option<&preload_archive::ArchiveDigest>,
-) -> Result<preload::PreloadStats, preload_archive::ArchiveError> {
-    if size > max_len {
-        return Err(preload_archive::ArchiveError::TooLarge {
-            len: size,
-            max: max_len,
-        });
+    // Create root directory.
+    let root_idx = state.create_node("/", NodeType::Dir, 0o755);
+    state.nodes[root_idx].parent_idx = root_idx;
+    state.root_idx = root_idx;
+
+    // Create . and .. in root.
+    let dot_idx = state.create_node(".", NodeType::Lnk, 0);
+    state.nodes[dot_idx].info = NodeInfo::HardLink { target: root_idx };
+    state.add_child(root_idx, dot_idx);
+
+    let dotdot_idx = state.create_node("..", NodeType::Lnk, 0);
+    state.nodes[dotdot_idx].info = NodeInfo::HardLink { target: root_idx };
+    state.add_child(root_idx, dotdot_idx);
+
+    // Host standard streams. Not linked into any directory; reachable only through
+    // fds registered by `register_host_std` (and whatever dup/dup2/fcntl derive from them).
+    for (i, name) in ["stdin", "stdout", "stderr"].iter().enumerate() {
+        let idx = state.create_node(name, NodeType::Chr, 0o620);
+        state.nodes[idx].info = NodeInfo::HostStd { hostfd: i as i32 };
+        state.host_std_nodes[i] = idx;
     }
-    let owned = unsafe { std::slice::from_raw_parts(ptr, size) }.to_vec();
-    with_imfs(|state| state.preload_archive_verified(&owned, max_len, expected))
+
+    *IMFS.lock().unwrap() = Some(state);
 }
 
 impl ImfsState {
@@ -938,6 +928,31 @@ impl ImfsState {
         return Ok((idx as usize, flags));
     }
 
+    /// If `fd` resolves to one of the host standard-stream nodes, return the host fd
+    /// the grate should forward to. `None` means the fd is an ordinary IMFS entry
+    /// (or not open at all) and must go through the IMFS path.
+    pub fn host_std_fd(&mut self, cage_id: u64, fd: u64) -> Option<i32> {
+        let entry = fdtables::translate_virtual_fd(cage_id, fd).ok()?;
+        let node_idx = entry.underfd as usize;
+        if node_idx >= self.nodes.len() {
+            return None;
+        }
+        match &self.nodes[node_idx].info {
+            NodeInfo::HostStd { hostfd } => Some(*hostfd),
+            _ => None,
+        }
+    }
+
+    /// Point virtual `fd` (0, 1 or 2) of `cage_id` at the matching host standard stream.
+    /// Replaces whatever was registered at that fd.
+    pub fn register_host_std(&mut self, cage_id: u64, fd: u64) {
+        let which = (fd as usize).min(2);
+        let node_idx = self.host_std_nodes[which];
+        let _ = fdtables::get_specific_virtual_fd(cage_id, fd, IMFS_FDKIND, node_idx as u64, false, 0);
+        self.nodes[node_idx].in_use += 1;
+        self.insert_perfdinfo(cage_id, fd, O_RDWR as u64);
+    }
+
     pub fn insert_perfdinfo(&mut self, cageid: u64, fd: u64, flags: u64) {
         self.fd_info.insert(
             (cageid, fd),
@@ -1512,6 +1527,7 @@ impl ImfsState {
         match &self.nodes[node_idx].info {
             NodeInfo::Reg { .. } => {}
             NodeInfo::Pip { .. } => return -29, // EISPIPE
+            NodeInfo::HostStd { .. } => return -29, // ESPIPE: host streams are not seekable
             NodeInfo::Dir { .. } => return offset as i32, // On directory lseeks, we return offset
             // immediately.
             _ => return -9, // EBADF on Free/Lnk (will never be hit)

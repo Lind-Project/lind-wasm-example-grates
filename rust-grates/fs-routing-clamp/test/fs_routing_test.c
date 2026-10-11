@@ -138,11 +138,23 @@ static void test_nested_path_routing(void) {
 static void test_non_tmp_paths_not_clamped(void) {
 	printf("\n[test_non_tmp_paths_not_clamped]\n");
 
+	const char *path = "/fs_routing_outside_test";
 	struct stat st;
 	char buf[8] = {0};
 
-	int fd = open("/dev/zero", O_RDONLY);
-	CHECK("open /dev/zero not clamped", fd >= 0);
+	int setup_fd =
+		open(path, O_CREAT | O_TRUNC | O_WRONLY, 0600);
+	CHECK("create outside-prefix test file not clamped",
+	      setup_fd >= 0);
+
+	if (setup_fd >= 0) {
+		CHECK("write outside-prefix test data",
+		      write(setup_fd, "12345678", 8) == 8);
+		close(setup_fd);
+	}
+
+	int fd = open(path, O_RDONLY);
+	CHECK("open regular file outside prefix not clamped", fd >= 0);
 	if (fd >= 0)
 		close(fd);
 
@@ -151,15 +163,19 @@ static void test_non_tmp_paths_not_clamped(void) {
 	if (fd >= 0)
 		close(fd);
 
-	CHECK("stat /dev/zero not clamped", stat("/dev/zero", &st) == 0);
+	CHECK("stat regular file outside prefix not clamped",
+	      stat(path, &st) == 0);
 
-	CHECK("access /dev/null not clamped", access("/dev/null", F_OK) == 0);
+	CHECK("access /dev/null not clamped",
+	      access("/dev/null", F_OK) == 0);
 
-	fd = open("/dev/zero", O_RDONLY);
-	CHECK("read from /dev/zero not clamped",
+	fd = open(path, O_RDONLY);
+	CHECK("read regular file outside prefix not clamped",
 	      fd >= 0 && read(fd, buf, sizeof(buf)) == (ssize_t)sizeof(buf));
 	if (fd >= 0)
 		close(fd);
+
+	CHECK("remove outside-prefix test file not clamped", unlink(path) == 0);
 }
 
 int main(int argc, char *argv[]) {
