@@ -382,6 +382,17 @@ pub extern "C" fn read_handler(
     let cage_id = arg1cage;
     let fd = arg1;
     let count = arg3 as usize;
+    let this_cage = getcageid();
+
+    // Allocate a local buffer, read into it, then copy to cage.
+    let mut buf = vec![0u8; count];
+
+    // Host standard streams (and anything dup'd from them) read from the real fd.
+    let ret = if let Some(hfd) = imfs::with_imfs(|state| state.host_std_fd(cage_id, fd)) {
+        unsafe { libc::read(hfd, buf.as_mut_ptr() as *mut _, count) as i32 }
+    } else {
+        imfs::with_imfs(|state| state.read(cage_id, fd, &mut buf))
+    };
 
     if arg2 == 0 && count > 0 {
         return -14; // EFAULT
@@ -419,12 +430,11 @@ pub extern "C" fn write_handler(
     let fd = arg1;
     let count = arg3 as usize;
 
-    // Special case: fd 0/1/2 (stdin/stdout/stderr) pass through to real write.
-    if fd < 3 {
-        let buf = copy_buf_from_cage(arg2, arg2cage, count);
-        // Write directly to the real fd.
+    // Host standard streams (and anything dup'd from them) pass through to the real fd.
+    // A std fd that bash redirected to an IMFS file resolves to that file instead.
+    if let Some(hfd) = imfs::with_imfs(|state| state.host_std_fd(cage_id, fd)) {
         unsafe {
-            let ret = libc::write(fd as i32, buf.as_ptr() as *const _, count);
+            let ret = libc::write(hfd, buf.as_ptr() as *const _, count);
             return ret as i32;
         }
     }
@@ -1408,11 +1418,9 @@ pub extern "C" fn pwrite_handler(
     let count = arg3 as usize;
     let offset = arg4 as i64;
 
-    // fd < 3 passthrough.
-    if fd < 3 {
-        let buf = copy_buf_from_cage(arg2, arg2cage, count);
+    if let Some(hfd) = imfs::with_imfs(|state| state.host_std_fd(cage_id, fd)) {
         unsafe {
-            let ret = libc::write(fd as i32, buf.as_ptr() as *const _, count);
+            let ret = libc::pwrite(hfd, buf.as_ptr() as *const _, count, offset);
             return ret as i32;
         }
     }
@@ -1450,8 +1458,8 @@ pub extern "C" fn readv_handler(
 
     let this_cage = getcageid();
     let mut buf = vec![0u8; total_len];
-    let ret = if fd < 3 {
-        unsafe { libc::read(fd as i32, buf.as_mut_ptr() as *mut _, total_len) as i32 }
+    let ret = if let Some(hfd) = imfs::with_imfs(|state| state.host_std_fd(cage_id, fd)) {
+        unsafe { libc::read(hfd, buf.as_mut_ptr() as *mut _, total_len) as i32 }
     } else {
         imfs::with_imfs(|state| state.read(cage_id, fd, &mut buf))
     };
@@ -1550,8 +1558,8 @@ pub extern "C" fn writev_handler(
         }
     }
 
-    if fd < 3 {
-        unsafe { libc::write(fd as i32, buf.as_ptr() as *const _, buf.len()) as i32 }
+    if let Some(hfd) = imfs::with_imfs(|state| state.host_std_fd(cage_id, fd)) {
+        unsafe { libc::write(hfd, buf.as_ptr() as *const _, buf.len()) as i32 }
     } else {
         imfs::with_imfs(|state| state.write(cage_id, fd, &buf))
     }
@@ -1587,8 +1595,8 @@ pub extern "C" fn preadv_handler(
 
     let this_cage = getcageid();
     let mut buf = vec![0u8; total_len];
-    let ret = if fd < 3 {
-        unsafe { libc::pread(fd as i32, buf.as_mut_ptr() as *mut _, total_len, offset) as i32 }
+    let ret = if let Some(hfd) = imfs::with_imfs(|state| state.host_std_fd(cage_id, fd)) {
+        unsafe { libc::pread(hfd, buf.as_mut_ptr() as *mut _, total_len, offset) as i32 }
     } else {
         imfs::with_imfs(|state| state.pread(cage_id, fd, &mut buf, offset))
     };
@@ -1688,8 +1696,8 @@ pub extern "C" fn pwritev_handler(
         }
     }
 
-    if fd < 3 {
-        unsafe { libc::pwrite(fd as i32, buf.as_ptr() as *const _, buf.len(), offset) as i32 }
+    if let Some(hfd) = imfs::with_imfs(|state| state.host_std_fd(cage_id, fd)) {
+        unsafe { libc::pwrite(hfd, buf.as_ptr() as *const _, buf.len(), offset) as i32 }
     } else {
         imfs::with_imfs(|state| state.pwrite(cage_id, fd, &buf, offset))
     }
@@ -1999,17 +2007,13 @@ pub extern "C" fn exec_handler(
     // it calls the registered close handlers for each closed fd.
     fdtables::empty_fds_for_exec(cage_id);
 
-    // fdtables allocates virtual FDs, which start from 0 instead of 3.
-    // Unlike regular lind, `underfd` does not point to an actual FD allocation mechanism,
-    // so we need to manually open stdin/stdout/stderr file descriptors to reserve them.
-    for _fd in 0..3 {
-        let _ = fdtables::get_unused_virtual_fd(
-            cage_id,
-            crate::imfs::IMFS_FDKIND,
-            0, // underfd: which node
-            false,
-            0,
-        );
+    // Make sure fds 0..3 exist after exec. `empty_fds_for_exec` keeps non-cloexec
+    // entries, so an inherited (possibly redirected) std fd survives as-is; only a
+    // missing one is re-pointed at the host stream.
+    for fd in 0..3 {
+        if fdtables::translate_virtual_fd(cage_id, fd).is_err() {
+            imfs::with_imfs(|s| s.register_host_std(cage_id, fd));
+        }
     }
 
     // Forward the exec to the runtime.

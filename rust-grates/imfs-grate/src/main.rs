@@ -14,7 +14,6 @@ mod handlers;
 mod imfs;
 mod logging;
 
-use grate_rs::constants::fs::O_RDWR;
 use grate_rs::constants::lind::GRATE_MEMORY_FLAG;
 use grate_rs::constants::*;
 use grate_rs::ffi::stat;
@@ -64,7 +63,7 @@ fn main() {
         load_preloads(&preloads);
     }
 
-    imfs::with_imfs(|s| s.mkdir(0, "/tmp", 0755));
+    imfs::with_imfs(|s| s.mkdir(0, "/tmp", 0o755));
 
     // Build and run the grate. Registers handlers for all filesystem syscalls,
     // forks a child cage, and waits for it to exit.
@@ -136,17 +135,10 @@ fn main() {
             fdtables::init_empty_cage(cageid as u64);
             log!("init-ing {}", cageid);
 
+            // fds 0..3 are the cage's inherited host streams. Reads and writes on them
+            // (or on any fd dup'd from them) are forwarded to the host by the handlers.
             for fd in 0..3 {
-                let _ = fdtables::get_specific_virtual_fd(
-                    cageid as u64,
-                    fd,
-                    imfs::IMFS_FDKIND,
-                    0,
-                    false,
-                    0,
-                );
-
-                imfs::with_imfs(|s| s.insert_perfdinfo(cageid as u64, fd, O_RDWR as u64));
+                imfs::with_imfs(|s| s.register_host_std(cageid as u64, fd));
             }
         })
         .teardown(move |result: Result<i32, GrateError>| {
