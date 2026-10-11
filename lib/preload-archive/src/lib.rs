@@ -29,11 +29,20 @@
 //!
 //! Entries are stored in list order. Staging the same IMFS path twice keeps
 //! the last entry's contents, matching the PRELOADS semantics.
+//!
+//! A *bundle* is several archives back to back, for example the compiler
+//! pipeline followed by the source files. Each archive carries its own length
+//! in its header ([`archive_len`]), so a bundle splits into its archives
+//! without decoding them ([`bundle_archives`]), and each can then be checked
+//! and staged on its own.
 
+pub mod attest;
 #[cfg(feature = "lind")]
 pub mod host;
 #[cfg(feature = "native")]
 pub mod pack;
+#[cfg(feature = "lind")]
+pub mod shm;
 
 use std::fmt;
 
@@ -251,6 +260,61 @@ pub fn read_header(bytes: &[u8]) -> Result<ArchiveInfo, ArchiveError> {
         payload_len,
         digest,
     })
+}
+
+/// The total length (header and payload) of the archive whose header starts
+/// `header`, from its magic, version and payload length alone. Nothing is
+/// verified beyond that: this is for finding where an archive in a bundle
+/// ends before reading it, and the archive is checked once it is read.
+pub fn archive_len(header: &[u8]) -> Result<usize, ArchiveError> {
+    let mut r = Reader {
+        bytes: header,
+        pos: 0,
+    };
+    if r.take(MAGIC.len(), "header")? != MAGIC {
+        return Err(ArchiveError::BadMagic);
+    }
+    let version = r.u32("header")?;
+    if version != VERSION {
+        return Err(ArchiveError::UnsupportedVersion(version));
+    }
+    let _entries = r.u32("header")?;
+    let payload_len = r.u64("header")?;
+    usize::try_from(payload_len)
+        .ok()
+        .and_then(|len| len.checked_add(HEADER_LEN))
+        .ok_or(ArchiveError::Truncated("payload"))
+}
+
+/// Split a bundle (archives back to back) into its archives, in order, from
+/// their headers' lengths alone (see [`archive_len`]): no digest is checked,
+/// so check each archive before using it. A bundle that does not end exactly
+/// at the end of its last archive is rejected.
+pub fn bundle_archives(bytes: &[u8]) -> Result<Vec<&[u8]>, ArchiveError> {
+    let mut archives = Vec::new();
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let len = archive_len(rest)?;
+        if len > rest.len() {
+            return Err(ArchiveError::BadPayloadLength {
+                header: (len - HEADER_LEN) as u64,
+                actual: rest.len().saturating_sub(HEADER_LEN),
+            });
+        }
+        let (archive, tail) = rest.split_at(len);
+        archives.push(archive);
+        rest = tail;
+    }
+    Ok(archives)
+}
+
+/// [`bundle_archives`], with each archive checked with [`read_header`].
+pub fn split_bundle(bytes: &[u8]) -> Result<Vec<&[u8]>, ArchiveError> {
+    let archives = bundle_archives(bytes)?;
+    for archive in &archives {
+        read_header(archive)?;
+    }
+    Ok(archives)
 }
 
 /// Everything a consumer should check before staging a blob it did not build
@@ -497,6 +561,39 @@ mod tests {
                 .unwrap()
                 .digest,
             info.digest
+        );
+    }
+
+    #[test]
+    fn bundles_split_into_their_archives() {
+        let a = archive(&[("/bin/cc", 0o755, b"compiler")]);
+        let b = archive(&[("/src/a.c", 0o644, b"int main;"), ("/src/b.c", 0o644, b"")]);
+        let mut bundle = a.clone();
+        bundle.extend_from_slice(&b);
+
+        assert_eq!(archive_len(&bundle), Ok(a.len()));
+        assert_eq!(archive_len(&bundle[a.len()..]), Ok(b.len()));
+        assert_eq!(split_bundle(&bundle).unwrap(), vec![&a[..], &b[..]]);
+        assert_eq!(split_bundle(&a).unwrap(), vec![&a[..]]);
+        assert!(split_bundle(&[]).unwrap().is_empty());
+        assert_eq!(bundle_archives(&bundle).unwrap(), vec![&a[..], &b[..]]);
+
+        // Splitting alone does not check digests; split_bundle does.
+        let mut tampered = bundle.clone();
+        *tampered.last_mut().unwrap() ^= 1;
+        assert_eq!(bundle_archives(&tampered).unwrap().len(), 2);
+        assert_eq!(split_bundle(&tampered), Err(ArchiveError::DigestMismatch));
+
+        // A cut-off second archive, or garbage after the first, is rejected.
+        assert!(split_bundle(&bundle[..bundle.len() - 1]).is_err());
+        let mut bad = a.clone();
+        bad.extend_from_slice(b"junk");
+        assert!(split_bundle(&bad).is_err());
+        assert!(bundle_archives(&bundle[..bundle.len() - 1]).is_err());
+        assert!(bundle_archives(&bad).is_err());
+        assert_eq!(
+            archive_len(b"LINDPRL"),
+            Err(ArchiveError::Truncated("header"))
         );
     }
 

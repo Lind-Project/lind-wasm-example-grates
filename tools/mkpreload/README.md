@@ -6,7 +6,8 @@ A plain native program (no Lind involved) that packs host files into an IMFS
 the IMFS grate's `--preload-file` option is the other half.
 
 ```text
-mkpreload [--mode OCTAL] [--print-digest] <out> <entry>...
+mkpreload [--mode OCTAL] [--print-digest] <out> <entry>... [--section <entry>...]...
+mkpreload unpack <archive> [<root>]
 ```
 
 - `<out>` is where the archive is written. Point it at a memory-backed
@@ -21,6 +22,16 @@ mkpreload [--mode OCTAL] [--print-digest] <out> <entry>...
   writes just the hex digest to stdout so a script can capture it. Give it to
   the IMFS grate as `--preload-digest <hex>` and the grate refuses any other
   blob.
+
+- `--section` starts another archive in the same output, which makes it a
+  *bundle*: archives back to back. The IMFS grate's `--preload-shm` copies a
+  bundle in one go and stages it one archive at a time, with an attestation
+  after each under `--attest` (for example the compiler pipeline, then the
+  source files).
+  Each archive's digest is reported (one line each with `--print-digest`).
+- `unpack` writes the files of an archive or bundle under `<root>` (default
+  `.`); absolute entry paths are taken relative to it. This is how the dump
+  archive of a `--dump-shm` run is turned back into files.
 
 Non-regular and unreadable files are reported and skipped; the rest are still
 packed. Staging the same IMFS path twice keeps the last entry, as `PRELOADS`

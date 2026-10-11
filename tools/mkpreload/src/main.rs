@@ -11,7 +11,8 @@
 //! Usage:
 //!
 //! ```text
-//! mkpreload [--mode OCTAL] [--print-digest] <out> <entry>...
+//! mkpreload [--mode OCTAL] [--print-digest] <out> <entry>... [--section <entry>...]...
+//! mkpreload unpack <archive> [<root>]
 //! ```
 //!
 //! Each entry is `imfs_path=host_path` or a bare path used on both sides, the
@@ -19,9 +20,20 @@
 //! colon-separated list, so `mkpreload out "$PRELOADS"` works as-is. Every
 //! file is given permission bits `--mode` (default 777, like `PRELOADS`).
 //!
-//! The archive's SHA-256 digest is reported on stderr, and written alone to
-//! stdout with `--print-digest`. Hand it to the consumer through a trusted
-//! channel and it can refuse any other blob: `imfs-grate --preload-digest`.
+//! `--section` starts another archive in the same output: the result is a
+//! *bundle*, archives back to back, which the IMFS grate's `--preload-shm`
+//! stages one archive at a time (for example the compiler pipeline, then the
+//! source files, with an attestation after each). Without `--section` the
+//! output is a single archive, as before.
+//!
+//! Each archive's SHA-256 digest is reported on stderr, and written to stdout
+//! with `--print-digest` (one line per archive). Hand it to the consumer
+//! through a trusted channel and it can refuse any other blob:
+//! `imfs-grate --preload-digest`.
+//!
+//! `unpack` writes the files of an archive or bundle (for example the dump
+//! archive of a run, see `imfs-grate --dump-shm`) under `root` (default `.`):
+//! absolute entry paths are taken relative to `root`.
 //!
 //! The packing itself is `preload_archive::pack::pack`; this file is only the
 //! command-line wrapper, so an ocall handler can reuse the same function.
@@ -30,8 +42,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use preload_archive::pack::pack;
-use preload_archive::{digest_to_hex, read_header};
+use preload_archive::pack::{pack_bundle, unpack};
+use preload_archive::{digest_to_hex, read_header, split_bundle};
 
 const DEFAULT_MODE: u32 = 0o777;
 
@@ -39,13 +51,16 @@ struct Opts {
     out: PathBuf,
     mode: u32,
     print_digest: bool,
-    entries: Vec<String>,
+    /// One list of entries per archive of the output.
+    sections: Vec<Vec<String>>,
 }
 
 fn usage() -> String {
-    "usage: mkpreload [--mode OCTAL] [--print-digest] <out> <entry>...\n\
+    "usage: mkpreload [--mode OCTAL] [--print-digest] <out> <entry>... [--section <entry>...]...\n\
+     \x20      mkpreload unpack <archive> [<root>]\n\
      \x20 entry: imfs_path=host_path | path, or a ':'-separated list of those\n\
-     \x20 --print-digest: write the archive's SHA-256 (hex) to stdout"
+     \x20 --section: start another archive in the same output (a bundle)\n\
+     \x20 --print-digest: write each archive's SHA-256 (hex) to stdout"
         .to_string()
 }
 
@@ -53,6 +68,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut mode = DEFAULT_MODE;
     let mut print_digest = false;
     let mut positional = Vec::new();
+    let mut sections: Vec<Vec<String>> = Vec::new();
     let mut i = 0;
 
     while i < args.len() {
@@ -67,28 +83,70 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
                 print_digest = true;
                 i += 1;
             }
+            "--section" => {
+                sections.push(Vec::new());
+                i += 1;
+            }
             "-h" | "--help" => return Err(usage()),
             other => {
-                positional.push(other.to_string());
+                match sections.last_mut() {
+                    Some(section) => section.push(other.to_string()),
+                    None => positional.push(other.to_string()),
+                }
                 i += 1;
             }
         }
     }
 
-    if positional.len() < 2 {
+    if positional.len() < 2 || sections.iter().any(|s| s.is_empty()) {
         return Err(usage());
     }
     let out = PathBuf::from(positional.remove(0));
+    sections.insert(0, positional);
     Ok(Opts {
         out,
         mode,
         print_digest,
-        entries: positional,
+        sections,
     })
+}
+
+fn run_unpack(args: &[String]) -> ExitCode {
+    let (archive, root) = match args {
+        [archive] => (archive, "."),
+        [archive, root] => (archive, root.as_str()),
+        _ => {
+            eprintln!("{}", usage());
+            return ExitCode::FAILURE;
+        }
+    };
+    let bytes = match fs::read(archive) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!("mkpreload: cannot read {}: {}", archive, e);
+            return ExitCode::FAILURE;
+        }
+    };
+    match unpack(&bytes, std::path::Path::new(root)) {
+        Ok(written) => {
+            for path in &written {
+                eprintln!("unpacked: {}", path);
+            }
+            eprintln!("mkpreload: {} files -> {}", written.len(), root);
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("mkpreload: cannot unpack {}: {}", archive, e);
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("unpack") {
+        return run_unpack(&args[1..]);
+    }
     let opts = match parse_args(&args) {
         Ok(opts) => opts,
         Err(msg) => {
@@ -97,37 +155,46 @@ fn main() -> ExitCode {
         }
     };
 
-    let packed = pack(&opts.entries, opts.mode);
-    for line in &packed.staged {
-        eprintln!("packed: {}", line);
-    }
-    for line in &packed.skipped {
-        eprintln!("skipped: {}", line);
-    }
-
-    let archive = match packed.archive {
-        Some(archive) => archive,
-        None => {
-            eprintln!("mkpreload: nothing to pack");
-            return ExitCode::FAILURE;
+    let (bundle, reports) = pack_bundle(&opts.sections, opts.mode);
+    let mut files = 0;
+    for packed in &reports {
+        for line in &packed.staged {
+            eprintln!("packed: {}", line);
         }
-    };
+        for line in &packed.skipped {
+            eprintln!("skipped: {}", line);
+        }
+        files += packed.staged.len();
+    }
+    if files == 0 {
+        eprintln!("mkpreload: nothing to pack");
+        return ExitCode::FAILURE;
+    }
 
-    if let Err(e) = fs::write(&opts.out, &archive) {
+    if let Err(e) = fs::write(&opts.out, &bundle) {
         eprintln!("mkpreload: cannot write {}: {}", opts.out.display(), e);
         return ExitCode::FAILURE;
     }
 
-    let digest = digest_to_hex(&read_header(&archive).expect("freshly built archive").digest);
     eprintln!(
-        "mkpreload: {} files, {} bytes -> {}\nmkpreload: sha256 {}",
-        packed.staged.len(),
-        archive.len(),
-        opts.out.display(),
-        digest
+        "mkpreload: {} files, {} bytes -> {}",
+        files,
+        bundle.len(),
+        opts.out.display()
     );
-    if opts.print_digest {
-        println!("{}", digest);
+    let archives = split_bundle(&bundle).expect("freshly built bundle");
+    for (i, archive) in archives.iter().enumerate() {
+        let digest = digest_to_hex(&read_header(archive).expect("freshly built archive").digest);
+        eprintln!(
+            "mkpreload: archive {} ({} files, {} bytes) sha256 {}",
+            i + 1,
+            reports[i].staged.len(),
+            archive.len(),
+            digest
+        );
+        if opts.print_digest {
+            println!("{}", digest);
+        }
     }
     ExitCode::SUCCESS
 }
@@ -147,7 +214,7 @@ mod tests {
         assert_eq!(opts.out, PathBuf::from("out.mem"));
         assert_eq!(opts.mode, 0o777);
         assert!(!opts.print_digest);
-        assert_eq!(opts.entries, args(&["/a=a.txt", "/b"]));
+        assert_eq!(opts.sections, vec![args(&["/a=a.txt", "/b"])]);
 
         let opts =
             parse_args(&args(&["--mode", "644", "--print-digest", "out.mem", "/a"])).unwrap();
@@ -157,6 +224,30 @@ mod tests {
         assert!(parse_args(&args(&["out.mem"])).is_err());
         assert!(parse_args(&args(&["--mode", "9", "out.mem", "/a"])).is_err());
         assert!(parse_args(&args(&["--help"])).is_err());
+    }
+
+    #[test]
+    fn sections_split_the_entries_into_archives() {
+        let opts = parse_args(&args(&[
+            "out.mem",
+            "/cc=cc",
+            "--section",
+            "/a.c=a.c",
+            "/b.c",
+            "--section",
+            "/x",
+        ]))
+        .unwrap();
+        assert_eq!(
+            opts.sections,
+            vec![
+                args(&["/cc=cc"]),
+                args(&["/a.c=a.c", "/b.c"]),
+                args(&["/x"])
+            ]
+        );
+        assert!(parse_args(&args(&["out.mem", "/a", "--section"])).is_err());
+        assert!(parse_args(&args(&["out.mem", "--section", "/a"])).is_err());
     }
 
     /// The IMFS grate's `preload_test.c` runs once with `--preload-file` on a
@@ -180,9 +271,8 @@ mod tests {
             l = host("preload_long.txt"),
             s = host("preload_short.txt"),
         );
-        let packed = pack(&[list], DEFAULT_MODE);
-        assert_eq!(packed.staged.len(), 5, "{:?}", packed.skipped);
-        let expected = packed.archive.unwrap();
+        let (expected, reports) = pack_bundle(&[vec![list]], DEFAULT_MODE);
+        assert_eq!(reports[0].staged.len(), 5, "{:?}", reports[0].skipped);
 
         if std::env::var_os("MKPRELOAD_REGEN_FIXTURE").is_some() {
             fs::write(&fixture, &expected).unwrap();
