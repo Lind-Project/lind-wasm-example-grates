@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::Path;
 
-use crate::{ArchiveBuilder, parse_preload_entry};
+use crate::{ArchiveBuilder, ArchiveError, parse_archive, parse_preload_entry, split_bundle};
 
 /// What packing produced, plus one line per entry for a summary.
 #[derive(Debug, Default)]
@@ -70,6 +70,56 @@ pub fn pack<S: AsRef<str>>(entries: &[S], mode: u32) -> Packed {
     packed
 }
 
+/// Pack several lists into a bundle: one archive per list, back to back, in
+/// order (for example the compiler pipeline, then the source files). Returns
+/// the bundle and what happened to each list. A list from which no file
+/// could be read still gets an (empty) archive, so that the position of each
+/// archive in the bundle stays the position of its list.
+pub fn pack_bundle<S: AsRef<str>>(sections: &[Vec<S>], mode: u32) -> (Vec<u8>, Vec<Packed>) {
+    let mut bundle = Vec::new();
+    let mut reports = Vec::new();
+    for entries in sections {
+        let mut packed = pack(entries, mode);
+        let archive = packed
+            .archive
+            .take()
+            .unwrap_or_else(|| ArchiveBuilder::new().finish());
+        bundle.extend_from_slice(&archive);
+        reports.push(packed);
+    }
+    (bundle, reports)
+}
+
+/// Write every file of a bundle (or a single archive) to the host. Absolute
+/// entry paths are written under `root`, relative ones relative to it, so
+/// `root` "/" restores absolute paths as they are. Missing parent
+/// directories are created and existing files replaced. Returns the paths
+/// written, in order.
+pub fn unpack(bytes: &[u8], root: &Path) -> Result<Vec<String>, String> {
+    let archives = split_bundle(bytes).map_err(|e: ArchiveError| e.to_string())?;
+    let mut written = Vec::new();
+    for archive in archives {
+        for entry in parse_archive(archive).map_err(|e| e.to_string())? {
+            let rel = entry.path.trim_start_matches('/');
+            if rel.is_empty() || rel.split('/').any(|c| c == "..") {
+                return Err(format!("refusing to unpack {:?}", entry.path));
+            }
+            let dest = root.join(rel);
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent).map_err(|e| format!("{}: {}", parent.display(), e))?;
+            }
+            fs::write(&dest, entry.data).map_err(|e| format!("{}: {}", dest.display(), e))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(entry.mode & 0o7777));
+            }
+            written.push(dest.display().to_string());
+        }
+    }
+    Ok(written)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +163,47 @@ mod tests {
                 .archive
                 .is_none()
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bundles_pack_and_unpack() {
+        let dir = scratch("bundle");
+        fs::write(dir.join("cc"), b"compiler").unwrap();
+        fs::write(dir.join("a.c"), b"int main(void) { return 0; }").unwrap();
+        let d = dir.display();
+
+        let (bundle, reports) = pack_bundle(
+            &[
+                vec![format!("/bin/cc={d}/cc")],
+                vec![
+                    format!("/src/a.c={d}/a.c"),
+                    format!("/src/gone.c={d}/gone.c"),
+                ],
+                vec![format!("/none={d}/missing")],
+            ],
+            0o644,
+        );
+        assert_eq!(reports.len(), 3);
+        assert_eq!(reports[1].staged.len(), 1);
+        assert_eq!(reports[1].skipped.len(), 1);
+        let archives = split_bundle(&bundle).unwrap();
+        assert_eq!(archives.len(), 3);
+        assert_eq!(parse_archive(archives[0]).unwrap()[0].path, "/bin/cc");
+        assert!(parse_archive(archives[2]).unwrap().is_empty());
+
+        let out = dir.join("out");
+        let written = unpack(&bundle, &out).unwrap();
+        assert_eq!(written.len(), 2);
+        assert_eq!(fs::read(out.join("bin/cc")).unwrap(), b"compiler");
+        assert_eq!(
+            fs::read(out.join("src/a.c")).unwrap(),
+            b"int main(void) { return 0; }"
+        );
+
+        let mut evil = ArchiveBuilder::new();
+        evil.push("/../escape", 0o644, b"x");
+        assert!(unpack(&evil.finish(), &out).is_err());
         let _ = fs::remove_dir_all(dir);
     }
 }
