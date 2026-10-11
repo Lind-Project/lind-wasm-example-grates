@@ -24,6 +24,10 @@ Add `--log` immediately after the grate to enable IMFS logging:
 lind_run grates/imfs-grate.cwasm --log <program> [args...]
 ```
 
+Grate options (`--log`, `--preload-file`, `--preload-digest`) may appear in any
+order; the first argument that is not one of them starts the program's command
+line.
+
 ## Preloading Host Files
 
 Set `PRELOADS` to a colon-separated list of entries. A bare path is read from
@@ -56,14 +60,115 @@ Preload details:
   `sub/rel.txt=host.txt` still ends up as a file.
 - Staging the same IMFS path twice keeps only the last entry's contents; the
   file is truncated before it is rewritten.
-- Files are staged under IMFS cage 0, before any application cage exists. IMFS
-  keeps a single node tree, so the child cage sees them at the same paths.
+- An entry is skipped if its path, or one of its parents, is already taken by
+  something that is not a directory (or the final component is a directory).
+- Relative IMFS paths resolve against cage 0's cwd (`/`), before any
+  application cage exists. IMFS keeps a single node tree, so the child cage
+  sees the files at the same paths.
 - The Rust implementation reads host files through `make_threei_call`
   (`stat`, `open`, `read`, `close`) instead of `std::fs::read`.
 
 This avoids a Lind/WASM issue where Rust `std::fs::metadata()` can report an
 incorrectly huge file size, causing `std::fs::read()` to fail with out-of-memory
 even for tiny files.
+
+### How preloading works
+
+Preloading always goes through a *preload archive*: one contiguous block of
+memory holding every file to stage, in the format defined by the shared
+`lib/preload-archive` crate:
+
+```text
+header  magic "LINDPRLD", version u32 (2), entry count u32,
+        payload_len u64, sha256(payload) [32 bytes]           = 56 bytes
+entry   path_len u32, mode u32, data_len u64, path bytes, data bytes
+```
+
+IMFS is handed that block as a `(pointer, size)` pair (`imfs::preload_from_ptr`)
+and builds its nodes straight from the bytes (`src/imfs/preload.rs`):
+
+- IMFS itself never touches the host filesystem tree.
+- Files are created directly in the node/chunk arenas, not through the POSIX
+  layer, so no fd table, `open()`, or `write()` is involved.
+- Each directory prefix is resolved once and cached instead of being walked
+  from `/` again for every path component.
+- A malformed archive is rejected as a whole before any node is created:
+  every length is bounds-checked and the payload must hash to the digest in
+  the header.
+
+There are two ways to get the archive to IMFS:
+
+1. **`PRELOADS` (one step).** The IMFS grate reads the listed host files into
+   an archive itself at startup and then stages it.
+
+2. **`--preload-file <path>` (two steps, prepared ahead of time).** A normal
+   native program, [`tools/mkpreload`](../../tools/mkpreload/README.md),
+   builds the archive *before* the IMFS grate runs and writes it to a path the
+   runtime can see. The IMFS grate then reads that one file into its memory
+   and stages from the pointer; nothing else is opened on the host.
+
+   ```bash
+   # Step 1, outside Lind: pack the files into one blob. Put it on a
+   # memory-backed path under lindfs so it never touches a disk.
+   mkpreload lindfs/dev/shm/preload.mem "/hello.c=/home/alice/hello.c:/usr/include/stdio.h"
+
+   # Step 2, whenever you like: run the grate against the blob.
+   lind_run grates/imfs-grate.cwasm --preload-file /dev/shm/preload.mem bin/tcc /hello.c -o /hello-3i
+   ```
+
+   The path given to `--preload-file` is resolved inside lindfs (the runtime
+   chroots there), so `lindfs/dev/shm/preload.mem` on the host is
+   `/dev/shm/preload.mem` to the grate. Build the blob once and reuse it for as
+   many runs as you like. Every `lind_run` is a separate host process, so a
+   file is the only thing that can carry the archive between the two steps;
+   a tmpfs path keeps it in memory.
+
+   The blob was built outside the grate, so it is treated as untrusted input.
+   It is capped at 48 MiB, its header and payload digest are verified, and
+   with `--preload-digest <hex>` it must be exactly the blob whose SHA-256
+   `mkpreload` printed:
+
+   ```bash
+   DIGEST=$(mkpreload --print-digest lindfs/dev/shm/preload.mem "/hello.c=/home/alice/hello.c")
+   lind_run grates/imfs-grate.cwasm --preload-file /dev/shm/preload.mem --preload-digest "$DIGEST" bin/tcc /hello.c
+   ```
+
+   A blob that fails any of these checks stages nothing.
+
+If both are given, the `--preload-file` archive is staged first and `PRELOADS`
+entries are layered on top.
+
+### Staging from shared memory, with attestation
+
+Inside an enclave, reading a host file costs an ocall per read. With
+`--preload-shm` the runtime maps a *bundle* (archives back to back, built on
+the host with `mkpreload ... --section ...`) before the first cage starts:
+lind-boot `--preload-shm <path>`, or the `[shm]` section of a TriSeal keep's
+Enarx.toml. IMFS copies the whole bundle into its own memory with one runtime
+call (`LIND_SHM_READ`, a memory copy made by the runtime, so it does not leave
+the enclave) before looking at it; everything after that works on the copy,
+which the host cannot change. IMFS splits it into its archives and verifies
+and stages them one at a time. A bundle, archive or attestation that fails
+stops the grate.
+
+With `--attest`, IMFS stops after each archive and asks the in-toto grate it
+runs under to attest it (`rust-grates/intoto-grate`): that grate reads the
+archive out of IMFS's memory, hashes every file, signs an in-toto statement
+over them and writes the DSSE envelope back. The envelopes are kept in
+`/attest/<n>-<step>.intoto.json`, the signer's public key in
+`/attest/signer.pub.json`. Steps are named after `--attest-steps` (default
+`pipeline,sources`):
+
+```bash
+mkpreload build.prld "$PIPELINE" --section "$SOURCES"     # host
+# in the keep:
+intoto-grate imfs-grate.cwasm --preload-shm --attest --dump-shm make ...
+```
+
+`imfs::preload_from_untrusted(ptr, size, max_len, expected_digest)` remains
+for a runtime that hands back an archive in untrusted memory instead: it copies
+the bytes into the grate before checking them, applies the size cap and digest
+checks, and only then stages.
 
 ## Dumping IMFS Files Back
 
@@ -100,6 +205,12 @@ Dump details:
 - Host parent directories are created before writing the dump target.
 - Host-side `mkdir`, `open`, `write`, and `close` are performed through
   `make_threei_call`.
+
+With `--dump-shm`, the `DUMPS` files (and, with `--attest`, the files in
+`/attest`, under `attest/`) are packed into one archive instead and handed to
+the runtime's dump region in a single call (`LIND_SHM_DUMP`); inside an
+enclave that is one ocall for the whole dump. Each file is stored under its
+host path, and `mkpreload unpack <dump> <dir>` writes them out on the host.
 
 ## Common tcc Example
 
@@ -152,7 +263,10 @@ errno where possible.
 make test GRATE=imfs-grate
 ```
 
-Two cage binaries run under the grate:
+Two cage binaries run under the grate (`test/preload_test.c` runs twice: once
+with `PRELOADS`, once with `--preload-file test/preload_test.mem`, a blob
+built by `tools/mkpreload` from the same list, so both paths are checked
+against the same expectations):
 
 - `test/imfs_test.c` — the filesystem syscalls themselves.
 - `test/preload_test.c` — `PRELOADS` staging. It checks the contents and modes of the files staged from `test/preload_*.txt`, that parent directories are created while the final component stays a file (for absolute and relative targets alike), that re-staging a path truncates it, and that malformed entries are skipped without dropping the entries after them. The `PRELOADS` value is set in `test/grates_test.toml`.
@@ -162,11 +276,21 @@ Run tests individually:
 ```sh
 lind_run grates/imfs-grate.cwasm imfs_test.cwasm
 lind_run grates/imfs-grate.cwasm preload_test.cwasm
+lind_run grates/imfs-grate.cwasm --preload-file preload_test.mem preload_test.cwasm
+```
+
+`test/preload_test.mem` is pinned by the `imfs_preload_fixture_matches_this_tool`
+unit test in `tools/mkpreload`; after changing the archive format or the fixture
+files, regenerate it with:
+
+```sh
+cd tools/mkpreload && MKPRELOAD_REGEN_FIXTURE=1 cargo test fixture
 ```
 
 ## Current Limitations
 
 - Preloaded paths are stored in IMFS using the path string provided.
-- Large preload files are still accumulated in memory before being written into
-  IMFS; the host read path is chunked, but the temporary buffer is a `Vec<u8>`.
+- The preload archive holds every staged file in memory at once (in addition
+  to the IMFS chunks that are created from it) until staging finishes, so peak
+  memory during preload is roughly twice the total preload size.
 - `pipe` and `pipe2` are currently registered as unsupported.

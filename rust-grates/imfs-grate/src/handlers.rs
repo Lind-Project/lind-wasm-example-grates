@@ -7,7 +7,7 @@
 
 use grate_rs::constants::*;
 use grate_rs::ffi::{iovec, stat};
-use grate_rs::{copy_data_between_cages, getcageid, is_thread_clone, make_threei_call};
+use grate_rs::{GrateError, copy_data_between_cages, getcageid, is_thread_clone, make_threei_call};
 
 use crate::imfs;
 
@@ -382,24 +382,37 @@ pub extern "C" fn read_handler(
     let cage_id = arg1cage;
     let fd = arg1;
     let count = arg3 as usize;
-    let this_cage = getcageid();
-
-    // Allocate a local buffer, read into it, then copy to cage.
-    let mut buf = vec![0u8; count];
-
-    // Host standard streams (and anything dup'd from them) read from the real fd.
-    let ret = if let Some(hfd) = imfs::with_imfs(|state| state.host_std_fd(cage_id, fd)) {
-        unsafe { libc::read(hfd, buf.as_mut_ptr() as *mut _, count) as i32 }
-    } else {
-        imfs::with_imfs(|state| state.read(cage_id, fd, &mut buf))
-    };
 
     if arg2 == 0 && count > 0 {
         return -14; // EFAULT
     }
 
+    // Host standard streams (and anything dup'd from them) read from the real fd.
+    if let Some(hfd) = imfs::with_imfs(|state| state.host_std_fd(cage_id, fd)) {
+        let this_cage = getcageid();
+        let mut buf = vec![0u8; count];
+        let ret = unsafe { libc::read(hfd, buf.as_mut_ptr() as *mut _, count) as i32 };
+        if ret > 0 {
+            let _ = copy_data_between_cages(
+                this_cage,
+                arg2cage,
+                buf.as_ptr() as u64,
+                this_cage,
+                arg2,
+                arg2cage,
+                ret as u64,
+                0, // copytype=0 means raw memcpy
+            );
+        }
+        return ret;
+    }
+
     // Copy file data straight into the cage's buffer.
-    let buf = imfs::CageBuf { addr: arg2, cage: arg2cage, len: count };
+    let buf = imfs::CageBuf {
+        addr: arg2,
+        cage: arg2cage,
+        len: count,
+    };
     imfs::with_imfs(|state| state.read_to_cage(cage_id, fd, buf))
 }
 
@@ -433,6 +446,7 @@ pub extern "C" fn write_handler(
     // Host standard streams (and anything dup'd from them) pass through to the real fd.
     // A std fd that bash redirected to an IMFS file resolves to that file instead.
     if let Some(hfd) = imfs::with_imfs(|state| state.host_std_fd(cage_id, fd)) {
+        let buf = copy_buf_from_cage(arg2, arg2cage, count);
         unsafe {
             let ret = libc::write(hfd, buf.as_ptr() as *const _, count);
             return ret as i32;
@@ -440,7 +454,11 @@ pub extern "C" fn write_handler(
     }
 
     // Copy the cage's data straight into the file.
-    let buf = imfs::CageBuf { addr: arg2, cage: arg2cage, len: count };
+    let buf = imfs::CageBuf {
+        addr: arg2,
+        cage: arg2cage,
+        len: count,
+    };
     imfs::with_imfs(|state| state.write_from_cage(cage_id, fd, buf))
 }
 
@@ -1386,7 +1404,11 @@ pub extern "C" fn pread_handler(
         return -14; // EFAULT
     }
 
-    let buf = imfs::CageBuf { addr: arg2, cage: arg2cage, len: count };
+    let buf = imfs::CageBuf {
+        addr: arg2,
+        cage: arg2cage,
+        len: count,
+    };
     imfs::with_imfs(|state| state.pread_to_cage(cage_id, fd, buf, offset))
 }
 
@@ -1419,13 +1441,18 @@ pub extern "C" fn pwrite_handler(
     let offset = arg4 as i64;
 
     if let Some(hfd) = imfs::with_imfs(|state| state.host_std_fd(cage_id, fd)) {
+        let buf = copy_buf_from_cage(arg2, arg2cage, count);
         unsafe {
             let ret = libc::pwrite(hfd, buf.as_ptr() as *const _, count, offset);
             return ret as i32;
         }
     }
 
-    let buf = imfs::CageBuf { addr: arg2, cage: arg2cage, len: count };
+    let buf = imfs::CageBuf {
+        addr: arg2,
+        cage: arg2cage,
+        len: count,
+    };
     imfs::with_imfs(|state| state.pwrite_from_cage(cage_id, fd, buf, offset))
 }
 
@@ -2037,6 +2064,10 @@ pub extern "C" fn exec_handler(
         0,
     ) {
         Ok(r) => r,
+        // Preserve the negative errno the runtime returned. Collapsing every
+        // failure to -1 makes glibc report EPERM, which hides the real reason
+        // exec failed (e.g. -ENOENT for a missing exec image).
+        Err(GrateError::MakeSyscallError(e)) => e,
         Err(_) => -1,
     }
 }
