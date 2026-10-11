@@ -835,7 +835,13 @@ impl ImfsState {
     /// Read up to `len` bytes of a regular file at `offset`, passing the data
     /// to `copy_out(data, pos)` piece by piece. Returns the bytes read, which
     /// is fewer than `len` at end of file.
-    fn read_node<F>(&mut self, node_idx: usize, offset: usize, len: usize, mut copy_out: F) -> Result<usize, i32>
+    fn read_node<F>(
+        &mut self,
+        node_idx: usize,
+        offset: usize,
+        len: usize,
+        mut copy_out: F,
+    ) -> Result<usize, i32>
     where
         F: FnMut(&[u8], usize) -> Result<(), i32>,
     {
@@ -847,14 +853,19 @@ impl ImfsState {
     /// piece by piece with `copy_in(data, pos)` and growing it as needed. A
     /// hole before `offset` reads back as zeros because new chunks are zeroed.
     /// Returns the bytes written.
-    fn write_node<F>(&mut self, node_idx: usize, offset: usize, len: usize, copy_in: F) -> Result<usize, i32>
+    fn write_node<F>(
+        &mut self,
+        node_idx: usize,
+        offset: usize,
+        len: usize,
+        copy_in: F,
+    ) -> Result<usize, i32>
     where
         F: FnMut(&mut [u8], usize) -> Result<(), i32>,
     {
         if len == 0 {
             return Ok(0);
         }
-    }
 
         self.ensure_chunks(node_idx, offset + len);
         let written = self.for_each_run(node_idx, offset, len, copy_in)?;
