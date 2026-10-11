@@ -10,6 +10,7 @@
 //! stored in a HashMap<(cage_id, fd), offset>.
 
 pub mod node;
+pub mod preload;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -157,40 +158,107 @@ pub struct ImfsState {
 
     /// List of current working directories for each cage.
     pub cwd_info: HashMap<u64, String>,
+
+    /// Node indices standing in for the cage's inherited host stdin/stdout/stderr.
+    /// fds that resolve to one of these are forwarded to the host instead of IMFS.
+    pub host_std_nodes: [usize; 3],
 }
 
 /// Initialize the global IMFS. Called once at startup.
 pub fn init() {
-    let mut state = ImfsState {
-        nodes: Vec::with_capacity(MAX_NODES),
-        chunks: Vec::new(),
-        node_free_list: Vec::new(),
-        chunk_free_list: Vec::new(),
-        root_idx: 0,
-        fd_info: HashMap::new(),
-        cwd_info: HashMap::new(),
-    };
+    *IMFS.lock().unwrap() = Some(ImfsState::new());
+}
 
-    state.cwd_info.insert(0, "/".to_string());
+/// Stage a preload archive that this cage built or already owns, given as a
+/// `(pointer, size)` pair.
+///
+/// # Safety
+///
+/// `ptr` must be valid for reads of `size` bytes for the duration of the call.
+pub unsafe fn preload_from_ptr(
+    ptr: *const u8,
+    size: usize,
+) -> Result<preload::PreloadStats, preload_archive::ArchiveError> {
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, size) };
+    with_imfs(|state| state.preload_archive(bytes))
+}
 
-    // Create root directory.
-    let root_idx = state.create_node("/", NodeType::Dir, 0o755);
-    state.nodes[root_idx].parent_idx = root_idx;
-    state.root_idx = root_idx;
-
-    // Create . and .. in root.
-    let dot_idx = state.create_node(".", NodeType::Lnk, 0);
-    state.nodes[dot_idx].info = NodeInfo::HardLink { target: root_idx };
-    state.add_child(root_idx, dot_idx);
-
-    let dotdot_idx = state.create_node("..", NodeType::Lnk, 0);
-    state.nodes[dotdot_idx].info = NodeInfo::HardLink { target: root_idx };
-    state.add_child(root_idx, dotdot_idx);
-
-    *IMFS.lock().unwrap() = Some(state);
+/// Stage a preload archive that sits in memory this cage does *not* trust:
+/// a buffer an untrusted runtime handed back from an ocall, for example.
+///
+/// The bytes are copied into memory this cage owns before anything looks at
+/// them, so the producer cannot change them under the check. The copy is
+/// then size-capped, its header and payload digest are verified, and, when
+/// `expected` is given, its digest must match that value obtained through a
+/// trusted channel. Only after all of that is anything staged; a rejected
+/// archive leaves the filesystem untouched.
+///
+/// # Safety
+///
+/// `ptr` must be valid for reads of `size` bytes for the duration of the call.
+/// `size` is checked against `max_len` before any byte is read.
+// Not called by the Lind build: --preload-file and --preload-shm already own
+// their buffer and go through preload_archive_verified directly.
+#[allow(dead_code)]
+pub unsafe fn preload_from_untrusted(
+    ptr: *const u8,
+    size: usize,
+    max_len: usize,
+    expected: Option<&preload_archive::ArchiveDigest>,
+) -> Result<preload::PreloadStats, preload_archive::ArchiveError> {
+    if size > max_len {
+        return Err(preload_archive::ArchiveError::TooLarge {
+            len: size,
+            max: max_len,
+        });
+    }
+    let owned = unsafe { std::slice::from_raw_parts(ptr, size) }.to_vec();
+    with_imfs(|state| state.preload_archive_verified(&owned, max_len, expected))
 }
 
 impl ImfsState {
+    /// An empty filesystem: `/` with its `.` and `..` entries, the nodes that
+    /// stand in for the host standard streams, and cage 0 (the utility cage
+    /// used for preloading and dumping) at `/`.
+    pub fn new() -> Self {
+        let mut state = ImfsState {
+            nodes: Vec::with_capacity(MAX_NODES),
+            chunks: Vec::new(),
+            node_free_list: Vec::new(),
+            chunk_free_list: Vec::new(),
+            root_idx: 0,
+            fd_info: HashMap::new(),
+            cwd_info: HashMap::new(),
+            host_std_nodes: [0; 3],
+        };
+
+        state.cwd_info.insert(0, "/".to_string());
+
+        // Create root directory.
+        let root_idx = state.create_node("/", NodeType::Dir, 0o755);
+        state.nodes[root_idx].parent_idx = root_idx;
+        state.root_idx = root_idx;
+
+        // Create . and .. in root.
+        let dot_idx = state.create_node(".", NodeType::Lnk, 0);
+        state.nodes[dot_idx].info = NodeInfo::HardLink { target: root_idx };
+        state.add_child(root_idx, dot_idx);
+
+        let dotdot_idx = state.create_node("..", NodeType::Lnk, 0);
+        state.nodes[dotdot_idx].info = NodeInfo::HardLink { target: root_idx };
+        state.add_child(root_idx, dotdot_idx);
+
+        // Host standard streams. Not linked into any directory; reachable only through
+        // fds registered by `register_host_std` (and whatever dup/dup2/fcntl derive from them).
+        for (i, name) in ["stdin", "stdout", "stderr"].iter().enumerate() {
+            let idx = state.create_node(name, NodeType::Chr, 0o620);
+            state.nodes[idx].info = NodeInfo::HostStd { hostfd: i as i32 };
+            state.host_std_nodes[i] = idx;
+        }
+
+        state
+    }
+
     // =====================================================================
     //  Timestamp helpers
     // =====================================================================
@@ -710,7 +778,13 @@ impl ImfsState {
     ///
     /// Returns the number of bytes handled. If `f` fails, returns the bytes
     /// handled before it, or its error if that is none.
-    fn for_each_run<F>(&mut self, node_idx: usize, offset: usize, len: usize, mut f: F) -> Result<usize, i32>
+    fn for_each_run<F>(
+        &mut self,
+        node_idx: usize,
+        offset: usize,
+        len: usize,
+        mut f: F,
+    ) -> Result<usize, i32>
     where
         F: FnMut(&mut [u8], usize) -> Result<(), i32>,
     {
@@ -731,7 +805,11 @@ impl ImfsState {
             let data = self.chunks[chunks[first]..=chunks[last]].as_flattened_mut();
             let start = pos - first * CHUNK_SIZE;
             if let Err(e) = f(&mut data[start..start + (run_end - pos)], pos - offset) {
-                return if pos == offset { Err(e) } else { Ok(pos - offset) };
+                return if pos == offset {
+                    Err(e)
+                } else {
+                    Ok(pos - offset)
+                };
             }
             pos = run_end;
         }
@@ -776,6 +854,7 @@ impl ImfsState {
         if len == 0 {
             return Ok(0);
         }
+    }
 
         self.ensure_chunks(node_idx, offset + len);
         let written = self.for_each_run(node_idx, offset, len, copy_in)?;
@@ -834,6 +913,32 @@ impl ImfsState {
         }
 
         return Ok((idx as usize, flags));
+    }
+
+    /// If `fd` resolves to one of the host standard-stream nodes, return the host fd
+    /// the grate should forward to. `None` means the fd is an ordinary IMFS entry
+    /// (or not open at all) and must go through the IMFS path.
+    pub fn host_std_fd(&mut self, cage_id: u64, fd: u64) -> Option<i32> {
+        let entry = fdtables::translate_virtual_fd(cage_id, fd).ok()?;
+        let node_idx = entry.underfd as usize;
+        if node_idx >= self.nodes.len() {
+            return None;
+        }
+        match &self.nodes[node_idx].info {
+            NodeInfo::HostStd { hostfd } => Some(*hostfd),
+            _ => None,
+        }
+    }
+
+    /// Point virtual `fd` (0, 1 or 2) of `cage_id` at the matching host standard stream.
+    /// Replaces whatever was registered at that fd.
+    pub fn register_host_std(&mut self, cage_id: u64, fd: u64) {
+        let which = (fd as usize).min(2);
+        let node_idx = self.host_std_nodes[which];
+        let _ =
+            fdtables::get_specific_virtual_fd(cage_id, fd, IMFS_FDKIND, node_idx as u64, false, 0);
+        self.nodes[node_idx].in_use += 1;
+        self.insert_perfdinfo(cage_id, fd, O_RDWR as u64);
     }
 
     pub fn insert_perfdinfo(&mut self, cageid: u64, fd: u64, flags: u64) {
@@ -1274,7 +1379,14 @@ impl ImfsState {
 
     /// Shared part of read and pread: check the fd, then read `len` bytes at
     /// `offset`, or at the fd offset (and advance it) when `offset` is None.
-    fn read_fd<F>(&mut self, cage_id: u64, fd: u64, offset: Option<i64>, len: usize, copy_out: F) -> i32
+    fn read_fd<F>(
+        &mut self,
+        cage_id: u64,
+        fd: u64,
+        offset: Option<i64>,
+        len: usize,
+        copy_out: F,
+    ) -> i32
     where
         F: FnMut(&[u8], usize) -> Result<(), i32>,
     {
@@ -1313,7 +1425,14 @@ impl ImfsState {
     /// Shared part of write and pwrite: check the fd, then write `len` bytes
     /// at `offset`, or at the fd offset (or end of file with O_APPEND) and
     /// advance it when `offset` is None.
-    fn write_fd<F>(&mut self, cage_id: u64, fd: u64, offset: Option<i64>, len: usize, copy_in: F) -> i32
+    fn write_fd<F>(
+        &mut self,
+        cage_id: u64,
+        fd: u64,
+        offset: Option<i64>,
+        len: usize,
+        copy_in: F,
+    ) -> i32
     where
         F: FnMut(&mut [u8], usize) -> Result<(), i32>,
     {
@@ -1416,7 +1535,8 @@ impl ImfsState {
         // Only valid for regular files,
         match &self.nodes[node_idx].info {
             NodeInfo::Reg { .. } => {}
-            NodeInfo::Pip { .. } => return -29, // EISPIPE
+            NodeInfo::Pip { .. } => return -29,     // EISPIPE
+            NodeInfo::HostStd { .. } => return -29, // ESPIPE: host streams are not seekable
             NodeInfo::Dir { .. } => return offset as i32, // On directory lseeks, we return offset
             // immediately.
             _ => return -9, // EBADF on Free/Lnk (will never be hit)
@@ -2094,10 +2214,17 @@ impl ImfsState {
             return -17; // EEXIST
         }
 
-        let dir_idx = self.create_node(&dirname, NodeType::Dir, mode);
+        self.create_dir_node(parent_idx, &dirname, mode);
+        0
+    }
+
+    /// Create a directory named `name` under `parent_idx`, complete with its
+    /// `.` and `..` entries, and return its node index. The caller has already
+    /// checked that no such child exists.
+    fn create_dir_node(&mut self, parent_idx: usize, name: &str, mode: u32) -> usize {
+        let dir_idx = self.create_node(name, NodeType::Dir, mode);
         self.add_child(parent_idx, dir_idx);
 
-        // Add . and ..
         let dot_idx = self.create_node(".", NodeType::Lnk, 0);
         self.nodes[dot_idx].info = NodeInfo::HardLink { target: dir_idx };
         self.add_child(dir_idx, dot_idx);
@@ -2105,11 +2232,12 @@ impl ImfsState {
         let dotdot_idx = self.create_node("..", NodeType::Lnk, 0);
         self.nodes[dotdot_idx].info = NodeInfo::HardLink { target: parent_idx };
         self.add_child(dir_idx, dotdot_idx);
+
         self.update_mtime(parent_idx);
         self.update_ctime(parent_idx);
         self.update_mtime(dir_idx);
         self.update_ctime(dir_idx);
 
-        0
+        dir_idx
     }
 }

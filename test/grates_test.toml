@@ -83,6 +83,15 @@ test_src = "test/preload_test.c"
 env = ["PRELOADS=/preload_hello.txt=preload_hello.txt:/preload/nested/data.txt=preload_nested.txt:sub/rel.txt=preload_rel.txt::=preload_rel.txt:preload_rel.txt=:/trunc.txt=preload_long.txt:/trunc.txt=preload_short.txt"]
 files = ["test/preload_hello.txt", "test/preload_nested.txt", "test/preload_rel.txt", "test/preload_long.txt", "test/preload_short.txt"]
 
+# The same expectations, but the files arrive as one prebuilt archive via
+# --preload-file instead of PRELOADS. test/preload_test.mem is produced by the
+# native tools/mkpreload program from the same fixture list; its unit test
+# `imfs_preload_fixture_matches_this_tool` keeps the committed copy current.
+[[grate.tests]]
+test_src = "test/preload_test.c"
+grate_args = ["--preload-file", "preload_test.mem"]
+files = ["test/preload_test.mem"]
+
 # ── Readonly (Rust) ─────────────────────────────────────────────────
 
 [[grate]]
