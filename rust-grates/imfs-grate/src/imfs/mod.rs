@@ -426,6 +426,18 @@ impl ImfsState {
     //  Chunk management
     // =====================================================================
 
+    /// Make room in the chunk arena for `bytes` more bytes of file data at
+    /// once. Growing it a chunk at a time doubles it again and again, and in
+    /// a cage every buffer it outgrows stays in memory (a release only
+    /// clears it): staging a 330 MB preload that way leaves ~500 MB behind.
+    /// Each file rounds its last chunk up, so `bytes` of files (at most
+    /// `MAX_NODES` of them) take up to one chunk each more.
+    pub fn reserve_chunks(&mut self, bytes: usize) {
+        let free = self.chunk_free_list.len();
+        let needed = (bytes.div_ceil(CHUNK_SIZE) + MAX_NODES).saturating_sub(free);
+        self.chunks.reserve_exact(needed);
+    }
+
     /// Allocate a new zeroed chunk. Reuses from free list or appends.
     /// Returns the chunk index in self.chunks.
     fn alloc_chunk(&mut self) -> usize {

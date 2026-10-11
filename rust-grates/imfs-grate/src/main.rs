@@ -364,6 +364,8 @@ fn preload_from_shm(config: &Config) -> Vec<String> {
         .unwrap_or_else(|e| fatal(&format!("preload: cannot copy the bundle ({})", e)));
     let archives =
         bundle_archives(&bundle).unwrap_or_else(|e| fatal(&format!("preload: bad bundle: {}", e)));
+    // The files take about as much room as the bundle: make it at once.
+    imfs::with_imfs(|state| state.reserve_chunks(total));
 
     let mut attested = Vec::new();
     if config.attest {
