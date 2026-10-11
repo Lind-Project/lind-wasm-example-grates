@@ -408,7 +408,11 @@ pub extern "C" fn read_handler(
     }
 
     // Copy file data straight into the cage's buffer.
-    let buf = imfs::CageBuf { addr: arg2, cage: arg2cage, len: count };
+    let buf = imfs::CageBuf {
+        addr: arg2,
+        cage: arg2cage,
+        len: count,
+    };
     imfs::with_imfs(|state| state.read_to_cage(cage_id, fd, buf))
 }
 
@@ -450,7 +454,11 @@ pub extern "C" fn write_handler(
     }
 
     // Copy the cage's data straight into the file.
-    let buf = imfs::CageBuf { addr: arg2, cage: arg2cage, len: count };
+    let buf = imfs::CageBuf {
+        addr: arg2,
+        cage: arg2cage,
+        len: count,
+    };
     imfs::with_imfs(|state| state.write_from_cage(cage_id, fd, buf))
 }
 
@@ -1396,7 +1404,11 @@ pub extern "C" fn pread_handler(
         return -14; // EFAULT
     }
 
-    let buf = imfs::CageBuf { addr: arg2, cage: arg2cage, len: count };
+    let buf = imfs::CageBuf {
+        addr: arg2,
+        cage: arg2cage,
+        len: count,
+    };
     imfs::with_imfs(|state| state.pread_to_cage(cage_id, fd, buf, offset))
 }
 
@@ -1436,7 +1448,11 @@ pub extern "C" fn pwrite_handler(
         }
     }
 
-    let buf = imfs::CageBuf { addr: arg2, cage: arg2cage, len: count };
+    let buf = imfs::CageBuf {
+        addr: arg2,
+        cage: arg2cage,
+        len: count,
+    };
     imfs::with_imfs(|state| state.pwrite_from_cage(cage_id, fd, buf, offset))
 }
 

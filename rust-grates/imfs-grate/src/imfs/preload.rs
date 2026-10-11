@@ -116,9 +116,11 @@ impl ImfsState {
             }
         };
 
-        // write_to_node allocates the chunk chain straight from the archive
-        // bytes; no fd or offset bookkeeping is involved.
-        let written = self.write_to_node(node_idx, 0, data);
+        // write_node fills the file's chunks straight from the archive bytes;
+        // no fd or offset bookkeeping is involved.
+        let written = self
+            .write_node(node_idx, 0, data.len(), super::copy_from_slice(data))
+            .map_err(|_| "write into IMFS failed")?;
         if written != data.len() {
             return Err("short write into IMFS");
         }
@@ -357,7 +359,7 @@ mod tests {
             .preload_archive(&ArchiveBuilder::new().finish())
             .unwrap();
         assert_eq!(stats, PreloadStats::default());
-        assert_eq!(state.nodes.len(), 3);
+        assert_eq!(state.nodes.len(), ImfsState::new().nodes.len());
     }
 
     #[test]
@@ -369,7 +371,7 @@ mod tests {
             state.preload_archive(&bad),
             Err(ArchiveError::DigestMismatch)
         );
-        assert_eq!(state.nodes.len(), 3);
+        assert_eq!(state.nodes.len(), ImfsState::new().nodes.len());
         assert_eq!(cat(&mut state, "/a"), Err(-2));
     }
 
@@ -391,7 +393,7 @@ mod tests {
             state.preload_archive_verified(&good, good.len(), Some(&other)),
             Err(ArchiveError::UnexpectedDigest)
         );
-        assert_eq!(state.nodes.len(), 3);
+        assert_eq!(state.nodes.len(), ImfsState::new().nodes.len());
 
         let stats = state
             .preload_archive_verified(&good, good.len(), Some(&digest))
