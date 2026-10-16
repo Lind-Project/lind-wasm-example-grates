@@ -7,7 +7,7 @@
 //! payload is hashed too and must match the digest in the archive header, so
 //! the statement describes exactly the bytes IMFS checked and staged.
 
-use preload_archive::attest::{PREDICATE_TYPE, STATEMENT_TYPE};
+use preload_archive::attest::{PREDICATE_TYPE, PRODUCTS_PREDICATE_TYPE, STATEMENT_TYPE};
 use preload_archive::{DIGEST_LEN, ENTRY_HEADER_LEN, HEADER_LEN, MAGIC, VERSION};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -156,6 +156,38 @@ pub fn statement(
     previous: Option<&str>,
     keyid: &str,
 ) -> Value {
+    archive_statement(PREDICATE_TYPE, summary, step, index, previous, keyid)
+}
+
+/// The statement over the archive of the files a run dumps, link `index` of
+/// its chain (the last), with the program's exit status if it is known.
+pub fn products_statement(
+    summary: &ArchiveSummary,
+    index: u64,
+    previous: Option<&str>,
+    keyid: &str,
+    exit_status: Option<i64>,
+) -> Value {
+    let mut st = archive_statement(
+        PRODUCTS_PREDICATE_TYPE,
+        summary,
+        "products",
+        index,
+        previous,
+        keyid,
+    );
+    st["predicate"]["exitStatus"] = json!(exit_status);
+    st
+}
+
+fn archive_statement(
+    predicate_type: &str,
+    summary: &ArchiveSummary,
+    step: &str,
+    index: u64,
+    previous: Option<&str>,
+    keyid: &str,
+) -> Value {
     let subjects: Vec<Value> = summary
         .subjects
         .iter()
@@ -177,7 +209,7 @@ pub fn statement(
     json!({
         "_type": STATEMENT_TYPE,
         "subject": subjects,
-        "predicateType": PREDICATE_TYPE,
+        "predicateType": predicate_type,
         "predicate": predicate,
     })
 }
@@ -246,5 +278,20 @@ mod tests {
         assert!(st["predicate"].get("previous").is_none());
         let st = statement(&summary, "sources", 2, Some("ff"), "abc");
         assert_eq!(st["predicate"]["previous"]["sha256"], "ff");
+    }
+
+    #[test]
+    fn products_statement_records_outputs_and_exit_status() {
+        let bytes = archive();
+        let summary = summarize(&mut &bytes[..]).unwrap();
+        let st = products_statement(&summary, 3, Some("ee"), "abc", Some(0));
+        assert_eq!(st["predicateType"], PRODUCTS_PREDICATE_TYPE);
+        assert_eq!(st["subject"].as_array().unwrap().len(), 3);
+        assert_eq!(st["predicate"]["step"], "products");
+        assert_eq!(st["predicate"]["index"], 3);
+        assert_eq!(st["predicate"]["previous"]["sha256"], "ee");
+        assert_eq!(st["predicate"]["exitStatus"], 0);
+        let st = products_statement(&summary, 3, Some("ee"), "abc", None);
+        assert!(st["predicate"]["exitStatus"].is_null());
     }
 }

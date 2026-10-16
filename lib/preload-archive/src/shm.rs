@@ -16,7 +16,9 @@
 //! exits.)
 //!
 //! [`phase`] is here too: the runtime-level mark of where a run's phases
-//! begin, such as the build after the preloads are staged.
+//! begin, such as the build after the preloads are staged. So is
+//! [`evidence`], by which the first cage of a run hands the runtime what it
+//! recorded and gets back what the runtime signs.
 
 use grate_rs::constants::lind::GRATE_MEMORY_FLAG;
 use grate_rs::getcageid;
@@ -34,6 +36,10 @@ pub const SYS_LIND_SHM_READ: u64 = 2002;
 pub const SYS_LIND_SHM_DUMP: u64 = 2003;
 /// `PHASE(n)`: the workload entered phase `n`. Returns 0.
 pub const SYS_LIND_PHASE: u64 = 2004;
+/// `EVIDENCE(request, len, out, capacity)`: hand the runtime `len` bytes at
+/// `request`; its answer is written to `out`. Returns the answer's length.
+/// Only the first cage of a run may call, once.
+pub const SYS_LIND_EVIDENCE: u64 = 2005;
 
 /// The phase that starts when IMFS runs the program, after staging.
 pub const PHASE_RUN: u64 = 1;
@@ -107,6 +113,34 @@ pub fn dump(bytes: &[u8]) -> Result<(), i32> {
         [true, false, false],
     );
     if ret < 0 { Err(ret) } else { Ok(()) }
+}
+
+/// Hand the runtime `request` and receive its answer in `out`; returns the
+/// answer's length, or a negative errno (-EPERM unless this is the first
+/// cage's first call, -ENOSYS if the runtime signs nothing, -ENOSPC if `out`
+/// is too small).
+pub fn evidence(request: &[u8], out: &mut [u8]) -> Result<usize, i32> {
+    let this_cage = getcageid();
+    let ret = raw_threei_syscall(
+        SYS_LIND_EVIDENCE,
+        [
+            request.as_ptr() as u64,
+            request.len() as u64,
+            out.as_mut_ptr() as u64,
+            out.len() as u64,
+            0,
+            0,
+        ],
+        [
+            this_cage | GRATE_MEMORY_FLAG,
+            this_cage,
+            this_cage | GRATE_MEMORY_FLAG,
+            this_cage,
+            this_cage,
+            this_cage,
+        ],
+    );
+    if ret < 0 { Err(ret) } else { Ok(ret as usize) }
 }
 
 /// Tell the runtime that the workload entered phase `n`, so that it can

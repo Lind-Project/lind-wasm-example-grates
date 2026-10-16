@@ -28,10 +28,10 @@
 //!     it), and its archives are verified and staged from that copy one at a
 //!     time. With `--attest`, IMFS stops after each archive and asks the
 //!     in-toto grate running it to sign a statement over the archive's files
-//!     (see `preload_archive::attest`); the DSSE envelopes and the signer's
-//!     public key are kept in /attest. The archives are named after
+//!     (see `preload_archive::attest`). The archives are named after
 //!     `--attest-steps` (default `pipeline,sources`: the compiler pipeline,
-//!     then the source files).
+//!     then the source files). The in-toto grate keeps the envelopes; IMFS
+//!     keeps nothing a build step could overwrite.
 //!   PRELOADS — colon-separated list of host files. Each entry is a path, or
 //!     `imfs_path=host_path` to load into a different IMFS path. This grate
 //!     reads them into an archive itself, then stages it the same way.
@@ -39,9 +39,12 @@
 //! Environment variables:
 //!   PRELOADS — see above.
 //!   DUMPS — semicolon-separated list of IMFS files to write back to the host
-//!     at teardown. With `--dump-shm` they (and the /attest files) are packed
-//!     into one archive and handed to the runtime's dump region in a single
-//!     call instead; `mkpreload unpack` writes them out on the host.
+//!     at teardown. With `--dump-shm` they are packed into one archive and
+//!     handed to the runtime's dump region in a single call instead;
+//!     `mkpreload unpack` writes them out on the host. With `--attest` too,
+//!     the in-toto grate first signs a products statement over that archive,
+//!     the last link of its chain, and IMFS dumps the evidence it gets back
+//!     (`preload_archive::attest::EVIDENCE_PATH`) along with the files.
 
 mod cageid;
 mod handlers;
@@ -52,7 +55,9 @@ use grate_rs::constants::lind::GRATE_MEMORY_FLAG;
 use grate_rs::constants::*;
 use cageid::getcageid;
 use grate_rs::{GrateBuilder, GrateError};
-use preload_archive::attest::{MAX_STEP_NAME, OP_ATTEST, OP_PUBLIC_KEY, SYS_INTOTO_ATTEST};
+use preload_archive::attest::{
+    EVIDENCE_PATH, MAX_STEP_NAME, OP_ATTEST, OP_EVIDENCE, OP_PRODUCTS, SYS_INTOTO_ATTEST,
+};
 use preload_archive::host::raw_threei_syscall;
 use preload_archive::{ArchiveBuilder, ArchiveDigest, bundle_archives, parse_digest_hex};
 use std::ffi::CString;
@@ -64,10 +69,10 @@ const PRELOAD_FILE_MODE: u32 = 0o777;
 /// built from it coexist in this cage's linear memory during staging.
 const PRELOAD_MAX_ARCHIVE_BYTES: usize = 48 << 20;
 const DUMP_WRITE_CHUNK_SIZE: usize = 1024;
-/// IMFS directory holding the attestations made during --preload-shm.
-const ATTEST_DIR: &str = "/attest";
-/// Room for one DSSE envelope (or the public key) from the in-toto grate.
+/// Room for one DSSE envelope from the in-toto grate.
 const ATTEST_OUT_CAPACITY: usize = 4 << 20;
+/// Room for the evidence from the in-toto grate.
+const EVIDENCE_OUT_CAPACITY: usize = 16 << 20;
 const DEFAULT_ATTEST_STEPS: &[&str] = &["pipeline", "sources"];
 
 struct Config {
@@ -198,9 +203,8 @@ fn main() {
     if let Some(path) = config.preload_file.as_deref() {
         preload_from_file(path, config.preload_digest.as_ref());
     }
-    let mut attested = Vec::new();
     if config.preload_shm {
-        attested = preload_from_shm(&config);
+        preload_from_shm(&config);
     }
     if let Ok(preloads) = std::env::var("PRELOADS") {
         preload_from_list(&preloads);
@@ -292,7 +296,8 @@ fn main() {
         })
         .teardown(move |result: Result<i32, GrateError>| {
             if config.dump_shm {
-                dump_to_shm(dump_files.as_deref().unwrap_or(""), &attested);
+                let exit_status = result.as_ref().ok().copied();
+                dump_to_shm(dump_files.as_deref().unwrap_or(""), config.attest, exit_status);
             } else if let Some(dumps) = dump_files.as_deref() {
                 dump_outputs(dumps);
             }
@@ -342,8 +347,7 @@ fn fatal(msg: &str) -> ! {
 /// in-toto grate signs a statement over its files (read from the same copy)
 /// before the next one is staged. A region, archive or attestation that fails
 /// stops the grate: nothing runs on a partly staged or unattested tree.
-/// Returns the IMFS paths of the attestation files written.
-fn preload_from_shm(config: &Config) -> Vec<String> {
+fn preload_from_shm(config: &Config) {
     let info = preload_archive::shm::info()
         .unwrap_or_else(|e| fatal(&format!("--preload-shm: no shared-memory region ({})", e)));
     if info.preload_len == 0 {
@@ -369,13 +373,6 @@ fn preload_from_shm(config: &Config) -> Vec<String> {
     // The files take about as much room as the bundle: make it at once.
     imfs::with_imfs(|state| state.reserve_chunks(total));
 
-    let mut attested = Vec::new();
-    if config.attest {
-        let key = request_attestation(OP_PUBLIC_KEY, &[], "")
-            .unwrap_or_else(|e| fatal(&format!("cannot get the signer's public key: {}", e)));
-        attested.push(stage_attest_file("signer.pub.json", &key));
-    }
-
     for (i, archive) in archives.into_iter().enumerate() {
         let index = i + 1;
         let step = config
@@ -400,13 +397,9 @@ fn preload_from_shm(config: &Config) -> Vec<String> {
             );
             let envelope = request_attestation(OP_ATTEST, archive, &step)
                 .unwrap_or_else(|e| fatal(&format!("attestation of {} failed: {}", step, e)));
-            attested.push(stage_attest_file(
-                &format!("{}-{}.intoto.json", index, step),
-                &envelope,
-            ));
+            log!("attest: {} attested ({} byte envelope)", step, envelope.len());
         }
     }
-    attested
 }
 
 /// Ask the in-toto grate running this grate for an attestation of `archive`
@@ -414,7 +407,20 @@ fn preload_from_shm(config: &Config) -> Vec<String> {
 /// which 3i routes to the in-toto grate's handler.
 fn request_attestation(op: u64, archive: &[u8], step: &str) -> Result<Vec<u8>, String> {
     let name = CString::new(step).map_err(|_| "step name contains NUL".to_string())?;
-    let mut out = vec![0u8; ATTEST_OUT_CAPACITY];
+    request_recorder(op, archive, name.as_ptr() as u64, true, ATTEST_OUT_CAPACITY)
+}
+
+/// Send the in-toto grate request `op` with `archive`, and `arg6` (a pointer
+/// into this cage if `arg6_ptr`); returns its answer, at most `capacity`
+/// bytes.
+fn request_recorder(
+    op: u64,
+    archive: &[u8],
+    arg6: u64,
+    arg6_ptr: bool,
+    capacity: usize,
+) -> Result<Vec<u8>, String> {
+    let mut out = vec![0u8; capacity];
     let this_cage = getcageid();
     let ret = raw_threei_syscall(
         SYS_INTOTO_ATTEST,
@@ -424,7 +430,7 @@ fn request_attestation(op: u64, archive: &[u8], step: &str) -> Result<Vec<u8>, S
             archive.len() as u64,
             out.as_mut_ptr() as u64,
             out.len() as u64,
-            name.as_ptr() as u64,
+            arg6,
         ],
         [
             this_cage,
@@ -432,7 +438,7 @@ fn request_attestation(op: u64, archive: &[u8], step: &str) -> Result<Vec<u8>, S
             this_cage,
             this_cage | GRATE_MEMORY_FLAG,
             this_cage,
-            this_cage | GRATE_MEMORY_FLAG,
+            if arg6_ptr { this_cage | GRATE_MEMORY_FLAG } else { this_cage },
         ],
     );
     if ret < 0 {
@@ -445,24 +451,19 @@ fn request_attestation(op: u64, archive: &[u8], step: &str) -> Result<Vec<u8>, S
     Ok(out)
 }
 
-/// Keep an attestation file in IMFS under /attest. Returns its IMFS path.
-fn stage_attest_file(name: &str, bytes: &[u8]) -> String {
-    let path = format!("{}/{}", ATTEST_DIR, name);
-    let mut builder = ArchiveBuilder::new();
-    builder.push(&path, 0o444, bytes);
-    stage_archive(&builder.finish());
-    log!("attest: wrote {} ({} bytes)", path, bytes.len());
-    path
-}
-
-/// Pack the DUMPS files and the attestation files into one archive and hand
-/// it to the runtime's dump region in a single call. Each DUMPS file is
-/// stored under its host path with mode 777 (what the per-file dump creates
-/// it with); the attestation files under `attest/`, read-only.
-fn dump_to_shm(dumps: &str, attested: &[String]) {
+/// Pack the DUMPS files into one archive and hand it to the runtime's dump
+/// region in a single call. Each DUMPS file is stored under its host path
+/// with mode 777 (what the per-file dump creates it with).
+///
+/// With `attest`, the in-toto grate first signs a products statement over
+/// the archive of those files (with the program's `exit_status`), the last
+/// link of its chain, and returns the run's evidence, which goes into the
+/// dump too, read-only, as `EVIDENCE_PATH`. The evidence comes from the
+/// in-toto grate's own state, never from files a build step could reach. If
+/// it cannot be had, nothing is dumped: outputs without their evidence are
+/// worth nothing to a verifier, and a partial dump would hide that.
+fn dump_to_shm(dumps: &str, attest: bool, exit_status: Option<i32>) {
     init_utility_cage();
-    let mut builder = ArchiveBuilder::new();
-    let mut files = 0;
     let entries = dumps
         .split(';')
         .map(|e| e.trim_start_matches([' ', '\t']))
@@ -472,22 +473,43 @@ fn dump_to_shm(dumps: &str, attested: &[String]) {
             None => Some((e, e)),
         })
         .filter(|(imfs_path, host_path)| !imfs_path.is_empty() && !host_path.is_empty());
-    let entries = entries.map(|(imfs_path, host_path)| (imfs_path, host_path, 0o777));
-    let attest_entries = attested
-        .iter()
-        .map(|p| (p.as_str(), p.trim_start_matches('/'), 0o444));
-
-    for (imfs_path, host_path, mode) in entries.chain(attest_entries) {
+    let mut outputs = Vec::new();
+    for (imfs_path, host_path) in entries {
         match read_imfs_file(imfs_path) {
-            Ok(data) => {
-                builder.push(host_path, mode, &data);
-                files += 1;
-            }
+            Ok(data) => outputs.push((host_path, data)),
             Err(e) => log!("failed to dump {}: {}", imfs_path, e),
         }
     }
+    let pack = |extra: Option<&[u8]>| {
+        let mut builder = ArchiveBuilder::new();
+        for (path, data) in &outputs {
+            builder.push(path, 0o777, data);
+        }
+        if let Some(evidence) = extra {
+            builder.push(EVIDENCE_PATH, 0o444, evidence);
+        }
+        builder.finish()
+    };
 
-    let archive = builder.finish();
+    let files = outputs.len();
+    let archive = if attest {
+        let products = pack(None);
+        let status = exit_status.map_or(u64::MAX, |s| s as i64 as u64);
+        if let Err(e) = request_recorder(OP_PRODUCTS, &products, status, false, ATTEST_OUT_CAPACITY) {
+            eprintln!("imfs-grate: the products statement failed: {}; nothing dumped", e);
+            return;
+        }
+        let evidence = match request_recorder(OP_EVIDENCE, &[], 0, false, EVIDENCE_OUT_CAPACITY) {
+            Ok(evidence) => evidence,
+            Err(e) => {
+                eprintln!("imfs-grate: no evidence from the in-toto grate: {}; nothing dumped", e);
+                return;
+            }
+        };
+        pack(Some(&evidence))
+    } else {
+        pack(None)
+    };
     match preload_archive::shm::dump(&archive) {
         Ok(()) => log!(
             "dumped {} files ({} bytes) to shared memory",
