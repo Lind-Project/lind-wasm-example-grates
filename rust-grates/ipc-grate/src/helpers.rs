@@ -1,6 +1,7 @@
 //! Shared helpers for the IPC grate.
 
-use grate_rs::{GrateError, getcageid, make_threei_call};
+use crate::cageid::getcageid;
+use grate_rs::{GrateError, make_threei_call};
 
 /// Forward a syscall to the next handler via make_threei_call.
 ///

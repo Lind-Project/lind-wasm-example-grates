@@ -8,6 +8,7 @@
 //! Usage:
 //!   ipc-grate <program> [args...]
 
+mod cageid;
 mod handlers;
 mod helpers;
 mod ipc;
@@ -15,7 +16,8 @@ mod pipe;
 mod socket;
 
 use grate_rs::constants::*;
-use grate_rs::{GrateBuilder, GrateError, getcageid};
+use cageid::getcageid;
+use grate_rs::{GrateBuilder, GrateError};
 
 use ipc::init;
 

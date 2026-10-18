@@ -7,7 +7,8 @@
 
 use grate_rs::constants::*;
 use grate_rs::ffi::{iovec, stat};
-use grate_rs::{GrateError, copy_data_between_cages, getcageid, is_thread_clone, make_threei_call};
+use crate::cageid::getcageid;
+use grate_rs::{GrateError, copy_data_between_cages, is_thread_clone, make_threei_call};
 
 use crate::imfs;
 

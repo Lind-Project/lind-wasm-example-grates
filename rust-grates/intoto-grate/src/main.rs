@@ -9,9 +9,27 @@
 //! the source files); this grate reads the archive straight out of IMFS's
 //! memory, hashes every file, signs an in-toto statement over them with a
 //! P-256 key it made at startup, and writes the DSSE envelope back into a
-//! buffer IMFS provided. The second statement records the SHA-256 of the
-//! first envelope, so the attestations of a run form a chain. IMFS also asks
-//! once for the public key, and keeps it with the envelopes in /attest.
+//! buffer IMFS provided. Each statement after the first records the SHA-256
+//! of the envelope before it, so the attestations of a run form a chain.
+//!
+//! When the program has exited, IMFS hands over the archive of the files it
+//! dumps, and the grate signs a products statement over them: the last link.
+//! IMFS then asks for the evidence. The grate closes the chain, hands its
+//! public key and the hash of the last link to the runtime (`LIND_EVIDENCE`;
+//! only the first cage of a run, this grate, may), which signs `run-end`
+//! naming both with the key its TEE attestation binds, and answers IMFS with
+//! the evidence, assembled from what the grate itself kept:
+//!
+//! ```json
+//! { "recorder": { "publicKey": <key> },
+//!   "chain": [ <envelope>, ... ],        // the exact bytes, as strings
+//!   "runtime": { "runId", "identityKey", "report", "runStart", "runEnd" } }
+//! ```
+//!
+//! (`runtime` is null if the runtime signs nothing.) A verifier checks the
+//! report binds the identity key, that key signed run-start and run-end,
+//! run-end names this grate's key and the hash of the last envelope, and each
+//! envelope is signed by this grate's key and names the one before.
 //!
 //! The key is drawn from `getrandom` when the grate starts; inside a TriSeal
 //! keep that is the enclave's own randomness, and the key never leaves the
@@ -27,12 +45,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use grate_rs::constants::lind::GRATE_MEMORY_FLAG;
 use grate_rs::{GrateBuilder, GrateError, copy_data_between_cages, getcageid};
 use preload_archive::attest::{
-    MAX_STEP_NAME, OP_ATTEST, OP_PUBLIC_KEY, PAYLOAD_TYPE, SYS_INTOTO_ATTEST,
+    MAX_STEP_NAME, OP_ATTEST, OP_EVIDENCE, OP_PRODUCTS, OP_PUBLIC_KEY, PAYLOAD_TYPE,
+    SYS_INTOTO_ATTEST,
 };
+use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
 use sign::{Signer, hex};
-use statement::{Source, statement, summarize};
+use statement::{Source, products_statement, statement, summarize};
 
 const EINVAL: i32 = 22;
 const ENOSPC: i32 = 28;
@@ -47,8 +67,54 @@ unsafe extern "C" {
 static SIGNER: Mutex<Option<Signer>> = Mutex::new(None);
 /// The IMFS cage: the only caller whose requests are served.
 static CHILD: AtomicU64 = AtomicU64::new(u64::MAX);
-/// Attestations made so far, and the SHA-256 of the last envelope.
-static CHAIN: Mutex<(u64, Option<String>)> = Mutex::new((0, None));
+/// The envelopes signed in this run, in order, as handed out; whether the
+/// products statement is among them; and the evidence, once the chain is
+/// closed. Nothing is added after the products statement.
+struct Chain {
+    envelopes: Vec<String>,
+    products: bool,
+    evidence: Option<String>,
+}
+
+impl Chain {
+    /// SHA-256 of the last envelope.
+    fn head(&self) -> Option<String> {
+        self.envelopes
+            .last()
+            .map(|e| hex(&Sha256::digest(e.as_bytes())))
+    }
+
+    /// Whether a link may still be added.
+    fn open(&self) -> bool {
+        !self.products && self.evidence.is_none()
+    }
+}
+
+static CHAIN: Mutex<Chain> = Mutex::new(Chain {
+    envelopes: Vec::new(),
+    products: false,
+    evidence: None,
+});
+
+/// Room for the runtime's answer to `LIND_EVIDENCE`.
+const RUNTIME_ANSWER_CAPACITY: usize = 1 << 20;
+
+/// What the grate hands the runtime: its key and the end of its chain.
+fn evidence_request(public_key: &Value, chain: &Chain) -> Value {
+    json!({
+        "recorder": { "publicKey": public_key },
+        "chain": { "head": { "sha256": chain.head() }, "links": chain.envelopes.len() },
+    })
+}
+
+/// The evidence of the run (see the crate documentation).
+fn evidence(public_key: &Value, chain: &Chain, runtime: Value) -> Value {
+    json!({
+        "recorder": { "publicKey": public_key },
+        "chain": chain.envelopes,
+        "runtime": runtime,
+    })
+}
 
 fn fill_random(buf: &mut [u8]) -> Result<(), String> {
     let mut done = 0;
@@ -202,14 +268,18 @@ pub extern "C" fn attest_handler(
             };
 
             let mut chain = CHAIN.lock().unwrap();
-            let index = chain.0 + 1;
-            let st = statement(&summary, &step, index, chain.1.as_deref(), signer.keyid());
+            if !chain.open() {
+                return -EPERM;
+            }
+            let index = chain.envelopes.len() as u64 + 1;
+            let head = chain.head();
+            let st = statement(&summary, &step, index, head.as_deref(), signer.keyid());
             let envelope = signer.envelope(PAYLOAD_TYPE, st.to_string().as_bytes());
             let envelope = envelope.to_string();
 
             let ret = write_back(caller, out_addr, out_capacity, envelope.as_bytes());
             if ret > 0 {
-                *chain = (index, Some(hex(&Sha256::digest(envelope.as_bytes()))));
+                chain.envelopes.push(envelope);
                 eprintln!(
                     "[intoto-grate] attested {} ({}): {} files, sha256 {}",
                     index,
@@ -219,6 +289,85 @@ pub extern "C" fn attest_handler(
                 );
             }
             ret
+        }
+        OP_PRODUCTS => {
+            // `step_addr` carries the program's exit status here.
+            let archive_cage = archive_cage & !GRATE_MEMORY_FLAG;
+            if archive_cage != caller {
+                return -EPERM;
+            }
+            let exit_status = (step_addr != u64::MAX).then_some(step_addr as i64);
+            let mut memory = CageMemory {
+                cage: caller,
+                addr: archive_addr,
+                len: archive_len,
+            };
+            let summary = match summarize(&mut memory) {
+                Ok(summary) => summary,
+                Err(e) => {
+                    eprintln!("[intoto-grate] products: {}", e);
+                    return -EINVAL;
+                }
+            };
+
+            let mut chain = CHAIN.lock().unwrap();
+            if !chain.open() {
+                return -EPERM;
+            }
+            let index = chain.envelopes.len() as u64 + 1;
+            let head = chain.head();
+            let st = products_statement(&summary, index, head.as_deref(), signer.keyid(), exit_status);
+            let envelope = signer.envelope(PAYLOAD_TYPE, st.to_string().as_bytes());
+            let envelope = envelope.to_string();
+
+            let ret = write_back(caller, out_addr, out_capacity, envelope.as_bytes());
+            if ret > 0 {
+                chain.envelopes.push(envelope);
+                chain.products = true;
+                eprintln!(
+                    "[intoto-grate] attested {} (products): {} files, sha256 {}",
+                    index,
+                    summary.subjects.len(),
+                    summary.payload_sha256
+                );
+            }
+            ret
+        }
+        OP_EVIDENCE => {
+            let mut chain = CHAIN.lock().unwrap();
+            if chain.evidence.is_none() {
+                if chain.envelopes.is_empty() {
+                    return -EINVAL;
+                }
+                // Close the chain and have the runtime sign run-end over it.
+                let public_key = signer.public_key_json();
+                let request = evidence_request(&public_key, &chain).to_string();
+                let mut answer = vec![0u8; RUNTIME_ANSWER_CAPACITY];
+                let runtime = match preload_archive::shm::evidence(request.as_bytes(), &mut answer)
+                {
+                    Ok(n) => match serde_json::from_slice::<Value>(&answer[..n]) {
+                        Ok(runtime) => runtime,
+                        Err(e) => {
+                            eprintln!("[intoto-grate] the runtime's answer is not JSON: {}", e);
+                            Value::Null
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("[intoto-grate] the runtime signed no run-end (error {})", e);
+                        Value::Null
+                    }
+                };
+                eprintln!(
+                    "[intoto-grate] evidence: {} links, head {}, run-end {}",
+                    chain.envelopes.len(),
+                    chain.head().unwrap_or_default(),
+                    if runtime.is_null() { "missing" } else { "signed by the runtime" }
+                );
+                chain.evidence = Some(evidence(&public_key, &chain, runtime).to_string());
+            }
+            // Asking again returns the same evidence (say, with a larger buffer).
+            let evidence = chain.evidence.as_deref().unwrap_or_default();
+            write_back(caller, out_addr, out_capacity, evidence.as_bytes())
         }
         _ => -EINVAL,
     }
@@ -249,4 +398,50 @@ fn main() {
             }
         })
         .run(argv);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chain(envelopes: &[&str]) -> Chain {
+        Chain {
+            envelopes: envelopes.iter().map(|e| e.to_string()).collect(),
+            products: false,
+            evidence: None,
+        }
+    }
+
+    #[test]
+    fn request_names_the_key_and_the_last_link() {
+        let key = json!({ "keyid": "k" });
+        let c = chain(&["first", "second"]);
+        let r = evidence_request(&key, &c);
+        assert_eq!(r["recorder"]["publicKey"], key);
+        assert_eq!(r["chain"]["links"], 2);
+        assert_eq!(r["chain"]["head"]["sha256"], hex(&Sha256::digest(b"second")));
+    }
+
+    #[test]
+    fn evidence_keeps_the_exact_envelopes() {
+        let key = json!({ "keyid": "k" });
+        let c = chain(&["{\"a\": 1}", "{\"b\":2}"]);
+        let e = evidence(&key, &c, json!({ "runEnd": "x" }));
+        let back: Value = serde_json::from_str(&e.to_string()).unwrap();
+        assert_eq!(back["chain"][0], "{\"a\": 1}");
+        assert_eq!(back["chain"][1], "{\"b\":2}");
+        assert_eq!(back["runtime"]["runEnd"], "x");
+        assert_eq!(back["recorder"]["publicKey"], key);
+    }
+
+    #[test]
+    fn chain_closes_after_products_or_evidence() {
+        let mut c = chain(&["one"]);
+        assert!(c.open());
+        c.products = true;
+        assert!(!c.open());
+        let mut c = chain(&["one"]);
+        c.evidence = Some(String::new());
+        assert!(!c.open());
+    }
 }
