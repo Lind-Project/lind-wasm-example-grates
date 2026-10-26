@@ -54,6 +54,13 @@ pub struct NodeTime {
 /// and the runtime's exec module cache (keyed on mtime/ctime) rely on.
 static CLOCK: AtomicU64 = AtomicU64::new(0);
 
+/// Start the clock at `secs` seconds instead of zero, so that node times sit at
+/// a declared epoch. Tools such as binutils treat a zero time as unknown and
+/// fall back to the current time. Call before staging any file.
+pub fn set_epoch(secs: u64) {
+    CLOCK.store(secs.saturating_mul(1_000_000_000), Ordering::Relaxed);
+}
+
 impl NodeTime {
     pub fn now() -> Self {
         let tick = CLOCK.fetch_add(1, Ordering::Relaxed) + 1;
