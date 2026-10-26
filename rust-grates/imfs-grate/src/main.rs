@@ -198,6 +198,14 @@ fn main() {
     // Initialize the in-memory filesystem.
     imfs::init();
 
+    // Node times start at the declared epoch, the one logical-clock-grate uses.
+    if let Some(secs) = std::env::var("LOGICAL_CLOCK_EPOCH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        imfs::node::set_epoch(secs);
+    }
+
     // Stage files into IMFS before cage execution: first a prebuilt archive,
     // then anything listed in PRELOADS on top.
     if let Some(path) = config.preload_file.as_deref() {
