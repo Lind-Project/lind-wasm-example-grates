@@ -294,3 +294,9 @@ cd tools/mkpreload && MKPRELOAD_REGEN_FIXTURE=1 cargo test fixture
   to the IMFS chunks that are created from it) until staging finishes, so peak
   memory during preload is roughly twice the total preload size.
 - `pipe` and `pipe2` are currently registered as unsupported.
+- All file data lives in one chunk arena, a single allocation. On wasm32 an
+  allocation must stay under 2 GiB, so IMFS can hold at most about 2 GiB of
+  files, inputs and outputs together. When the arena outgrows its reservation
+  it doubles, so a run can fail well before that. Set `IMFS_RESERVE_MB` to
+  reserve the whole run's data once at startup, for example `1960` for a
+  build that stages 1.2 GB and writes 0.7 GB; it must stay below `2048`.
