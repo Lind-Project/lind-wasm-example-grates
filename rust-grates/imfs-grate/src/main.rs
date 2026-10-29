@@ -198,6 +198,15 @@ fn main() {
     // Initialize the in-memory filesystem.
     imfs::init();
 
+    // Reserve the chunk arena for the whole run up front: growing it later
+    // doubles it, and on wasm32 one allocation cannot reach 2 GiB.
+    if let Some(mb) = std::env::var("IMFS_RESERVE_MB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        imfs::with_imfs(|state| state.reserve_chunks(mb << 20));
+    }
+
     // Stage files into IMFS before cage execution: first a prebuilt archive,
     // then anything listed in PRELOADS on top.
     if let Some(path) = config.preload_file.as_deref() {
