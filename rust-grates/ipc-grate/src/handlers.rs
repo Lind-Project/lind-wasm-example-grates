@@ -20,11 +20,11 @@ use crate::socket;
 const FDKIND_KERNEL: u32 = 0;
 
 /// EBADF, EMFILE in negative-errno form.
-const EBADF_NEG: i32 = -9;
-const EMFILE_NEG: i32 = -24;
-const ENOTSOCK_NEG: i32 = -88;
-const ENOTCONN_NEG: i32 = -107;
-const ENOPROTOOPT_NEG: i32 = -92;
+const EBADF_NEG: i64 = -9;
+const EMFILE_NEG: i64 = -24;
+const ENOTSOCK_NEG: i64 = -88;
+const ENOTCONN_NEG: i64 = -107;
+const ENOPROTOOPT_NEG: i64 = -92;
 
 /// AT_FDCWD is the special "current working directory" sentinel for the
 /// *at family of syscalls; it must NOT be translated.
@@ -107,7 +107,7 @@ fn translate_dirfd(cage: u64, fd: u64) -> Option<u64> {
 /// Forward a syscall whose first argument is an fd, translating that fd
 /// to its runtime underfd before forwarding.  Returns -EBADF if the fd
 /// isn't tracked in our grate fdtable.
-fn forward_with_fd1(syscall: u64, cage: u64, args: [u64; 6], arg_cages: [u64; 6]) -> i32 {
+fn forward_with_fd1(syscall: u64, cage: u64, args: [u64; 6], arg_cages: [u64; 6]) -> i64 {
     let under = match translate_to_underfd(cage, args[0]) {
         Some(u) => u,
         None => return EBADF_NEG,
@@ -118,7 +118,7 @@ fn forward_with_fd1(syscall: u64, cage: u64, args: [u64; 6], arg_cages: [u64; 6]
 }
 
 /// Forward a syscall whose first argument is a dirfd (may be AT_FDCWD).
-fn forward_with_dirfd1(syscall: u64, cage: u64, args: [u64; 6], arg_cages: [u64; 6]) -> i32 {
+fn forward_with_dirfd1(syscall: u64, cage: u64, args: [u64; 6], arg_cages: [u64; 6]) -> i64 {
     let under = match translate_dirfd(cage, args[0]) {
         Some(u) => u,
         None => return EBADF_NEG,
@@ -136,7 +136,7 @@ fn forward_with_dirfd_at(
     args: [u64; 6],
     arg_cages: [u64; 6],
     idx: usize,
-) -> i32 {
+) -> i64 {
     let under = match translate_dirfd(cage, args[idx]) {
         Some(u) => u,
         None => return EBADF_NEG,
@@ -154,7 +154,7 @@ fn forward_with_two_dirfds(
     arg_cages: [u64; 6],
     first_idx: usize,
     second_idx: usize,
-) -> i32 {
+) -> i64 {
     let first = match translate_dirfd(cage, args[first_idx]) {
         Some(u) => u,
         None => return EBADF_NEG,
@@ -172,12 +172,12 @@ fn forward_with_two_dirfds(
 /// Register a runtime-allocated virt fd in the grate's fdtable as a
 /// FDKIND_KERNEL entry, returning a fresh grate virt fd that maps to it.
 /// On allocation failure, close the runtime fd and return -EMFILE.
-fn register_kernel_fd(cage: u64, runtime_vfd: i32, cloexec: bool, perfdinfo: u64) -> i32 {
+fn register_kernel_fd(cage: u64, runtime_vfd: i64, cloexec: bool, perfdinfo: u64) -> i64 {
     ensure_cage_fdtable(cage);
     match fdtables::get_unused_virtual_fd(
         cage, FDKIND_KERNEL, runtime_vfd as u64, cloexec, perfdinfo,
     ) {
-        Ok(grate_vfd) => grate_vfd as i32,
+        Ok(grate_vfd) => grate_vfd as i64,
         Err(_) => {
             forward_syscall(
                 SYS_CLOSE, cage,
@@ -279,7 +279,7 @@ pub extern "C" fn exit_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
 
     fdtables::remove_cage_from_fdtable(cage_id);
@@ -303,7 +303,7 @@ pub extern "C" fn exit_group_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
 
     fdtables::remove_cage_from_fdtable(cage_id);
@@ -341,7 +341,7 @@ pub extern "C" fn pipe_handler(
     _arg4: u64, _arg4cage: u64,
     _arg5: u64, _arg5cage: u64,
     _arg6: u64, _arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let this_cage = getcageid();
 
@@ -349,7 +349,7 @@ pub extern "C" fn pipe_handler(
 
     let (rfd, wfd) = match with_ipc(|s| s.create_pipe(cage_id, 0)) {
         Ok(fds) => fds,
-        Err(e) => return e,
+        Err(e) => return e as i64,
     };
 
     // Write the two fds back to the cage's pipefd[2] array.
@@ -373,7 +373,7 @@ pub extern "C" fn pipe2_handler(
     _arg4: u64, _arg4cage: u64,
     _arg5: u64, _arg5cage: u64,
     _arg6: u64, _arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let this_cage = getcageid();
     let flags = arg2 as i32;
@@ -382,7 +382,7 @@ pub extern "C" fn pipe2_handler(
 
     let (rfd, wfd) = match with_ipc(|s| s.create_pipe(cage_id, flags)) {
         Ok(fds) => fds,
-        Err(e) => return e,
+        Err(e) => return e as i64,
     };
 
     let fds: [i32; 2] = [rfd, wfd];
@@ -408,7 +408,7 @@ pub extern "C" fn read_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let count = arg3 as usize;
@@ -463,7 +463,7 @@ pub extern "C" fn write_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let count = arg3 as usize;
@@ -606,8 +606,8 @@ fn reclassify_ipc_pollfds(
     original_fds: &[i32],
     ipc_indices: &[usize],
     ipc_revents: &mut [i16],
-) -> i32 {
-    let mut ready = 0i32;
+) -> i64 {
+    let mut ready = 0i64;
     for &i in ipc_indices {
         let fd = original_fds[i] as u64;
         let events = pollfds[i].events;
@@ -625,7 +625,7 @@ fn reclassify_ipc_pollfds(
 }
 
 /// EINTR in negative-errno form.
-const EINTR_NEG: i32 = -4;
+const EINTR_NEG: i64 = -4;
 
 /// Sleep ~1ms in a way that's interruptible by signals queued for the
 /// calling user cage.  Returns `true` if the sleep was interrupted by
@@ -680,7 +680,7 @@ fn ipc_only_poll_wait(
     ipc_indices: &[usize],
     ipc_revents: &mut [i16],
     timeout_ms: i32,
-) -> i32 {
+) -> i64 {
     let start = std::time::Instant::now();
     loop {
         let ready = reclassify_ipc_pollfds(
@@ -710,7 +710,7 @@ pub extern "C" fn poll_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let nfds = arg2 as usize;
     let this_cage = getcageid();
@@ -739,7 +739,7 @@ pub extern "C" fn poll_handler(
     let mut original_fds: Vec<i32> = pollfds.iter().map(|p| p.fd).collect();
     let mut ipc_revents: Vec<i16> = vec![0; nfds];
     let mut ipc_indices: Vec<usize> = Vec::new();
-    let mut total_ready: i32 = 0;
+    let mut total_ready: i64 = 0;
 
     for (i, pfd) in pollfds.iter_mut().enumerate() {
         if pfd.fd < 0 {
@@ -859,7 +859,7 @@ pub extern "C" fn select_handler(
     arg4: u64, _arg4cage: u64,   // exceptfds
     arg5: u64, arg5cage: u64,    // timeout
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let nfds = arg1 as usize;
     let this_cage = getcageid();
@@ -915,7 +915,7 @@ pub extern "C" fn select_handler(
     let mut ipc_read:   [u32; FD_SET_WORDS] = [0; FD_SET_WORDS];
     let mut ipc_write:  [u32; FD_SET_WORDS] = [0; FD_SET_WORDS];
     let mut ipc_except: [u32; FD_SET_WORDS] = [0; FD_SET_WORDS];
-    let mut ipc_ready: i32 = 0;
+    let mut ipc_ready: i64 = 0;
 
     // Reverse map: runtime_vfd → Option<grate_vfd>.  Sized to FD_SETSIZE
     // since runtime vfds are also bounded by the same limit.
@@ -1155,7 +1155,7 @@ pub extern "C" fn close_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
@@ -1204,7 +1204,7 @@ pub extern "C" fn open_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let flags = arg2 as i32;
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
@@ -1227,7 +1227,7 @@ pub extern "C" fn openat_handler(
     arg4: u64, arg4cage: u64,    // mode
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let flags = arg3 as i32;
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
@@ -1258,7 +1258,7 @@ pub extern "C" fn dup_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
@@ -1287,7 +1287,7 @@ pub extern "C" fn dup_handler(
     let new_fd = match fdtables::get_unused_virtual_fd(
         cage_id, fdkind, pipe_id, false, flags as u64,
     ) {
-        Ok(fd) => fd as i32,
+        Ok(fd) => fd as i64,
         Err(_) => return -24, // EMFILE
     };
 
@@ -1330,7 +1330,7 @@ pub extern "C" fn dup2_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let oldfd = arg1;
     let newfd = arg2;
@@ -1338,7 +1338,7 @@ pub extern "C" fn dup2_handler(
     let arg_cages = [arg1cage, _arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
     if oldfd == newfd {
-        return newfd as i32;
+        return newfd as i64;
     }
 
     // Helper closure: if newfd currently maps to a runtime fd, close that
@@ -1380,7 +1380,7 @@ pub extern "C" fn dup2_handler(
         let _ = fdtables::get_specific_virtual_fd(
             cage_id, newfd, FDKIND_KERNEL, new_runtime_vfd as u64, false, 0,
         );
-        return newfd as i32;
+        return newfd as i64;
     }
 
     let (pipe_id, fdkind, flags) = info.unwrap();
@@ -1413,7 +1413,7 @@ pub extern "C" fn dup2_handler(
         _ => {}
     }
 
-    newfd as i32
+    newfd as i64
 }
 
 /// dup3 (syscall 292): dup2 with flags.
@@ -1425,7 +1425,7 @@ pub extern "C" fn dup3_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     // dup3 is dup2 + flags. Delegate to dup2 logic.
     dup2_handler(
         cageid, arg1, arg1cage, arg2, arg2cage,
@@ -1443,7 +1443,7 @@ pub extern "C" fn fcntl_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let op = arg2 as i32;
@@ -1463,7 +1463,7 @@ pub extern "C" fn fcntl_handler(
             let new_fd = match fdtables::get_unused_virtual_fd_from_startfd(
                 cage_id, fdkind, pipe_id, cloexec, flags as u64, min_fd,
             ) {
-                Ok(fd) => fd as i32,
+                Ok(fd) => fd as i64,
                 Err(_) => return -24,
             };
             // Bump refs for the duplicated entry so the IPC pipe/socket
@@ -1505,7 +1505,7 @@ pub extern "C" fn fcntl_handler(
         return match fdtables::get_unused_virtual_fd_from_startfd(
             cage_id, FDKIND_KERNEL, new_runtime_vfd as u64, cloexec, 0, min_fd,
         ) {
-            Ok(grate_vfd) => grate_vfd as i32,
+            Ok(grate_vfd) => grate_vfd as i64,
             Err(_) => {
                 forward_syscall(
                     SYS_CLOSE, cage_id,
@@ -1525,7 +1525,7 @@ pub extern "C" fn fcntl_handler(
     let (_pipe_id, _fdkind, flags) = info.unwrap();
 
     match op {
-        F_GETFL => flags,
+        F_GETFL => flags as i64,
         F_SETFL => {
             // F_SETFL changes only the file status flags (O_APPEND,
             // O_NONBLOCK, O_ASYNC, O_DIRECT, O_NOATIME).  The access
@@ -1569,7 +1569,7 @@ pub extern "C" fn fork_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
@@ -1728,7 +1728,7 @@ pub extern "C" fn fork_handler(
     }
 
 
-    child_cage_id as i32
+    child_cage_id as i64
 }
 
 /// exec (syscall 59): close cloexec fds, then forward.
@@ -1740,7 +1740,7 @@ pub extern "C" fn exec_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
 
     if !wait_for_cage_fdtable(cage_id) {
@@ -1794,7 +1794,7 @@ pub extern "C" fn socket_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let domain = arg1 as i32;
     let socktype = arg2 as i32;
@@ -1825,7 +1825,7 @@ pub extern "C" fn socket_handler(
         return match fdtables::get_unused_virtual_fd(
             cage_id, socket::IPC_SOCKET, socket_id, cloexec, perfdinfo,
         ) {
-            Ok(fd) => fd as i32,
+            Ok(fd) => fd as i64,
             Err(_) => {
                 with_ipc(|s| s.sockets.remove(socket_id));
                 EMFILE_NEG
@@ -1864,7 +1864,7 @@ pub extern "C" fn socketpair_handler(
     arg4: u64, arg4cage: u64,    // sv[2] pointer
     _arg5: u64, _arg5cage: u64,
     _arg6: u64, _arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let domain = arg1 as i32;
     let socktype = arg2 as i32;
@@ -1929,7 +1929,7 @@ pub extern "C" fn bind_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let this_cage = getcageid();
@@ -2066,7 +2066,7 @@ pub extern "C" fn listen_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
@@ -2106,7 +2106,7 @@ pub extern "C" fn connect_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let this_cage = getcageid();
@@ -2235,15 +2235,15 @@ pub extern "C" fn accept_handler(
     cageid: u64,
     arg1: u64, arg1cage: u64,    // fd (listening socket)
     arg2: u64, arg2cage: u64,    // addr (output, can be NULL)
-    arg3: u64, _arg3cage: u64,   // addrlen (output, can be NULL)
+    arg3: u64, arg3cage: u64,    // addrlen (output, can be NULL)
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
-    let arg_cages = [arg1cage, arg2cage, _arg3cage, arg4cage, arg5cage, arg6cage];
+    let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
     let info = lookup_ipc_fd(cage_id, fd);
     if info.is_none() {
@@ -2271,7 +2271,7 @@ pub extern "C" fn accept_handler(
     // SOCK_CLOEXEC does (handled by accept4_handler).
     accept_ipc_inner(
         cage_id, socket_id, flags, /*cloexec=*/false, /*extra_perfdinfo=*/0,
-        arg2, arg3,
+        arg2, arg2cage, arg3, arg3cage,
     )
 }
 
@@ -2279,7 +2279,7 @@ pub extern "C" fn accept_handler(
 /// cloexec / SOCK_NONBLOCK from its flags arg without duplicating the
 /// pending-connection wait loop.
 ///
-/// `addr_arg` and `addrlen_arg` are host pointers to the caller's
+/// `addr_arg` and `addrlen_arg` are pointers in the caller's cage to its
 /// `accept(fd, &addr, &addrlen)` out-params.  They may both be NULL, in
 /// which case we skip the peer-address writeback.  When set, we
 /// synthesise a sockaddr from the new socket's domain + remote_addr (set
@@ -2293,8 +2293,10 @@ fn accept_ipc_inner(
     cloexec: bool,
     extra_perfdinfo: u64,
     addr_arg: u64,
+    addr_cage: u64,
     addrlen_arg: u64,
-) -> i32 {
+    addrlen_cage: u64,
+) -> i64 {
     let nonblocking = (listen_flags & O_NONBLOCK) != 0;
 
     // Get the listening address.
@@ -2341,7 +2343,7 @@ fn accept_ipc_inner(
             let new_fd = match fdtables::get_unused_virtual_fd(
                 cage_id, socket::IPC_SOCKET, new_socket_id, cloexec, extra_perfdinfo,
             ) {
-                Ok(new_fd) => new_fd as i32,
+                Ok(new_fd) => new_fd as i64,
                 Err(_) => {
                     with_ipc(|s| s.sockets.remove(new_socket_id));
                     return -24; // EMFILE
@@ -2386,7 +2388,7 @@ pub extern "C" fn shutdown_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let how = arg2 as i32;
@@ -2457,7 +2459,7 @@ macro_rules! translate_fd1_handler {
             arg4: u64, arg4cage: u64,
             arg5: u64, arg5cage: u64,
             arg6: u64, arg6cage: u64,
-        ) -> i32 {
+        ) -> i64 {
             let cage_id = arg1cage;
             let args = [arg1, arg2, arg3, arg4, arg5, arg6];
             let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
@@ -2481,7 +2483,7 @@ const EPOLLHUP: u32 = 0x010;
 /// We use a distinct fdkind (instead of FDKIND_KERNEL) so that close on
 /// this fd fires `ipc_epoll_close_handler`, which cleans up our per-epfd
 /// IPC target map.
-fn register_ipc_epoll_fd(cage: u64, runtime_vfd: i32, cloexec: bool) -> i32 {
+fn register_ipc_epoll_fd(cage: u64, runtime_vfd: i64, cloexec: bool) -> i64 {
     ensure_cage_fdtable(cage);
     match fdtables::get_unused_virtual_fd(cage, IPC_EPOLL, runtime_vfd as u64, cloexec, 0) {
         Ok(grate_vfd) => {
@@ -2489,7 +2491,7 @@ fn register_ipc_epoll_fd(cage: u64, runtime_vfd: i32, cloexec: bool) -> i32 {
             with_ipc(|s| {
                 s.epoll_targets.insert((cage, grate_vfd), HashMap::new());
             });
-            grate_vfd as i32
+            grate_vfd as i64
         }
         Err(_) => {
             forward_syscall(
@@ -2540,7 +2542,7 @@ pub extern "C" fn epoll_create_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
@@ -2557,7 +2559,7 @@ pub extern "C" fn epoll_create1_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
@@ -2577,7 +2579,7 @@ pub extern "C" fn epoll_ctl_handler(
     arg4: u64, arg4cage: u64,    // event*
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let grate_epfd = arg1;
     let op = arg2 as i32;
@@ -2665,7 +2667,7 @@ pub extern "C" fn epoll_wait_handler(
     arg4: u64, arg4cage: u64,    // timeout (ms)
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let grate_epfd = arg1;
     let maxevents = arg3 as i32;
@@ -2738,7 +2740,7 @@ pub extern "C" fn epoll_wait_handler(
     let kernel_timeout = if ipc_count > 0 { 0i32 } else { user_timeout };
     let kernel_max = maxevents - ipc_count;
 
-    let mut kernel_count = 0i32;
+    let mut kernel_count = 0i64;
     if kernel_max > 0 {
         // Forward to the runtime with a grate-local slice tagged
         // `this_cage | ARG_TRANSLATE_FLAG` for the remaining slots.  The
@@ -2782,7 +2784,7 @@ pub extern "C" fn epoll_wait_handler(
             bytes, 0,
         );
     }
-    total as i32
+    total as i64
 }
 
 /// ppoll (syscall 271): same shape as poll but with a timespec timeout
@@ -2795,7 +2797,7 @@ pub extern "C" fn ppoll_handler(
     arg4: u64, arg4cage: u64,    // sigmask
     arg5: u64, arg5cage: u64,    // sigsetsize
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let nfds = arg2 as usize;
     let this_cage = getcageid();
@@ -2816,7 +2818,7 @@ pub extern "C" fn ppoll_handler(
     let original_fds: Vec<i32> = pollfds.iter().map(|p| p.fd).collect();
     let mut ipc_revents: Vec<i16> = vec![0; nfds];
     let mut ipc_indices: Vec<usize> = Vec::new();
-    let mut total_ready: i32 = 0;
+    let mut total_ready: i64 = 0;
     let mut has_kernel_fd = false;
 
     for (i, pfd) in pollfds.iter_mut().enumerate() {
@@ -2932,7 +2934,7 @@ pub extern "C" fn sendto_handler(
     arg4: u64, arg4cage: u64,    // flags
     arg5: u64, arg5cage: u64,    // dest_addr (ignored for IPC)
     arg6: u64, arg6cage: u64,    // addrlen
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let count = arg3 as usize;
@@ -2980,7 +2982,7 @@ pub extern "C" fn recvfrom_handler(
     arg4: u64, arg4cage: u64,    // flags
     arg5: u64, arg5cage: u64,    // src_addr (out)
     arg6: u64, arg6cage: u64,    // addrlen (in/out)
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let count = arg3 as usize;
@@ -3033,7 +3035,7 @@ pub extern "C" fn sendmsg_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let this_cage = getcageid();
@@ -3118,7 +3120,7 @@ pub extern "C" fn recvmsg_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let this_cage = getcageid();
@@ -3215,7 +3217,7 @@ pub extern "C" fn setsockopt_handler(
     arg4: u64, arg4cage: u64,    // optval
     arg5: u64, arg5cage: u64,    // optlen
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
@@ -3257,7 +3259,7 @@ pub extern "C" fn getsockopt_handler(
     arg4: u64, arg4cage: u64,    // optval (out)
     arg5: u64, arg5cage: u64,    // optlen (in/out)
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
@@ -3372,7 +3374,7 @@ fn ipc_writeback_sockaddr(
     sock_buf: &[u8], sock_len: u32,
     addr_arg: u64,
     addrlen_arg: u64,
-) -> i32 {
+) -> i64 {
     if addr_arg == 0 || addrlen_arg == 0 {
         return -22; // EINVAL
     }
@@ -3397,7 +3399,7 @@ pub extern "C" fn getsockname_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
@@ -3434,7 +3436,7 @@ pub extern "C" fn getpeername_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
@@ -3538,7 +3540,7 @@ pub extern "C" fn writev_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let iovcnt = arg3 as usize;
@@ -3566,7 +3568,7 @@ pub extern "C" fn writev_handler(
 
     let gathered = match gather_iov_into_buf(arg2, iovcnt, arg2cage, this_cage) {
         Ok(g) => g,
-        Err(e) => return e,
+        Err(e) => return e as i64,
     };
     if gathered.is_empty() { return 0; }
     let nonblocking = (flags & O_NONBLOCK) != 0;
@@ -3583,7 +3585,7 @@ pub extern "C" fn readv_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let iovcnt = arg3 as usize;
@@ -3634,7 +3636,7 @@ pub extern "C" fn readv_handler(
 
     match scatter_buf_into_iov(&buf[..ret as usize], arg2, iovcnt, arg2cage, this_cage) {
         Ok(_) => ret,
-        Err(e) => e,
+        Err(e) => e as i64,
     }
 }
 
@@ -3650,7 +3652,7 @@ pub extern "C" fn ioctl_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     const FIONREAD: u64 = 0x541B;
     const FIONBIO:  u64 = 0x5421;
 
@@ -3721,7 +3723,7 @@ pub extern "C" fn fstat_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     // lind-wasm WASM32 / host `StatData` layout: st_dev (u64) at 0,
     // st_ino (4 bytes on wasm32 / 8 on host but written by RawPOSIX
     // with 4-byte effective stride) + 4 bytes padding put st_mode
@@ -3769,7 +3771,7 @@ macro_rules! ipc_espipe_handler {
             arg4: u64, arg4cage: u64,
             arg5: u64, arg5cage: u64,
             arg6: u64, arg6cage: u64,
-        ) -> i32 {
+        ) -> i64 {
             let cage_id = arg1cage;
             if lookup_ipc_fd(cage_id, arg1).is_some() {
                 return -29; // ESPIPE
@@ -3799,7 +3801,7 @@ pub extern "C" fn accept4_handler(
     arg4: u64, arg4cage: u64,    // flags
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
@@ -3845,7 +3847,7 @@ pub extern "C" fn mmap_handler(
     arg4: u64, arg4cage: u64,    // flags
     arg5: u64, arg5cage: u64,    // fd
     arg6: u64, arg6cage: u64,    // offset
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
@@ -3874,7 +3876,7 @@ macro_rules! dirfd_forward_handler {
             arg4: u64, arg4cage: u64,
             arg5: u64, arg5cage: u64,
             arg6: u64, arg6cage: u64,
-        ) -> i32 {
+        ) -> i64 {
             let cage_id = arg1cage;
             let args = [arg1, arg2, arg3, arg4, arg5, arg6];
             let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
@@ -3893,7 +3895,7 @@ macro_rules! two_dirfd_forward_handler {
             arg4: u64, arg4cage: u64,
             arg5: u64, arg5cage: u64,
             arg6: u64, arg6cage: u64,
-        ) -> i32 {
+        ) -> i64 {
             let cage_id = arg1cage;
             let args = [arg1, arg2, arg3, arg4, arg5, arg6];
             let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];

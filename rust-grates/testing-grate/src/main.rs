@@ -74,13 +74,13 @@ fn dispatch_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let action = RULES
         .get()
         .and_then(|rules| rules.get(&syscall_nr).copied());
 
     match action {
-        Some(RuleAction::ReturnConst(v)) => v,
+        Some(RuleAction::ReturnConst(v)) => v as i64,
         Some(RuleAction::PassThrough) => match make_threei_call(
             syscall_nr as u32,
             0,

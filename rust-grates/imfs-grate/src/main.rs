@@ -214,8 +214,10 @@ fn main() {
 
     // Staging is over and the program starts: mark it for the runtime,
     // which can count what the run asks of the host from here.
-    if let Err(e) = preload_archive::shm::phase(preload_archive::shm::PHASE_RUN) {
-        log!("phase mark not supported by the runtime ({})", e);
+    if config.preload_shm || config.dump_shm {
+        if let Err(e) = preload_archive::shm::phase(preload_archive::shm::PHASE_RUN) {
+            log!("phase mark not supported by the runtime ({})", e);
+        }
     }
 
     // Build and run the grate. Registers handlers for all filesystem syscalls,
@@ -677,7 +679,7 @@ fn dump_file(imfs_path: &str, actual_path: &str) -> Result<(), String> {
                 break;
             }
 
-            write_host_all(host_fd, &buf[..nread as usize])?;
+            write_host_all(host_fd as i32, &buf[..nread as usize])?;
         }
 
         let close_ret = state.close(0, imfs_fd as u64);

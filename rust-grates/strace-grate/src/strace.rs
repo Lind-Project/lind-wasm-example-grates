@@ -52,7 +52,7 @@ macro_rules! define_syscall_handler {
             arg4: u64, arg4cage: u64,
             arg5: u64, arg5cage: u64,
             arg6: u64, arg6cage: u64
-        ) -> i32 {
+        ) -> i64 {
             let mut _args = Vec::new();
             let _all_vals = [
                 (arg1, arg1cage),
@@ -102,7 +102,7 @@ macro_rules! define_syscall_handler {
             // print ret value
             print!(
                 " = {:?}",
-                ret
+                ret as i64
             );
 
             ret

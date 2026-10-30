@@ -108,7 +108,7 @@ DEFINE_HANDLER(pipe2, 293, ARG_PTR, ARG_INT)
 DEFINE_HANDLER(getrandom, 318, ARG_PTR, ARG_INT, ARG_INT)
 
 // dispatcher function
-int pass_fptr_to_wt(uint64_t fn_ptr_uint, uint64_t cageid,
+long long pass_fptr_to_wt(uint64_t fn_ptr_uint, uint64_t cageid,
                     uint64_t arg1, uint64_t arg1cage, 
                     uint64_t arg2, uint64_t arg2cage,
                     uint64_t arg3, uint64_t arg3cage, 

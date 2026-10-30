@@ -41,7 +41,7 @@ static UNSYNC_COUNTER: AtomicU64 = AtomicU64::new(0); // abused as plain u64 via
 
 /// Read counter values and write them back to the cage's buffer.
 /// Triggered by read() on fd 99 (magic fd, see C test).
-fn report_counters(cage_id: u64, buf_ptr: u64, buf_cage: u64) -> i32 {
+fn report_counters(cage_id: u64, buf_ptr: u64, buf_cage: u64) -> i64 {
     let mutex_val = *MUTEX_COUNTER.lock().unwrap();
     let atomic_val = ATOMIC_COUNTER.load(Ordering::SeqCst);
     let unsync_val = UNSYNC_COUNTER.load(Ordering::Relaxed);
@@ -57,20 +57,20 @@ fn report_counters(cage_id: u64, buf_ptr: u64, buf_cage: u64) -> i32 {
         bytes.len() as u64, 0,
     );
 
-    bytes.len() as i32
+    bytes.len() as i64
 }
 
 fn forward(
     nr: u64, calling_cage: u64,
     args: &[u64; 6], arg_cages: &[u64; 6],
-) -> i32 {
+) -> i64 {
     let grate_cage = getcageid();
     match make_threei_call(
         nr as u32, 0, grate_cage, calling_cage,
         args[0], arg_cages[0], args[1], arg_cages[1], args[2], arg_cages[2],
         args[3], arg_cages[3], args[4], arg_cages[4], args[5], arg_cages[5], 0,
     ) {
-        Ok(r) => r,
+        Ok(r) => r as i64,
         Err(_) => -1,
     }
 }
@@ -84,7 +84,7 @@ pub extern "C" fn open_handler(
     arg1: u64, arg1cage: u64, arg2: u64, arg2cage: u64,
     arg3: u64, arg3cage: u64, arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64, arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let ret = forward(SYS_OPEN, cage_id,
         &[arg1, arg2, arg3, arg4, arg5, arg6],
@@ -101,7 +101,7 @@ pub extern "C" fn close_handler(
     arg1: u64, arg1cage: u64, arg2: u64, arg2cage: u64,
     arg3: u64, arg3cage: u64, arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64, arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     // Translate before close to stress fdtables lookups.
@@ -122,7 +122,7 @@ pub extern "C" fn dup_handler(
     arg1: u64, arg1cage: u64, arg2: u64, arg2cage: u64,
     arg3: u64, arg3cage: u64, arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64, arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let ret = forward(SYS_DUP, cage_id,
@@ -143,7 +143,7 @@ pub extern "C" fn dup2_handler(
     arg1: u64, arg1cage: u64, arg2: u64, arg2cage: u64,
     arg3: u64, arg3cage: u64, arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64, arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let oldfd = arg1;
     let newfd = arg2;
@@ -165,7 +165,7 @@ pub extern "C" fn fork_handler(
     arg1: u64, arg1cage: u64, arg2: u64, arg2cage: u64,
     arg3: u64, arg3cage: u64, arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64, arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let ret = forward(SYS_CLONE, cage_id,
         &[arg1, arg2, arg3, arg4, arg5, arg6],
@@ -176,7 +176,7 @@ pub extern "C" fn fork_handler(
     if !is_thread_clone(arg1, arg1cage) {
         let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id);
     }
-    child_cage_id as i32
+    child_cage_id as i64
 }
 
 pub extern "C" fn exec_handler(
@@ -184,7 +184,7 @@ pub extern "C" fn exec_handler(
     arg1: u64, arg1cage: u64, arg2: u64, arg2cage: u64,
     arg3: u64, arg3cage: u64, arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64, arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     fdtables::empty_fds_for_exec(cage_id);
     for fd in 0..3u64 {
@@ -200,7 +200,7 @@ pub extern "C" fn read_handler(
     arg1: u64, arg1cage: u64, arg2: u64, arg2cage: u64,
     arg3: u64, arg3cage: u64, arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64, arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
 
@@ -222,7 +222,7 @@ pub extern "C" fn write_handler(
     arg1: u64, arg1cage: u64, arg2: u64, arg2cage: u64,
     arg3: u64, arg3cage: u64, arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64, arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
 

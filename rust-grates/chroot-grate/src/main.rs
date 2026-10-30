@@ -110,10 +110,10 @@ fn call_with_rewrites(
     mut args: [u64; 6],
     mut arg_cages: [u64; 6],
     rewrites: &[(usize, u64)],
-) -> i32 {
+) -> i64 {
     for (idx, cstr) in rewrites {
         if *idx >= 6 {
-            return -(libc::EINVAL as i32);
+            return -(libc::EINVAL as i64);
         }
         args[*idx] = *cstr;
         arg_cages[*idx] = thiscage | GRATE_MEMORY_FLAG;
@@ -138,12 +138,12 @@ fn call_with_rewrites(
         arg_cages[5],
         0,
     ) {
-        Ok(ret) => ret,
+        Ok(ret) => ret as i64,
         // Propagate the kernel's actual -errno (e.g. -ENOENT, -EEXIST,
         // -EISDIR) instead of collapsing every failure to -1 / EPERM.
         // glibc's MAKE_LEGACY_SYSCALL with TRANSLATE_ERRNO_ON converts
         // negative values in [-MAX_ERRNO, -1] into errno + return -1.
-        Err(GrateError::MakeSyscallError(n)) => n,
+        Err(GrateError::MakeSyscallError(n)) => n as i64,
         Err(_) => -1,
     }
 }
@@ -168,7 +168,7 @@ fn write_bytes_to_cage(
     buf_cage: u64,
     bufsiz: u64,
     bytes: &[u8],
-) -> i32 {
+) -> i64 {
     let write_len = std::cmp::min(bytes.len(), bufsiz as usize);
     match copy_data_between_cages(
         thiscage,
@@ -180,8 +180,8 @@ fn write_bytes_to_cage(
         write_len as u64,
         0,
     ) {
-        Ok(_) => write_len as i32,
-        Err(_) => -(libc::EFAULT as i32),
+        Ok(_) => write_len as i64,
+        Err(_) => -(libc::EFAULT as i64),
     }
 }
 
@@ -192,7 +192,7 @@ fn make_syscall_from_grate(
     target_cageid: u64,
     args: [u64; 6],
     arg_cages: [u64; 6],
-) -> i32 {
+) -> i64 {
     let thiscage = getcageid();
     match make_threei_call(
         syscall_no,
@@ -224,10 +224,10 @@ fn rewrite_at_path(
     dirfd: u64,
     path_ptr: u64,
     path_cage: u64,
-) -> Result<(u64, CString), i32> {
+) -> Result<(u64, CString), i64> {
     let path = match read_path_from_cage(path_ptr, path_cage) {
         Some(p) => p,
-        None => return Err(-(libc::EFAULT as i32)),
+        None => return Err(-(libc::EFAULT as i64)),
     };
 
     let (rewritten_dirfd, rewritten_path) = if path.starts_with('/') || dirfd as i64 == AT_FDCWD {
@@ -246,7 +246,7 @@ fn rewrite_at_path(
 
     match CString::new(rewritten_path) {
         Ok(path) => Ok((rewritten_dirfd, path)),
-        Err(_) => Err(-(libc::EINVAL as i32)),
+        Err(_) => Err(-(libc::EINVAL as i64)),
     }
 }
 
@@ -257,7 +257,7 @@ fn call_with_at_path(
     mut arg_cages: [u64; 6],
     dirfd_idx: usize,
     path_idx: usize,
-) -> i32 {
+) -> i64 {
     let thiscage = getcageid();
     let target_cageid = arg_cages[path_idx];
     let (dirfd, c_path) =
@@ -273,10 +273,10 @@ fn call_with_at_path(
     make_syscall_from_grate(syscall_no, target_cageid, args, arg_cages)
 }
 
-fn rewrite_symlink_target(cageid: u64, target_ptr: u64, target_cage: u64) -> Result<CString, i32> {
+fn rewrite_symlink_target(cageid: u64, target_ptr: u64, target_cage: u64) -> Result<CString, i64> {
     let target = match read_path_from_cage(target_ptr, target_cage) {
         Some(p) => p,
-        None => return Err(-(libc::EFAULT as i32)),
+        None => return Err(-(libc::EFAULT as i64)),
     };
 
     let rewritten = if target.starts_with('/') {
@@ -285,7 +285,7 @@ fn rewrite_symlink_target(cageid: u64, target_ptr: u64, target_cage: u64) -> Res
         target
     };
 
-    CString::new(rewritten).map_err(|_| -(libc::EINVAL as i32))
+    CString::new(rewritten).map_err(|_| -(libc::EINVAL as i64))
 }
 
 fn fd_dir_path(cageid: u64, fd: u64) -> Option<String> {
@@ -420,15 +420,15 @@ extern "C" fn open_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let thiscage = getcageid();
     let cageid = path_cage;
     let path = match read_path_from_cage(path_ptr, path_cage) {
         Some(p) => p,
-        None => return -(libc::EFAULT as i32),
+        None => return -(libc::EFAULT as i64),
     };
     if path.is_empty() {
-        return -(grate_rs::constants::error::ENOENT as i32);
+        return -(grate_rs::constants::error::ENOENT as i64);
     }
     if let Some(fd) = dev_fd_target(&path) {
         let ret = make_syscall_from_grate(
@@ -447,7 +447,7 @@ extern "C" fn open_handler(
     let virtual_path = normalize_path(&path, &get_cage_cwd(cageid));
     let c_path = match CString::new(chroot_path(&path, cageid)) {
         Ok(p) => p,
-        Err(_) => return -(libc::EINVAL as i32),
+        Err(_) => return -(libc::EINVAL as i64),
     };
 
     let ret = make_syscall_from_grate(
@@ -485,15 +485,15 @@ extern "C" fn openat_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let thiscage = getcageid();
     let cageid = path_cage;
     let path = match read_path_from_cage(path_ptr, path_cage) {
         Some(p) => p,
-        None => return -(libc::EFAULT as i32),
+        None => return -(libc::EFAULT as i64),
     };
     if path.is_empty() {
-        return -(grate_rs::constants::error::ENOENT as i32);
+        return -(grate_rs::constants::error::ENOENT as i64);
     }
     if path.starts_with('/') {
         if let Some(fd) = dev_fd_target(&path) {
@@ -561,7 +561,7 @@ extern "C" fn close_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cageid = fd_cage;
     let ret = make_syscall_from_grate(
         SYS_CLOSE as u32,
@@ -591,7 +591,7 @@ extern "C" fn dup_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cageid = oldfd_cage;
     let ret = make_syscall_from_grate(
         SYS_DUP as u32,
@@ -621,7 +621,7 @@ extern "C" fn dup2_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cageid = oldfd_cage;
     let ret = make_syscall_from_grate(
         SYS_DUP2 as u32,
@@ -653,7 +653,7 @@ extern "C" fn dup3_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cageid = oldfd_cage;
     let ret = make_syscall_from_grate(
         SYS_DUP3 as u32,
@@ -685,7 +685,7 @@ extern "C" fn fcntl_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cageid = fd_cage;
     let ret = make_syscall_from_grate(
         SYS_FCNTL as u32,
@@ -725,7 +725,7 @@ extern "C" fn readlink_handler(
     _arg5cage: u64,
     _arg6: u64,
     _arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let thiscage = getcageid();
     let cageid = path_cage;
 
@@ -799,7 +799,7 @@ extern "C" fn readlinkat_handler(
     _arg5cage: u64,
     _arg6: u64,
     _arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let thiscage = getcageid();
     let cageid = path_cage;
     const AT_FDCWD: i64 = -100;
@@ -886,7 +886,7 @@ extern "C" fn unlinkat_handler(
     _arg5cage: u64,
     _arg6: u64,
     _arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let thiscage = getcageid();
     let cageid = path_cage;
     const AT_FDCWD: i64 = -100;
@@ -896,7 +896,7 @@ extern "C" fn unlinkat_handler(
         None => return -14, // EFAULT
     };
     if path.is_empty() {
-        return -(grate_rs::constants::error::ENOENT as i32);
+        return -(grate_rs::constants::error::ENOENT as i64);
     }
 
     let (c_path, use_chrooted) = if path.starts_with('/') || dirfd as i64 == AT_FDCWD {
@@ -950,7 +950,7 @@ extern "C" fn symlink_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let thiscage = getcageid();
     let cageid = linkpath_cage;
 
@@ -960,11 +960,11 @@ extern "C" fn symlink_handler(
     };
     let linkpath = match read_path_from_cage(linkpath_ptr, linkpath_cage) {
         Some(p) => p,
-        None => return -(libc::EFAULT as i32),
+        None => return -(libc::EFAULT as i64),
     };
     let linkpath = match CString::new(chroot_path(&linkpath, cageid)) {
         Ok(v) => v,
-        Err(_) => return -(libc::EINVAL as i32),
+        Err(_) => return -(libc::EINVAL as i64),
     };
 
     make_syscall_from_grate(
@@ -1003,7 +1003,7 @@ extern "C" fn symlinkat_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let thiscage = getcageid();
     let cageid = linkpath_cage;
 
@@ -1053,7 +1053,7 @@ extern "C" fn faccessat_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     call_with_at_path(
         SYS_FACCESSAT as u32,
         path_cage,
@@ -1080,7 +1080,7 @@ extern "C" fn fchmodat_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     call_with_at_path(
         SYS_FCHMODAT as u32,
         path_cage,
@@ -1107,7 +1107,7 @@ extern "C" fn fchownat_handler(
     flags_cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     call_with_at_path(
         SYS_FCHOWNAT as u32,
         path_cage,
@@ -1134,7 +1134,7 @@ extern "C" fn fstatat_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     call_with_at_path(
         SYS_NEWFSTATAT as u32,
         path_cage,
@@ -1166,7 +1166,7 @@ extern "C" fn statx_handler(
     statxbuf_cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     call_with_at_path(
         SYS_STATX as u32,
         path_cage,
@@ -1198,7 +1198,7 @@ extern "C" fn utimensat_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let args = [dirfd, path_ptr, times, flags, arg5, arg6];
     let arg_cages = [
         dirfd_cage, path_cage, times_cage, flags_cage, arg5cage, arg6cage,
@@ -1225,7 +1225,7 @@ extern "C" fn renameat_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     renameat_common(
         SYS_RENAMEAT as u32,
         oldpath_cage,
@@ -1258,7 +1258,7 @@ extern "C" fn renameat2_handler(
     flags_cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     renameat_common(
         SYS_RENAMEAT2 as u32,
         oldpath_cage,
@@ -1292,7 +1292,7 @@ fn renameat_common(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let thiscage = getcageid();
     let (rewritten_olddirfd, oldpath) =
         match rewrite_at_path(cageid, olddirfd, oldpath_ptr, oldpath_cage) {
@@ -1349,7 +1349,7 @@ extern "C" fn fork_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let thiscage = getcageid();
     let parent_cageid = arg1cage;
     let is_thread = is_thread_clone(arg1, arg1cage);
@@ -1404,14 +1404,14 @@ extern "C" fn execve_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     // Call the real fork syscall.
     let thiscage = getcageid();
     let cageid = arg1cage;
 
     let path = match read_path_from_cage(arg1, arg1cage) {
         Some(p) => p,
-        None => return -(libc::EFAULT as i32),
+        None => return -(libc::EFAULT as i64),
     };
 
     let transformed = chroot_path(&path, cageid);
@@ -1465,7 +1465,7 @@ extern "C" fn chdir_handler(
     _arg5cage: u64,
     _arg6: u64,
     _arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cageid = path_cage;
 
     // Read the requested path from cage memory.
@@ -1502,7 +1502,7 @@ extern "C" fn fchdir_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cageid = fd_cage;
 
     if let Some(path) = fd_dir_path(cageid, fd) {
@@ -1521,7 +1521,7 @@ extern "C" fn fchdir_handler(
     if ret < 0 {
         ret
     } else {
-        -(libc::ENOTDIR as i32)
+        -(libc::ENOTDIR as i64)
     }
 }
 
@@ -1542,7 +1542,7 @@ extern "C" fn getcwd_handler(
     _arg5cage: u64,
     _arg6: u64,
     _arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let thiscage = getcageid();
     let cageid = buf_cage;
 
@@ -1570,7 +1570,7 @@ extern "C" fn getcwd_handler(
         buf.len() as u64,
         0,
     ) {
-        Ok(_) => buf.len() as i32,
+        Ok(_) => buf.len() as i64,
         Err(_) => -14, // EFAULT
     }
 }
@@ -1593,7 +1593,7 @@ extern "C" fn chroot_handler(
     _arg5cage: u64,
     _arg6: u64,
     _arg6cage: u64,
-) -> i32 {
+) -> i64 {
     -1 // EPERM - operation not permitted
 }
 

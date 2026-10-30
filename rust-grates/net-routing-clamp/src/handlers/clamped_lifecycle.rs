@@ -19,7 +19,7 @@ pub extern "C" fn register_handler_handler(
     _arg4: u64, _arg4cage: u64,
     _arg5: u64, _arg5cage: u64,
     _arg6: u64, _arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let ns_cage = helpers::get_ns_cage_id();
 
     if !helpers::is_cage_clamped(grate_id) {
@@ -76,7 +76,7 @@ pub extern "C" fn exec_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let ns_cage = helpers::get_ns_cage_id();
 
     if let Some(path) = helpers::read_path_from_cage(arg1, arg1cage) {
@@ -122,7 +122,7 @@ pub extern "C" fn fork_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -137,7 +137,7 @@ pub extern "C" fn fork_handler(
         register_lifecycle_handlers(child_cage_id);
     }
 
-    child_cage_id as i32
+    child_cage_id as i64
 }
 
 pub extern "C" fn exit_handler(
@@ -148,7 +148,7 @@ pub extern "C" fn exit_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     helpers::remove_cage_state(arg1cage);
     fdtables::remove_cage_from_fdtable(arg1cage);
 

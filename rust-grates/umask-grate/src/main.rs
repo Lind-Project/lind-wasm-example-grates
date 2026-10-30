@@ -24,7 +24,7 @@ extern "C" fn umask_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     // Force any required bits into the cage's requested umask.
     // e.g. with --force-bits 022, the cage can never set a umask
     // that would allow group-write or other-write.

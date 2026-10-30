@@ -104,7 +104,7 @@ unsafe extern "C" {
         arg6: u64,
         arg6cageid: u64,
         translate_errno: c_int,
-    ) -> c_int;
+    ) -> i64;
 
     // Helper to get the current cage ID.
     #[link_name = "getpid"]

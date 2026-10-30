@@ -452,7 +452,7 @@ pub fn path_matches_prefix(path: &str) -> bool {
 /// Make a syscall via threei with the standard 6-arg pattern.
 ///
 /// Uses ns_cage as the source cage for routing, and callingcage as the targetcage.
-pub fn do_syscall(callingcage: u64, nr: u64, args: &[u64; 6], arg_cages: &[u64; 6]) -> i32 {
+pub fn do_syscall(callingcage: u64, nr: u64, args: &[u64; 6], arg_cages: &[u64; 6]) -> i64 {
     let ns_cage = get_ns_cage_id();
     match make_threei_call(
         nr as u32,
@@ -473,14 +473,14 @@ pub fn do_syscall(callingcage: u64, nr: u64, args: &[u64; 6], arg_cages: &[u64; 
         arg_cages[5],
         0,
     ) {
-        Ok(ret) => ret,
-        Err(GrateError::MakeSyscallError(ret)) => ret,
+        Ok(ret) => ret as i64,
+        Err(GrateError::MakeSyscallError(ret)) => ret as i64,
         _ => -1,
     }
 }
 
 /// Make a syscall via threei, using the saved clamp-entry cage as source.
-pub fn do_clamp_syscall(callingcage: u64, nr: u64, args: &[u64; 6], arg_cages: &[u64; 6]) -> i32 {
+pub fn do_clamp_syscall(callingcage: u64, nr: u64, args: &[u64; 6], arg_cages: &[u64; 6]) -> i64 {
     match make_threei_call(
         nr as u32,
         0,
@@ -500,8 +500,8 @@ pub fn do_clamp_syscall(callingcage: u64, nr: u64, args: &[u64; 6], arg_cages: &
         arg_cages[5],
         0,
     ) {
-        Ok(ret) => ret,
-        Err(GrateError::MakeSyscallError(ret)) => ret,
+        Ok(ret) => ret as i64,
+        Err(GrateError::MakeSyscallError(ret)) => ret as i64,
         _ => -1,
     }
 }

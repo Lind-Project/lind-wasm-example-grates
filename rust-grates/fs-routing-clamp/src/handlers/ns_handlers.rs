@@ -31,7 +31,7 @@ macro_rules! define_path_handler {
             arg5cage: u64,
             arg6: u64,
             arg6cage: u64,
-        ) -> i32 {
+        ) -> i64 {
             let args = [arg1, arg2, arg3, arg4, arg5, arg6];
             let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -134,7 +134,7 @@ pub extern "C" fn ns_symlink_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -164,13 +164,13 @@ pub extern "C" fn ns_symlinkat_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
     let should_clamp = match prepare_at_path_route(arg1cage, arg2, arg3, arg3cage, &mut args, 1) {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(e) => return e as i64,
     };
 
     let nr = match helpers::get_route(arg1cage, SYS_SYMLINKAT) {
@@ -195,13 +195,13 @@ pub extern "C" fn ns_readlinkat_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
     let should_clamp = match prepare_at_path_route(arg1cage, arg1, arg2, arg2cage, &mut args, 0) {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(e) => return e as i64,
     };
 
     let nr = match helpers::get_route(arg1cage, SYS_READLINKAT) {
@@ -226,13 +226,13 @@ pub extern "C" fn ns_unlinkat_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
     let should_clamp = match prepare_at_path_route(arg1cage, arg1, arg2, arg2cage, &mut args, 0) {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(e) => return e as i64,
     };
 
     let nr = match helpers::get_route(arg1cage, SYS_UNLINKAT) {
@@ -257,13 +257,13 @@ pub extern "C" fn ns_faccessat_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
     let should_clamp = match prepare_at_path_route(arg1cage, arg1, arg2, arg2cage, &mut args, 0) {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(e) => return e as i64,
     };
 
     let nr = match helpers::get_route(arg1cage, SYS_FACCESSAT) {
@@ -288,13 +288,13 @@ pub extern "C" fn ns_statx_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
     let should_clamp = match prepare_at_path_route(arg1cage, arg1, arg2, arg2cage, &mut args, 0) {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(e) => return e as i64,
     };
 
     let nr = match helpers::get_route(arg1cage, SYS_STATX) {
@@ -319,13 +319,13 @@ pub extern "C" fn ns_fchmodat_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
     let should_clamp = match prepare_at_path_route(arg1cage, arg1, arg2, arg2cage, &mut args, 0) {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(e) => return e as i64,
     };
 
     let nr = match helpers::get_route(arg1cage, SYS_FCHMODAT) {
@@ -350,13 +350,13 @@ pub extern "C" fn ns_fchownat_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
     let should_clamp = match prepare_at_path_route(arg1cage, arg1, arg2, arg2cage, &mut args, 0) {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(e) => return e as i64,
     };
 
     let nr = match helpers::get_route(arg1cage, SYS_FCHOWNAT) {
@@ -381,7 +381,7 @@ pub extern "C" fn ns_utimensat_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -394,13 +394,13 @@ pub extern "C" fn ns_utimensat_handler(
                     args[0] = entry.underfd;
                     entry.perfdinfo != 0
                 }
-                Err(_) => return -(EBADF as i32),
+                Err(_) => return -(EBADF as i64),
             }
         }
     } else {
         match prepare_at_path_route(arg1cage, arg1, arg2, arg2cage, &mut args, 0) {
             Ok(v) => v,
-            Err(e) => return e,
+            Err(e) => return e as i64,
         }
     };
 
@@ -426,17 +426,17 @@ pub extern "C" fn ns_linkat_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
     let old_clamped = match prepare_at_path_route(arg1cage, arg1, arg2, arg2cage, &mut args, 0) {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(e) => return e as i64,
     };
     let new_clamped = match prepare_at_path_route(arg1cage, arg3, arg4, arg4cage, &mut args, 2) {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(e) => return e as i64,
     };
 
     let should_clamp = old_clamped || new_clamped;
@@ -462,7 +462,7 @@ pub extern "C" fn ns_chdir_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -547,7 +547,7 @@ macro_rules! fd_route_handler {
             arg5cage: u64,
             arg6: u64,
             arg6cage: u64,
-        ) -> i32 {
+        ) -> i64 {
             let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
             let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -560,7 +560,7 @@ macro_rules! fd_route_handler {
                     //     arg1cage,
                     //     arg1,
                     // );
-                    return -(EBADF as i32);
+                    return -(EBADF as i64);
                 }
             };
 
@@ -667,7 +667,7 @@ pub extern "C" fn ns_open_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -702,13 +702,13 @@ pub extern "C" fn ns_open_handler(
                 //     if clamped != 0 { "clamped grate" } else { "kernel" },
                 //     vfd,
                 // );
-                return vfd as i32;
+                return vfd as i64;
             }
             Err(_) => {
                 let close_args = [ret as u64, 0, 0, 0, 0, 0];
                 let close_cages = [arg1cage, arg1cage, arg1cage, arg1cage, arg1cage, arg1cage];
                 let _ = helpers::do_syscall(arg1cage, SYS_CLOSE, &close_args, &close_cages);
-                return -(EMFILE as i32);
+                return -(EMFILE as i64);
             }
         };
     }
@@ -734,7 +734,7 @@ pub extern "C" fn ns_close_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let mut arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -745,7 +745,7 @@ pub extern "C" fn ns_close_handler(
             //     "[ns_handlers|close] fd={} invalid virtual fd, ret=EBADF",
             //     arg1,
             // );
-            return -(EBADF as i32);
+            return -(EBADF as i64);
         }
     };
 
@@ -793,7 +793,7 @@ pub extern "C" fn ns_mmap_handler(
     arg5cage: u64,
     arg6: u64, // offset
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -808,7 +808,7 @@ pub extern "C" fn ns_mmap_handler(
         let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, fd) {
             Ok(entry) => entry,
             Err(_) => {
-                return -(EBADF as i32);
+                return -(EBADF as i64);
             }
         };
 
@@ -856,7 +856,7 @@ pub extern "C" fn ns_munmap_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -899,7 +899,7 @@ pub extern "C" fn ns_fcntl_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let mut arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -911,7 +911,7 @@ pub extern "C" fn ns_fcntl_handler(
             //     arg1cage,
             //     arg1,
             // );
-            return -(EBADF as i32);
+            return -(EBADF as i64);
         }
     };
 
@@ -946,9 +946,9 @@ pub extern "C" fn ns_fcntl_handler(
                     //     if perfdinfo != 0 { "clamped grate" } else { "kernel" },
                     //     vfd,
                     // );
-                    return vfd as i32;
+                    return vfd as i64;
                 }
-                Err(_) => return -(EMFILE as i32),
+                Err(_) => return -(EMFILE as i64),
             };
         }
     }
@@ -982,7 +982,7 @@ pub extern "C" fn ns_fstatat_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -1005,7 +1005,7 @@ pub extern "C" fn ns_fstatat_handler(
                 //     arg1cage,
                 //     arg1,
                 // );
-                return -(EBADF as i32);
+                return -(EBADF as i64);
             }
         };
 
@@ -1062,7 +1062,7 @@ pub extern "C" fn ns_openat_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -1086,7 +1086,7 @@ pub extern "C" fn ns_openat_handler(
                 //     arg1cage,
                 //     arg1,
                 // );
-                return -(EBADF as i32);
+                return -(EBADF as i64);
             }
         };
 
@@ -1151,7 +1151,7 @@ pub extern "C" fn ns_openat_handler(
                 //     if clamped != 0 { "clamped grate" } else { "kernel" },
                 //     vfd,
                 // );
-                return vfd as i32;
+                return vfd as i64;
             }
             Err(_) => {
                 // Avoid leaking the kernel fd if we cannot allocate a virtual fd.
@@ -1159,7 +1159,7 @@ pub extern "C" fn ns_openat_handler(
                 let close_cages = [arg1cage, arg1cage, arg1cage, arg1cage, arg1cage, arg1cage];
                 let _ = helpers::do_syscall(arg1cage, SYS_CLOSE, &close_args, &close_cages);
 
-                return -(EMFILE as i32);
+                return -(EMFILE as i64);
             }
         }
     }
@@ -1183,11 +1183,11 @@ pub extern "C" fn ns_dup_handler(
     _arg5cage: u64,
     _arg6: u64,
     _arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
         Ok(entry) => entry,
         Err(_) => {
-            return -(EBADF as i32);
+            return -(EBADF as i64);
         }
     };
 
@@ -1223,7 +1223,7 @@ pub extern "C" fn ns_dup_handler(
             //     new_underfd,
             //     new_virtual_fd,
             // );
-            new_virtual_fd as i32
+            new_virtual_fd as i64
         }
 
         Err(errno) => {
@@ -1233,7 +1233,7 @@ pub extern "C" fn ns_dup_handler(
             let close_cages = [arg1cage; 6];
             let _ = helpers::do_syscall(arg1cage, SYS_CLOSE, &close_args, &close_cages);
 
-            -(errno as i32)
+            -(errno as i64)
         }
     }
 }
@@ -1261,11 +1261,11 @@ pub extern "C" fn ns_dup2_handler(
     _arg5cage: u64,
     _arg6: u64,
     _arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
         Ok(entry) => entry,
         Err(_) => {
-            return -(EBADF as i32);
+            return -(EBADF as i64);
         }
     };
 
@@ -1274,7 +1274,7 @@ pub extern "C" fn ns_dup2_handler(
     // dup2 special case:
     // If oldfd == newfd, dup2 returns newfd without closing/replacing it.
     if arg1 == arg2 {
-        return arg2 as i32;
+        return arg2 as i64;
     }
 
     // If the target virtual fd already exists, close its underlying fd
@@ -1324,7 +1324,7 @@ pub extern "C" fn ns_dup2_handler(
             //     new_underfd,
             //     arg2,
             // );
-            arg2 as i32
+            arg2 as i64
         }
 
         Err(errno) => {
@@ -1346,7 +1346,7 @@ pub extern "C" fn ns_dup2_handler(
             //      errno,
             // );
 
-            -(errno as i32)
+            -(errno as i64)
         }
     }
 }
@@ -1376,11 +1376,11 @@ pub extern "C" fn ns_dup3_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let old_fd_entry = match fdtables::translate_virtual_fd(arg1cage, arg1) {
         Ok(entry) => entry,
         Err(_) => {
-            return -(EBADF as i32);
+            return -(EBADF as i64);
         }
     };
 
@@ -1388,12 +1388,12 @@ pub extern "C" fn ns_dup3_handler(
 
     // dup3(oldfd, oldfd, flags) returns EINVAL.
     if arg1 == arg2 {
-        return -(EINVAL as i32);
+        return -(EINVAL as i64);
     }
 
     // Linux dup3 only accepts flags == 0 or O_CLOEXEC.
     if arg3 & !(O_CLOEXEC as u64) != 0 {
-        return -(EINVAL as i32);
+        return -(EINVAL as i64);
     }
 
     let cloexec = (arg3 & (O_CLOEXEC as u64)) != 0;
@@ -1469,7 +1469,7 @@ pub extern "C" fn ns_dup3_handler(
             //     new_underfd,
             //     arg2,
             // );
-            arg2 as i32
+            arg2 as i64
         }
 
         Err(errno) => {
@@ -1491,7 +1491,7 @@ pub extern "C" fn ns_dup3_handler(
             //      errno,
             // );
 
-            -(errno as i32)
+            -(errno as i64)
         }
     }
 }
@@ -1516,7 +1516,7 @@ pub extern "C" fn ns_clone_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -1554,7 +1554,7 @@ pub extern "C" fn ns_getcwd_handler(
     _arg5cage: u64,
     _arg6: u64,
     _arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let ns_cage = getcageid();
 
     let cwd = helpers::get_cage_cwd(arg2cage);
@@ -1574,7 +1574,7 @@ pub extern "C" fn ns_getcwd_handler(
         1,
     ) {
         Ok(_) => {
-            return arg1cage as i32;
+            return arg1cage as i64;
         }
         Err(_) => return -14,
     }
