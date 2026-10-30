@@ -255,7 +255,7 @@ static witness_ctx_t *get_or_create_witness_ctx(uint64_t cageid) {
  * Dispatcher
  * ============================================================ */
 
-int pass_fptr_to_wt(uint64_t fn_ptr_uint, uint64_t cageid, uint64_t arg1,
+int64_t pass_fptr_to_wt(uint64_t fn_ptr_uint, uint64_t cageid, uint64_t arg1,
                     uint64_t arg1cage, uint64_t arg2, uint64_t arg2cage,
                     uint64_t arg3, uint64_t arg3cage, uint64_t arg4,
                     uint64_t arg4cage, uint64_t arg5, uint64_t arg5cage,
@@ -265,10 +265,10 @@ int pass_fptr_to_wt(uint64_t fn_ptr_uint, uint64_t cageid, uint64_t arg1,
         assert(0);
     }
 
-    int (*fn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+    int64_t (*fn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
               uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
               uint64_t, uint64_t, uint64_t) =
-        (int (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+        (int64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                  uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                  uint64_t, uint64_t, uint64_t))(uintptr_t)fn_ptr_uint;
 
@@ -281,7 +281,7 @@ int pass_fptr_to_wt(uint64_t fn_ptr_uint, uint64_t cageid, uint64_t arg1,
  * Shared forwarding
  * ============================================================ */
 
-static int forward_syscall(uint64_t syscallno,
+static int64_t forward_syscall(uint64_t syscallno,
                            uint64_t cageid,
                            uint64_t arg1, uint64_t arg1cage,
                            uint64_t arg2, uint64_t arg2cage,
@@ -363,7 +363,7 @@ static void emit_signed_record(const syscall_record_t *rec,
  * Signed forwarding
  * ============================================================ */
 
-static int signed_forward(uint64_t syscallno,
+static int64_t signed_forward(uint64_t syscallno,
                           uint64_t cageid,
                           uint64_t arg1, uint64_t arg1cage,
                           uint64_t arg2, uint64_t arg2cage,
@@ -422,7 +422,7 @@ static int signed_forward(uint64_t syscallno,
  * Witness handlers
  * ============================================================ */
 
-int execve_witness(uint64_t cageid,
+int64_t execve_witness(uint64_t cageid,
                    uint64_t arg1, uint64_t arg1cage,
                    uint64_t arg2, uint64_t arg2cage,
                    uint64_t arg3, uint64_t arg3cage,
@@ -438,7 +438,7 @@ int execve_witness(uint64_t cageid,
                           arg6, arg6cage);
 }
 
-int openat_witness(uint64_t cageid,
+int64_t openat_witness(uint64_t cageid,
                    uint64_t arg1, uint64_t arg1cage,
                    uint64_t arg2, uint64_t arg2cage,
                    uint64_t arg3, uint64_t arg3cage,
@@ -454,7 +454,7 @@ int openat_witness(uint64_t cageid,
                           arg6, arg6cage);
 }
 
-int read_witness(uint64_t cageid,
+int64_t read_witness(uint64_t cageid,
                  uint64_t arg1, uint64_t arg1cage,
                  uint64_t arg2, uint64_t arg2cage,
                  uint64_t arg3, uint64_t arg3cage,
@@ -470,7 +470,7 @@ int read_witness(uint64_t cageid,
                           arg6, arg6cage);
 }
 
-int write_witness(uint64_t cageid,
+int64_t write_witness(uint64_t cageid,
                   uint64_t arg1, uint64_t arg1cage,
                   uint64_t arg2, uint64_t arg2cage,
                   uint64_t arg3, uint64_t arg3cage,

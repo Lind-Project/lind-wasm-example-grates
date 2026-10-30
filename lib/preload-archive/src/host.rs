@@ -22,7 +22,7 @@ const S_IFREG: u32 = 0o100000;
 /// Issue a syscall against the current grate cage. Pointer arguments that
 /// refer to grate-owned buffers must already carry GRATE_MEMORY_FLAG in
 /// `arg_cages`.
-pub fn raw_threei_syscall(syscall: u64, args: [u64; 6], arg_cages: [u64; 6]) -> i32 {
+pub fn raw_threei_syscall(syscall: u64, args: [u64; 6], arg_cages: [u64; 6]) -> i64 {
     let this_cage = getcageid();
     match make_threei_call(
         syscall as u32,

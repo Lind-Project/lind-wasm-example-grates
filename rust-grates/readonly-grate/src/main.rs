@@ -29,19 +29,19 @@ extern "C" fn open_syscall(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let access_mode = flags & O_ACCMODE;
 
     // return -EPERM (Operation not permitted) if
     // access mode is O_WRONLY or O_RDWR
     if access_mode != O_RDONLY {
-        return -EPERM;
+        return -(EPERM as i64);
     }
 
     // return -EPERM (Operation not permitted) if
     // access mode is O_WRONLY or O_RDWR
     if flags & (O_TRUNC | O_APPEND) != 0 {
-        return -EPERM;
+        return -(EPERM as i64);
     }
 
     let ret = match make_threei_call(
@@ -69,7 +69,7 @@ extern "C" fn open_syscall(
                 "[readonly-grate]: make_threei_call() failed for SYS_OPEN with: {:?}",
                 e
             );
-            return -EPERM;
+            return -(EPERM as i64);
         }
     };
 
@@ -91,8 +91,8 @@ extern "C" fn write_syscall(
     _arg5cage: u64,
     _arg6: u64,
     _arg6cage: u64,
-) -> i32 {
-    -EPERM // return -EPERM (Operation not permitted);
+) -> i64 {
+    -(EPERM as i64)
 }
 
 // writev() syscall handler
@@ -110,8 +110,8 @@ extern "C" fn writev_syscall(
     _arg5cage: u64,
     _arg6: u64,
     _arg6cage: u64,
-) -> i32 {
-    -EPERM // return -EPERM (Operation not permitted);
+) -> i64 {
+    -(EPERM as i64)
 }
 
 // pwrite() syscall handler
@@ -129,8 +129,8 @@ extern "C" fn pwrite_syscall(
     _arg5cage: u64,
     _arg6: u64,
     _arg6cage: u64,
-) -> i32 {
-    -EPERM // return -EPERM (Operation not permitted);
+) -> i64 {
+    -(EPERM as i64)
 }
 
 fn main() {

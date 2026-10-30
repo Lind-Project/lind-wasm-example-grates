@@ -33,7 +33,7 @@
 //      arg[1-6]cage    Cage IDs corresponding to each argument, indicating
 //      which cage's address
 //                      space the argument belongs to.
-int pass_fptr_to_wt(uint64_t fn_ptr_uint, uint64_t grateid, uint64_t arg1,
+int64_t pass_fptr_to_wt(uint64_t fn_ptr_uint, uint64_t grateid, uint64_t arg1,
 		    uint64_t arg1cage, uint64_t arg2, uint64_t arg2cage,
 		    uint64_t arg3, uint64_t arg3cage, uint64_t arg4,
 		    uint64_t arg4cage, uint64_t arg5, uint64_t arg5cage,
@@ -46,19 +46,19 @@ int pass_fptr_to_wt(uint64_t fn_ptr_uint, uint64_t grateid, uint64_t arg1,
 	int cage_id = arg1cage;
 
 	LOG("[Grate|geteuid] Handling function ptr: %llu from cage: %d\n",
-	    fn_ptr_uint, cage_id);
+	    (unsigned long long)fn_ptr_uint, cage_id);
 
-	int (*fn)(int) = (int (*)(int))(uintptr_t)fn_ptr_uint;
+	int64_t (*fn)(uint64_t) = (int64_t (*)(uint64_t))(uintptr_t)fn_ptr_uint;
 
 	return fn(cage_id);
 }
 
 // Function ptr and signatures of this grate
-int geteuid_grate(int);
+int64_t geteuid_grate(uint64_t);
 
-int geteuid_grate(int cageid) {
+int64_t geteuid_grate(uint64_t cageid) {
 	LOG("[Grate|geteuid] In geteuid_grate %d handler for cage: %d\n",
-	    getpid(), cageid);
+	    getpid(), (int)cageid);
 	return 10;
 }
 

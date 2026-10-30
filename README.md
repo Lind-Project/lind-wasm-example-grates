@@ -67,11 +67,11 @@ make list
 #include <lind_syscall.h>
 
 // Custom handler — return 10 for geteuid
-int my_handler(uint64_t cageid) { return 10; }
+int64_t my_handler(uint64_t cageid) { return 10; }
 
 // Required dispatcher — routes function pointer calls
-int pass_fptr_to_wt(uint64_t fn_ptr, uint64_t cageid, ...) {
-    int (*fn)(uint64_t) = (int (*)(uint64_t))(uintptr_t)fn_ptr;
+int64_t pass_fptr_to_wt(uint64_t fn_ptr, uint64_t cageid, ...) {
+    int64_t (*fn)(uint64_t) = (int64_t (*)(uint64_t))(uintptr_t)fn_ptr;
     return fn(cageid);
 }
 
@@ -107,7 +107,7 @@ extern "C" fn my_handler(
     _arg1: u64, _arg1cage: u64, _arg2: u64, _arg2cage: u64,
     _arg3: u64, _arg3cage: u64, _arg4: u64, _arg4cage: u64,
     _arg5: u64, _arg5cage: u64, _arg6: u64, _arg6cage: u64,
-) -> i32 {
+) -> i64 {
     10
 }
 

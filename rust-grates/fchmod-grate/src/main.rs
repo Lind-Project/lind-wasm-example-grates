@@ -22,7 +22,7 @@ extern "C" fn fchmod_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let masked_mode = mode & MASK.load(Ordering::Relaxed);
 
     match make_threei_call(
@@ -44,8 +44,8 @@ extern "C" fn fchmod_handler(
         arg6cage,
         0,
     ) {
-        Ok(r) => r,
-        Err(GrateError::MakeSyscallError(n)) => n,
+        Ok(r) => r as i64,
+        Err(GrateError::MakeSyscallError(n)) => n as i64,
         Err(_) => -1,
     }
 }
@@ -64,7 +64,7 @@ extern "C" fn fchmodat_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let masked_mode = mode & MASK.load(Ordering::Relaxed);
 
     match make_threei_call(
@@ -86,8 +86,8 @@ extern "C" fn fchmodat_handler(
         arg6cage,
         0,
     ) {
-        Ok(r) => r,
-        Err(GrateError::MakeSyscallError(n)) => n,
+        Ok(r) => r as i64,
+        Err(GrateError::MakeSyscallError(n)) => n as i64,
         Err(_) => -1,
     }
 }

@@ -13,7 +13,7 @@
 #define MAX_SYSCALLS 334
 
 // function ptr for storing syscall handlers
-typedef int (*syscall_handler_t)(uint64_t, uint64_t, uint64_t, uint64_t,
+typedef int64_t (*syscall_handler_t)(uint64_t, uint64_t, uint64_t, uint64_t,
                                  uint64_t, uint64_t, uint64_t, uint64_t,
                                  uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
@@ -23,7 +23,7 @@ extern syscall_handler_t syscall_handler_table[MAX_SYSCALLS];
 // macro for defining syscall handlers dynamically
 #define DEFINE_HANDLER(name, num, ...)                                          \
     /* function defination for syscall handler */                               \
-    int name##_grate(uint64_t cageid, uint64_t arg1, uint64_t arg1cage,         \
+    int64_t name##_grate(uint64_t cageid, uint64_t arg1, uint64_t arg1cage,     \
                      uint64_t arg2, uint64_t arg2cage,                          \
                      uint64_t arg3, uint64_t arg3cage,                          \
                      uint64_t arg4, uint64_t arg4cage,                          \
@@ -72,13 +72,13 @@ extern syscall_handler_t syscall_handler_table[MAX_SYSCALLS];
         offset += snprintf(log_buffer + offset, sizeof(log_buffer) - offset, ")"); \
                                                                                 \
         /* forward interposed syscall */                                        \
-        int ret = make_threei_call(num, 0,                                      \
+        int64_t ret = make_threei_call(num, 0,                                  \
                                    thiscage, arg1cage,                          \
                                    arg1, arg1cage, arg2, arg2cage,              \
                                    arg3, arg3cage, arg4, arg4cage,              \
                                    arg5, arg5cage, arg6, arg6cage, 0);          \
                                                                                 \
-        fprintf(stderr, "%s = %d\n", log_buffer, ret);                          \
+        fprintf(stderr, "%s = %lld\n", log_buffer, (long long)ret);             \
         return ret;                                                             \
     }                                                                           \
                                                                                 \

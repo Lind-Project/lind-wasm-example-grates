@@ -36,7 +36,7 @@ macro_rules! input_path_handler {
             arg4: u64, arg4cage: u64,
             arg5: u64, arg5cage: u64,
             arg6: u64, arg6cage: u64,
-        ) -> i32 {
+        ) -> i64 {
             let thiscage = getcageid();
 
             let callingcage = arg1cage;
@@ -56,10 +56,10 @@ macro_rules! input_path_handler {
                 // Read the original path from the cage's address space.
                 let path = match read_path_from_cage(ptr, cage) {
                     Some(p) => p,
-                    None => return -(::libc::EFAULT as i32),
+                    None => return -(::libc::EFAULT as i64),
                 };
                 if path.is_empty() {
-                    return -(::grate_rs::constants::error::ENOENT as i32);
+                    return -(::grate_rs::constants::error::ENOENT as i64);
                 }
 
                 // Apply chroot transformation (normalize relative to cwd, prepend chroot dir).

@@ -184,14 +184,14 @@ pub fn read_port_from_cage(addr_ptr: u64, addr_cage: u64, addrlen: u64) -> Optio
 //  Syscall forwarding
 // =====================================================================
 
-pub fn do_syscall(callingcage: u64, nr: u64, args: &[u64; 6], arg_cages: &[u64; 6]) -> i32 {
+pub fn do_syscall(callingcage: u64, nr: u64, args: &[u64; 6], arg_cages: &[u64; 6]) -> i64 {
     let ns_cage = get_ns_cage_id();
     match make_threei_call(
         nr as u32, 0, ns_cage, callingcage,
         args[0], arg_cages[0], args[1], arg_cages[1], args[2], arg_cages[2],
         args[3], arg_cages[3], args[4], arg_cages[4], args[5], arg_cages[5], 0,
     ) {
-        Ok(ret) => ret,
+        Ok(ret) => ret as i64,
         Err(_) => -1,
     }
 }
