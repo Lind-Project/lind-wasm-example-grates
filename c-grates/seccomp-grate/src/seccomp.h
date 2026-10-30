@@ -15,7 +15,7 @@ typedef enum {
 } seccomp_mode_t;
 
 // function ptr for storing syscall handlers
-typedef int (*syscall_handler_t)(uint64_t cageid, uint64_t arg1,
+typedef int64_t (*syscall_handler_t)(uint64_t cageid, uint64_t arg1,
                                  uint64_t arg1cage, uint64_t arg2,
                                  uint64_t arg2cage, uint64_t arg3,
                                  uint64_t arg3cage, uint64_t arg4,
@@ -33,7 +33,7 @@ typedef struct {
 extern seccomp_mode_t syscall_mode[MAX_SYSCALLS];
 
 // handler for blacklisted syscalls
-int blacklist_handler(uint64_t cageid, uint64_t arg1, uint64_t arg1cage,
+int64_t blacklist_handler(uint64_t cageid, uint64_t arg1, uint64_t arg1cage,
                       uint64_t arg2, uint64_t arg2cage, uint64_t arg3,
                       uint64_t arg3cage, uint64_t arg4, uint64_t arg4cage,
                       uint64_t arg5, uint64_t arg5cage, uint64_t arg6,

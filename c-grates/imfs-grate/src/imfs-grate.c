@@ -14,7 +14,7 @@
 #include "imfs.h"
 
 // Dispatcher function
-int pass_fptr_to_wt(uint64_t fn_ptr_uint, uint64_t grateid, uint64_t arg1,
+int64_t pass_fptr_to_wt(uint64_t fn_ptr_uint, uint64_t grateid, uint64_t arg1,
 		    uint64_t arg1cage, uint64_t arg2, uint64_t arg2cage,
 		    uint64_t arg3, uint64_t arg3cage, uint64_t arg4,
 		    uint64_t arg4cage, uint64_t arg5, uint64_t arg5cage,
@@ -23,10 +23,10 @@ int pass_fptr_to_wt(uint64_t fn_ptr_uint, uint64_t grateid, uint64_t arg1,
 		return -1;
 	}
 
-	int (*fn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+	int64_t (*fn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
 		  uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
 		  uint64_t) =
-	    (int (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+	    (int64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
 		     uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
 		     uint64_t))(uintptr_t)fn_ptr_uint;
 
@@ -120,7 +120,7 @@ static inline void sys_log_args(const char *name, uint64_t arg1, uint64_t arg2,
  * IMFS registers open, close, read, write, and fcntl syscalls.
  */
 
-int open_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
+int64_t open_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
 	       uint64_t arg2, uint64_t arg2cage, uint64_t arg3,
 	       uint64_t arg3cage, uint64_t arg4, uint64_t arg4cage,
 	       uint64_t arg5, uint64_t arg5cage, uint64_t arg6,
@@ -171,7 +171,7 @@ int open_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
 	return ifd;
 }
 
-int fcntl_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
+int64_t fcntl_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
 		uint64_t arg2, uint64_t arg2cage, uint64_t arg3,
 		uint64_t arg3cage, uint64_t arg4, uint64_t arg4cage,
 		uint64_t arg5, uint64_t arg5cage, uint64_t arg6,
@@ -182,7 +182,7 @@ int fcntl_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
 	return ret;
 }
 
-int unlink_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
+int64_t unlink_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
 		 uint64_t arg2, uint64_t arg2cage, uint64_t arg3,
 		 uint64_t arg3cage, uint64_t arg4, uint64_t arg4cage,
 		 uint64_t arg5, uint64_t arg5cage, uint64_t arg6,
@@ -208,7 +208,7 @@ int unlink_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
 	return ret;
 }
 
-int close_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
+int64_t close_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
 		uint64_t arg2, uint64_t arg2cage, uint64_t arg3,
 		uint64_t arg3cage, uint64_t arg4, uint64_t arg4cage,
 		uint64_t arg5, uint64_t arg5cage, uint64_t arg6,
@@ -240,7 +240,7 @@ off_t lseek_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
 
 // Read: Copy memory from grate to cage.
 // Write: Copy memory from cage to grate.
-int read_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
+int64_t read_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
 	       uint64_t arg2, uint64_t arg2cage, uint64_t arg3,
 	       uint64_t arg3cage, uint64_t arg4, uint64_t arg4cage,
 	       uint64_t arg5, uint64_t arg5cage, uint64_t arg6,
@@ -279,7 +279,7 @@ int read_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
 	return ret;
 }
 
-int pread_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
+int64_t pread_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
 		uint64_t arg2, uint64_t arg2cage, uint64_t arg3,
 		uint64_t arg3cage, uint64_t arg4, uint64_t arg4cage,
 		uint64_t arg5, uint64_t arg5cage, uint64_t arg6,
@@ -319,7 +319,7 @@ int pread_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
 	return ret;
 }
 
-int write_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
+int64_t write_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
 		uint64_t arg2, uint64_t arg2cage, uint64_t arg3,
 		uint64_t arg3cage, uint64_t arg4, uint64_t arg4cage,
 		uint64_t arg5, uint64_t arg5cage, uint64_t arg6,
@@ -354,7 +354,7 @@ int write_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
 	return ret;
 }
 
-int pwrite_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
+int64_t pwrite_grate(uint64_t grateid, uint64_t arg1, uint64_t arg1cage,
 		 uint64_t arg2, uint64_t arg2cage, uint64_t arg3,
 		 uint64_t arg3cage, uint64_t arg4, uint64_t arg4cage,
 		 uint64_t arg5, uint64_t arg5cage, uint64_t arg6,
