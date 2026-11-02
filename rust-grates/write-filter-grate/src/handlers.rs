@@ -31,7 +31,7 @@ pub extern "C" fn open_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
     let cage_id = filename_cage;
 
@@ -103,11 +103,11 @@ pub extern "C" fn write_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
 
     if is_fd_blocked(fd_cage, fd) {
-        return -EPERM;
+        return -(EPERM as i64);
     }
 
     match make_threei_call(
@@ -148,11 +148,11 @@ pub extern "C" fn writev_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
 
     if is_fd_blocked(fd_cage, fd) {
-        return -EPERM;
+        return -(EPERM as i64);
     }
 
     match make_threei_call(
@@ -193,11 +193,11 @@ pub extern "C" fn pwrite_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
 
     if is_fd_blocked(fd_cage, fd) {
-        return -EPERM;
+        return -(EPERM as i64);
     }
 
     match make_threei_call(
@@ -238,7 +238,7 @@ pub extern "C" fn fork_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
     let cage_id = arg1cage;
 
@@ -274,7 +274,7 @@ pub extern "C" fn fork_handler(
         let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cageid);
     }
 
-    child_cageid as i32
+    child_cageid as i64
 }
 
 pub extern "C" fn exec_handler(
@@ -291,7 +291,7 @@ pub extern "C" fn exec_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
     let cage_id = arg1cage;
 
@@ -339,7 +339,7 @@ pub extern "C" fn dup_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
     let cage_id = arg1cage;
     let fd = arg1;
@@ -397,7 +397,7 @@ pub extern "C" fn dup2_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
     let cage_id = arg1cage;
     let oldfd = arg1;
@@ -446,7 +446,7 @@ pub extern "C" fn close_handler(
     arg1: u64, arg1cage: u64, arg2: u64, arg2cage: u64,
     arg3: u64, arg3cage: u64, arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64, arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
     let cage_id = arg1cage;
     let fd = arg1;

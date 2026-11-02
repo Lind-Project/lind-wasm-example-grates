@@ -37,7 +37,7 @@ fn forward_with_rewrite(
     nr: u64, cage_id: u64,
     args: &[u64; 6], arg_cages: &[u64; 6],
     path_idx: usize, new_path: &CString,
-) -> i32 {
+) -> i64 {
     let grate = getcageid();
     let mut a = *args;
     let mut c = *arg_cages;
@@ -49,20 +49,20 @@ fn forward_with_rewrite(
         a[0], c[0], a[1], c[1], a[2], c[2],
         a[3], c[3], a[4], c[4], a[5], c[5], 0,
     ) {
-        Ok(r) => r,
+        Ok(r) => r as i64,
         Err(_) => -1,
     }
 }
 
 /// Forward a syscall without rewriting.
-fn forward(nr: u64, cage_id: u64, args: &[u64; 6], arg_cages: &[u64; 6]) -> i32 {
+fn forward(nr: u64, cage_id: u64, args: &[u64; 6], arg_cages: &[u64; 6]) -> i64 {
     let grate = getcageid();
     match make_threei_call(
         nr as u32, 0, grate, cage_id,
         args[0], arg_cages[0], args[1], arg_cages[1], args[2], arg_cages[2],
         args[3], arg_cages[3], args[4], arg_cages[4], args[5], arg_cages[5], 0,
     ) {
-        Ok(r) => r,
+        Ok(r) => r as i64,
         Err(_) => -1,
     }
 }
@@ -93,7 +93,7 @@ macro_rules! path_rewrite_handler {
             arg4: u64, arg4cage: u64,
             arg5: u64, arg5cage: u64,
             arg6: u64, arg6cage: u64,
-        ) -> i32 {
+        ) -> i64 {
             let args = [arg1, arg2, arg3, arg4, arg5, arg6];
             let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
             let cage_id = arg_cages[$path_idx];
@@ -129,7 +129,7 @@ macro_rules! two_path_rewrite_handler {
             arg4: u64, arg4cage: u64,
             arg5: u64, arg5cage: u64,
             arg6: u64, arg6cage: u64,
-        ) -> i32 {
+        ) -> i64 {
             let args = [arg1, arg2, arg3, arg4, arg5, arg6];
             let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
             let cage_id = arg_cages[$idx1];
@@ -167,7 +167,7 @@ macro_rules! two_path_rewrite_handler {
                 a[0], c[0], a[1], c[1], a[2], c[2],
                 a[3], c[3], a[4], c[4], a[5], c[5], 0,
             ) {
-                Ok(r) => r,
+                Ok(r) => r as i64,
                 Err(_) => -1,
             }
         }
@@ -197,7 +197,7 @@ pub extern "C" fn fork_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
     forward(SYS_CLONE, arg1cage, &args, &arg_cages)
@@ -211,7 +211,7 @@ pub extern "C" fn exec_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
     forward(SYS_EXEC, arg1cage, &args, &arg_cages)

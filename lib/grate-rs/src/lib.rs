@@ -35,7 +35,7 @@ pub enum GrateError {
     /// Error returned by `copy_handler_table_to_cage`.
     CopyHandlerError(i32),
     /// Make syscall error
-    MakeSyscallError(i32),
+    MakeSyscallError(i64),
 }
 
 /// The signature of a syscall handler function
@@ -53,7 +53,7 @@ pub type SyscallHandler = extern "C" fn(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32;
+) -> i64;
 
 /// Wrapper macro for calling libc/sysroot functions with uniform error handling, in the parent
 /// grate.
@@ -250,7 +250,7 @@ pub fn make_threei_call(
     arg6: u64,
     arg6cageid: u64,
     translate_errno: c_int,
-) -> Result<i32, GrateError> {
+) -> Result<i64, GrateError> {
     let ret = unsafe {
         make_syscall_impl(
             callnumber,
@@ -274,7 +274,7 @@ pub fn make_threei_call(
     };
 
     match ret {
-        std::i32::MIN..=-1 => Err(GrateError::MakeSyscallError(ret)),
+        i64::MIN..=-1 => Err(GrateError::MakeSyscallError(ret)),
         _ => Ok(ret),
     }
 }
@@ -335,7 +335,7 @@ pub unsafe extern "C" fn pass_fptr_to_wt(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> c_int {
+) -> i64 {
     if fn_ptr_uint == 0 {
         eprintln!("[grate] invalid function pointer");
         return -1;
@@ -356,7 +356,7 @@ pub unsafe extern "C" fn pass_fptr_to_wt(
             u64,
             u64,
             u64,
-        ) -> i32 = core::mem::transmute(fn_ptr_uint as usize);
+        ) -> i64 = core::mem::transmute(fn_ptr_uint as usize);
 
         fn_ptr(
             cageid, arg1, arg1cage, arg2, arg2cage, arg3, arg3cage, arg4, arg4cage, arg5, arg5cage,

@@ -51,7 +51,7 @@ pub struct ShmInfo {
     pub dump_capacity: u64,
 }
 
-fn call(nr: u64, args: [u64; 3], grate_ptr: [bool; 3]) -> i32 {
+fn call(nr: u64, args: [u64; 3], grate_ptr: [bool; 3]) -> i64 {
     let this_cage = getcageid();
     let cage = |is_ptr: bool| {
         if is_ptr {
@@ -76,7 +76,7 @@ fn call(nr: u64, args: [u64; 3], grate_ptr: [bool; 3]) -> i32 {
 
 /// The runtime's regions, or the negative errno if the runtime has none
 /// (`-ENOSYS` from a runtime that does not know these calls).
-pub fn info() -> Result<ShmInfo, i32> {
+pub fn info() -> Result<ShmInfo, i64> {
     let mut out = [0u64; 2];
     let ret = call(
         SYS_LIND_SHM_INFO,
@@ -93,7 +93,7 @@ pub fn info() -> Result<ShmInfo, i32> {
 }
 
 /// Copy `buf.len()` bytes of the preload region, starting at `offset`.
-pub fn read(offset: u64, buf: &mut [u8]) -> Result<(), i32> {
+pub fn read(offset: u64, buf: &mut [u8]) -> Result<(), i64> {
     if buf.is_empty() {
         return Ok(());
     }
@@ -106,7 +106,7 @@ pub fn read(offset: u64, buf: &mut [u8]) -> Result<(), i32> {
 }
 
 /// Write `bytes` (a dump archive) to the dump region and commit it.
-pub fn dump(bytes: &[u8]) -> Result<(), i32> {
+pub fn dump(bytes: &[u8]) -> Result<(), i64> {
     let ret = call(
         SYS_LIND_SHM_DUMP,
         [bytes.as_ptr() as u64, bytes.len() as u64, 0],
@@ -119,7 +119,7 @@ pub fn dump(bytes: &[u8]) -> Result<(), i32> {
 /// answer's length, or a negative errno (-EPERM unless this is the first
 /// cage's first call, -ENOSYS if the runtime signs nothing, -ENOSPC if `out`
 /// is too small).
-pub fn evidence(request: &[u8], out: &mut [u8]) -> Result<usize, i32> {
+pub fn evidence(request: &[u8], out: &mut [u8]) -> Result<usize, i64> {
     let this_cage = getcageid();
     let ret = raw_threei_syscall(
         SYS_LIND_EVIDENCE,
@@ -146,7 +146,7 @@ pub fn evidence(request: &[u8], out: &mut [u8]) -> Result<usize, i32> {
 /// Tell the runtime that the workload entered phase `n`, so that it can
 /// count from there what the run asks of the host. A runtime without phase
 /// marks fails the call, which is harmless.
-pub fn phase(n: u64) -> Result<(), i32> {
+pub fn phase(n: u64) -> Result<(), i64> {
     let ret = call(SYS_LIND_PHASE, [n, 0, 0], [false, false, false]);
     if ret < 0 { Err(ret) } else { Ok(()) }
 }

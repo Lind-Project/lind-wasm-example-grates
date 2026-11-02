@@ -5,14 +5,14 @@ use fdtables;
 fn forward(
     nr: u64, calling_cage: u64,
     args: &[u64; 6], arg_cages: &[u64; 6],
-) -> i32 {
+) -> i64 {
     let grate_cage = getcageid();
     match make_threei_call(
         nr as u32, 0, grate_cage, calling_cage,
         args[0], arg_cages[0], args[1], arg_cages[1], args[2], arg_cages[2],
         args[3], arg_cages[3], args[4], arg_cages[4], args[5], arg_cages[5], 0,
     ) {
-        Ok(r) => r,
+        Ok(r) => r as i64,
         Err(_) => -1,
     }
 }
@@ -22,7 +22,7 @@ pub extern "C" fn fork_handler(
     arg1: u64, arg1cage: u64, arg2: u64, arg2cage: u64,
     arg3: u64, arg3cage: u64, arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64, arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let ret = forward(SYS_CLONE, cage_id,
         &[arg1, arg2, arg3, arg4, arg5, arg6],
@@ -33,7 +33,7 @@ pub extern "C" fn fork_handler(
     if !is_thread_clone(arg1, arg1cage) {
         let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id);
     }
-    child_cage_id as i32
+    child_cage_id as i64
 }
 
 pub extern "C" fn exec_handler(
@@ -41,7 +41,7 @@ pub extern "C" fn exec_handler(
     arg1: u64, arg1cage: u64, arg2: u64, arg2cage: u64,
     arg3: u64, arg3cage: u64, arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64, arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     fdtables::empty_fds_for_exec(cage_id);
     for fd in 0..3u64 {

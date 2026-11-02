@@ -31,7 +31,7 @@ pub extern "C" fn open_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
     let cage_id = filename_cage;
 
@@ -48,7 +48,7 @@ pub extern "C" fn open_handler(
 
     if path_str == "/dev/null" {
         return match fdtables::get_unused_virtual_fd(cage_id, DEVNULL_KIND, 0, false, 0) {
-            Ok(fd) => fd as i32,
+            Ok(fd) => fd as i64,
             Err(_) => -24, // EMFILE
         };
     }
@@ -59,14 +59,14 @@ pub extern "C" fn open_handler(
         mode, mode_cage, arg4, arg4cage,
         arg5, arg5cage, arg6, arg6cage, 0,
     ) {
-        Ok(ret) => ret,
+        Ok(ret) => ret as i64,
         Err(_) => return -1,
     };
 
     if ret >= 0 {
         let _ = fdtables::get_specific_virtual_fd(cage_id, ret as u64, 0, ret as u64, false, 0);
     }
-    ret
+    ret as i64
 }
 
 pub extern "C" fn read_handler(
@@ -77,7 +77,7 @@ pub extern "C" fn read_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     if is_devnull_fd(fd_cage, fd) {
         return 0;
     }
@@ -89,7 +89,7 @@ pub extern "C" fn read_handler(
         count, count_cage, arg4, arg4cage,
         arg5, arg5cage, arg6, arg6cage, 0,
     ) {
-        Ok(ret) => ret,
+        Ok(ret) => ret as i64,
         Err(_) => -1,
     }
 }
@@ -102,9 +102,9 @@ pub extern "C" fn write_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     if is_devnull_fd(fd_cage, fd) {
-        return count as i32;
+        return count as i64;
     }
 
     let this_cage = getcageid();
@@ -114,7 +114,7 @@ pub extern "C" fn write_handler(
         count, count_cage, arg4, arg4cage,
         arg5, arg5cage, arg6, arg6cage, 0,
     ) {
-        Ok(ret) => ret,
+        Ok(ret) => ret as i64,
         Err(_) => -1,
     }
 }
@@ -127,7 +127,7 @@ pub extern "C" fn close_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = fd_cage;
 
     if is_devnull_fd(cage_id, fd) {
@@ -147,7 +147,7 @@ pub extern "C" fn close_handler(
     };
 
     let _ = fdtables::close_virtualfd(cage_id, fd);
-    ret
+    ret as i64
 }
 
 pub extern "C" fn fork_handler(
@@ -158,7 +158,7 @@ pub extern "C" fn fork_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
     let cage_id = arg1cage;
 
@@ -175,7 +175,7 @@ pub extern "C" fn fork_handler(
     if ret > 0 && !is_thread_clone(arg1, arg1cage) {
         let _ = fdtables::copy_fdtable_for_cage(cage_id, ret as u64);
     }
-    ret
+    ret as i64
 }
 
 pub extern "C" fn exec_handler(
@@ -186,7 +186,7 @@ pub extern "C" fn exec_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
     let cage_id = arg1cage;
 
@@ -201,7 +201,7 @@ pub extern "C" fn exec_handler(
         arg3, arg3cage, arg4, arg4cage,
         arg5, arg5cage, arg6, arg6cage, 0,
     ) {
-        Ok(ret) => ret,
+        Ok(ret) => ret as i64,
         Err(_) => -1,
     }
 }
@@ -214,7 +214,7 @@ pub extern "C" fn dup_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
     let cage_id = arg1cage;
     let fd = arg1;
@@ -237,7 +237,7 @@ pub extern "C" fn dup_handler(
             );
         }
     }
-    ret
+    ret as i64
 }
 
 pub extern "C" fn dup2_handler(
@@ -248,7 +248,7 @@ pub extern "C" fn dup2_handler(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
     let cage_id = arg1cage;
     let oldfd = arg1;
@@ -272,5 +272,5 @@ pub extern "C" fn dup2_handler(
             );
         }
     }
-    ret
+    ret as i64
 }

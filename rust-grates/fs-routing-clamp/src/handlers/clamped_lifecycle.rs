@@ -33,7 +33,7 @@ pub extern "C" fn register_handler_handler(
     arg5cage: u64,
     _arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     // Record the interposition request. This table is read later before execing the target cage to
     // register clamped syscall handlers.
     //.push((target_cage, syscall_nr, grate_id, handler_fn_ptr));
@@ -48,7 +48,7 @@ pub extern "C" fn register_handler_handler(
     )
 }
 
-pub fn register_target_handlers(target_cage: u64) -> i32 {
+pub fn register_target_handlers(target_cage: u64) -> i64 {
     let ns_cage = getcageid();
 
     // Reinstall namespace-grate handlers for the syscall set we clamp.
@@ -156,7 +156,7 @@ pub extern "C" fn exec_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let ns_cage = helpers::get_ns_cage_id();
 
     // Read the exec path from the cage's memory so boundary markers can be detected.
@@ -287,7 +287,7 @@ pub extern "C" fn fork_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let arg_cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
     let is_thread = is_thread_clone(arg1, arg1cage);
@@ -308,7 +308,7 @@ pub extern "C" fn fork_handler(
         helpers::clone_cage_cwd(arg1cage, child_cage_id);
     }
 
-    child_cage_id as i32
+    child_cage_id as i64
 }
 
 /// Handler for syscall 60 (exit).
@@ -328,7 +328,7 @@ pub extern "C" fn exit_handler(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     // Remove this cage's routing table entries.
     helpers::remove_cage_state(arg1cage);
 

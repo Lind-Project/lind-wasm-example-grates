@@ -40,7 +40,7 @@ macro_rules! socket_translate_handler {
             arg5cage: u64,
             arg6: u64,
             arg6cage: u64,
-        ) -> i32 {
+        ) -> i64 {
             let thiscage = getcageid();
 
             let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
@@ -88,10 +88,10 @@ macro_rules! socket_translate_handler {
                     cages[5],
                     0,
                 ) {
-                    Ok(ret) => ret,
+                    Ok(ret) => ret as i64,
                     // Propagate the actual -errno from the kernel
                     // instead of collapsing to -1 / EPERM.
-                    Err(::grate_rs::GrateError::MakeSyscallError(n)) => n,
+                    Err(::grate_rs::GrateError::MakeSyscallError(n)) => n as i64,
                     Err(_) => -1,
                 }
             }
@@ -123,7 +123,7 @@ macro_rules! socket_untranslate_handler {
             arg5cage: u64,
             arg6: u64,
             arg6cage: u64,
-        ) -> i32 {
+        ) -> i64 {
             let thiscage = getcageid();
             let args = [arg1, arg2, arg3, arg4, arg5, arg6];
             let cages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
@@ -157,9 +157,9 @@ macro_rules! socket_untranslate_handler {
                 arg6cage,
                 0,
             ) {
-                Ok(r) => r,
-                Err(::grate_rs::GrateError::MakeSyscallError(n)) => n,
-                Err(_) => return -(::libc::EIO as i32),
+                Ok(r) => r as i64,
+                Err(::grate_rs::GrateError::MakeSyscallError(n)) => n as i64,
+                Err(_) => return -(::libc::EIO as i64),
             };
 
             // On success, untranslate the returned peer sockaddr (strip chroot from AF_UNIX).

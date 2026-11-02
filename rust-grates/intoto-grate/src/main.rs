@@ -54,10 +54,10 @@ use sha2::{Digest as _, Sha256};
 use sign::{Signer, hex};
 use statement::{Source, products_statement, statement, summarize};
 
-const EINVAL: i32 = 22;
-const ENOSPC: i32 = 28;
-const EPERM: i32 = 1;
-const EIO: i32 = 5;
+const EINVAL: i64 = 22;
+const ENOSPC: i64 = 28;
+const EPERM: i64 = 1;
+const EIO: i64 = 5;
 
 unsafe extern "C" {
     fn getrandom(buf: *mut c_void, buflen: usize, flags: u32) -> isize;
@@ -162,7 +162,7 @@ impl Source for CageMemory {
 }
 
 /// Copy `bytes` into the caller's buffer; returns their length or -ENOSPC.
-fn write_back(cage: u64, addr: u64, capacity: u64, bytes: &[u8]) -> i32 {
+fn write_back(cage: u64, addr: u64, capacity: u64, bytes: &[u8]) -> i64 {
     if bytes.len() as u64 > capacity || bytes.len() > i32::MAX as usize {
         return -ENOSPC;
     }
@@ -177,7 +177,7 @@ fn write_back(cage: u64, addr: u64, capacity: u64, bytes: &[u8]) -> i32 {
         bytes.len() as u64,
         0,
     ) {
-        Ok(_) => bytes.len() as i32,
+        Ok(_) => bytes.len() as i64,
         Err(_) => -EIO,
     }
 }
@@ -221,7 +221,7 @@ pub extern "C" fn attest_handler(
     _arg5cage: u64,
     step_addr: u64,
     step_cage: u64,
-) -> i32 {
+) -> i64 {
     let caller = op_cage & !GRATE_MEMORY_FLAG;
     if caller != CHILD.load(Ordering::SeqCst) {
         return -EPERM;

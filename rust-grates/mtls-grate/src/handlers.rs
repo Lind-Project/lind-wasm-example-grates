@@ -172,7 +172,7 @@ pub extern "C" fn connect_syscall(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
 
     let real_fd = fd;
@@ -274,7 +274,7 @@ pub extern "C" fn accept_syscall(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
 
     let real_listen_fd = fd;
@@ -362,7 +362,7 @@ pub extern "C" fn accept_syscall(
         return -1;
     }
 
-    real_new_fd as i32
+    real_new_fd as i64
 }
 
 pub extern "C" fn read_syscall(
@@ -379,7 +379,7 @@ pub extern "C" fn read_syscall(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
 
     // translate the virtual fd to retrieve the session info
@@ -474,7 +474,7 @@ pub extern "C" fn read_syscall(
         return -1;
     }
 
-    bytes_read as i32
+    bytes_read as i64
 }
 
 pub extern "C" fn write_syscall(
@@ -491,7 +491,7 @@ pub extern "C" fn write_syscall(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
 
     // translate the virtual fd
@@ -591,7 +591,7 @@ pub extern "C" fn write_syscall(
         }
     };
 
-    bytes_written as i32
+    bytes_written as i64
 }
 
 pub extern "C" fn fork_syscall(
@@ -608,7 +608,7 @@ pub extern "C" fn fork_syscall(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
     let parent_cage_id = cageid;
 
@@ -653,7 +653,7 @@ pub extern "C" fn fork_syscall(
         let _ = fdtables::copy_fdtable_for_cage(parent_cage_id, child_cageid);
     }
 
-    child_cageid as i32
+    child_cageid as i64
 }
 
 pub extern "C" fn exec_syscall(
@@ -670,7 +670,7 @@ pub extern "C" fn exec_syscall(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
 
     // exec wipes the FD table. We must drop all session refcounts held by this cage.
@@ -725,7 +725,7 @@ pub extern "C" fn dup_syscall(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
     let oldfd = arg1;
 
@@ -783,7 +783,7 @@ pub extern "C" fn dup2_syscall(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
     let oldfd = arg1;
     let newfd = arg2;
@@ -851,7 +851,7 @@ pub extern "C" fn close_syscall(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let this_cage = getcageid();
 
     if let Ok(entry) = fdtables::translate_virtual_fd(cageid, fd) {

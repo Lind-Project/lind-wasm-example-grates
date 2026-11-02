@@ -104,7 +104,7 @@ impl PipeBuffer {
     ///   0: EOF (all write ends closed and buffer drained)
     ///   -4: EINTR (signal queued for the calling cage)
     ///   -11: EAGAIN (nonblocking mode, no data available)
-    pub fn read(&self, dst: &mut [u8], count: usize, nonblocking: bool) -> i32 {
+    pub fn read(&self, dst: &mut [u8], count: usize, nonblocking: bool) -> i64 {
         let read_count = count.min(dst.len());
 
         loop {
@@ -112,7 +112,7 @@ impl PipeBuffer {
             // (SPSC contract — one consumer per pipe).
             let n = unsafe { (*self.consumer.get()).pop_slice(&mut dst[..read_count]) };
             if n > 0 {
-                return n as i32;
+                return n as i64;
             }
 
             // Buffer is empty. Check for EOF.
@@ -144,7 +144,7 @@ impl PipeBuffer {
     ///       per POSIX write(2) semantics)
     ///   -11: EAGAIN (nonblocking mode, pipe full and nothing written)
     ///   -32: EPIPE (all read ends closed — broken pipe)
-    pub fn write(&self, src: &[u8], count: usize, nonblocking: bool) -> i32 {
+    pub fn write(&self, src: &[u8], count: usize, nonblocking: bool) -> i64 {
         if self.read_refs.load(Ordering::Acquire) == 0 {
             return -32; // EPIPE
         }
@@ -171,7 +171,7 @@ impl PipeBuffer {
 
             if nonblocking {
                 if total_written > 0 {
-                    return total_written as i32;
+                    return total_written as i64;
                 }
                 return -11; // EAGAIN
             }
@@ -179,13 +179,13 @@ impl PipeBuffer {
             // Signal-aware sleep — see read() above for rationale.
             if nap_signal_aware() {
                 if total_written > 0 {
-                    return total_written as i32;
+                    return total_written as i64;
                 }
                 return -4; // EINTR
             }
         }
 
-        total_written as i32
+        total_written as i64
     }
 
     /// Write into the pipe by copying directly from another cage's
@@ -210,7 +210,7 @@ impl PipeBuffer {
         count: usize,
         nonblocking: bool,
         this_cage: u64,
-    ) -> i32 {
+    ) -> i64 {
         if self.read_refs.load(Ordering::Acquire) == 0 {
             return -32; // EPIPE
         }
@@ -274,19 +274,19 @@ impl PipeBuffer {
             }
             if nonblocking {
                 if total_written > 0 {
-                    return total_written as i32;
+                    return total_written as i64;
                 }
                 return -11; // EAGAIN
             }
             if nap_signal_aware() {
                 if total_written > 0 {
-                    return total_written as i32;
+                    return total_written as i64;
                 }
                 return -4; // EINTR
             }
         }
 
-        total_written as i32
+        total_written as i64
     }
 
     /// Read from the pipe by copying directly into another cage's
@@ -305,7 +305,7 @@ impl PipeBuffer {
         count: usize,
         nonblocking: bool,
         this_cage: u64,
-    ) -> i32 {
+    ) -> i64 {
         if count == 0 {
             return 0;
         }
@@ -352,7 +352,7 @@ impl PipeBuffer {
             };
 
             if popped > 0 {
-                return popped as i32;
+                return popped as i64;
             }
 
             // Buffer empty — check EOF, then nonblocking / signal semantics.
@@ -427,11 +427,11 @@ mod tests {
 
         let data = b"hello pipe";
         let nw = pipe.write(data, data.len(), false);
-        assert_eq!(nw, data.len() as i32);
+        assert_eq!(nw, data.len() as i64);
 
         let mut buf = [0u8; 64];
         let nr = pipe.read(&mut buf, 64, false);
-        assert_eq!(nr, data.len() as i32);
+        assert_eq!(nr, data.len() as i64);
         assert_eq!(&buf[..data.len()], data);
     }
 

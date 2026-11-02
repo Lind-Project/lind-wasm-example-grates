@@ -26,7 +26,7 @@ fn main() {
                  arg5cage: u64,\n\
                  arg6: u64,\n\
                  arg6cage: u64,\n\
-             ) -> i32 {{\n\
+             ) -> i64 {{\n\
                  dispatch_handler(\n\
                      {n}, cageid, arg1, arg1cage, arg2, arg2cage, arg3, arg3cage,\n\
                      arg4, arg4cage, arg5, arg5cage, arg6, arg6cage,\n\

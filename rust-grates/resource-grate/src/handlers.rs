@@ -34,7 +34,7 @@ fn forward(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     match make_threei_call(
         syscall_nr as u32,
         0,
@@ -48,14 +48,14 @@ fn forward(
         arg6, arg6cage,
         0,
     ) {
-        Ok(ret) => ret,
-        Err(GrateError::MakeSyscallError(e)) => e,
+        Ok(ret) => ret as i64,
+        Err(GrateError::MakeSyscallError(e)) => e as i64,
         Err(_) => -1,
     }
 }
 
 /// Round bytes up to 4096-byte disk blocks (repy convention).
-fn block_charge(bytes: i32) -> f64 {
+fn block_charge(bytes: i64) -> f64 {
     ((bytes as f64) / 4096.0).ceil() * 4096.0
 }
 
@@ -133,7 +133,7 @@ fn charge_read_pre(cage_id: u64, fd: u64) {
     }
 }
 
-fn charge_read_post(cage_id: u64, fd: u64, bytes: i32) {
+fn charge_read_post(cage_id: u64, fd: u64, bytes: i64) {
     if bytes <= 0 { return; }
     let nanny = NANNY.get().unwrap();
     if fd_kind(cage_id, fd) == FD_SOCKET {
@@ -167,7 +167,7 @@ fn charge_write_pre(cage_id: u64, fd: u64) {
     }
 }
 
-fn charge_write_post(cage_id: u64, fd: u64, bytes: i32) {
+fn charge_write_post(cage_id: u64, fd: u64, bytes: i64) {
     if bytes <= 0 { return; }
     let nanny = NANNY.get().unwrap();
     let fd_i32 = fd as i32;
@@ -199,7 +199,7 @@ pub extern "C" fn handle_open(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let flags = arg2 as u32;
     let nanny = NANNY.get().unwrap();
@@ -249,7 +249,7 @@ pub extern "C" fn handle_close(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let fd = arg1;
     let nanny = NANNY.get().unwrap();
@@ -292,7 +292,7 @@ pub extern "C" fn handle_read(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     charge_read_pre(cage_id, arg1);
 
@@ -315,7 +315,7 @@ pub extern "C" fn handle_write(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     charge_write_pre(cage_id, arg1);
 
@@ -338,7 +338,7 @@ pub extern "C" fn handle_pread64(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     charge_read_pre(cage_id, arg1);
 
@@ -361,7 +361,7 @@ pub extern "C" fn handle_pwrite64(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     charge_write_pre(cage_id, arg1);
 
@@ -384,7 +384,7 @@ pub extern "C" fn handle_readv(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     charge_read_pre(cage_id, arg1);
 
@@ -407,7 +407,7 @@ pub extern "C" fn handle_writev(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     charge_write_pre(cage_id, arg1);
 
@@ -434,7 +434,7 @@ pub extern "C" fn handle_socket(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
 
     let ret = forward(
@@ -461,7 +461,7 @@ pub extern "C" fn handle_bind(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let nanny = NANNY.get().unwrap();
 
     // Check port against both allowlists.
@@ -500,7 +500,7 @@ pub extern "C" fn handle_listen(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let nanny = NANNY.get().unwrap();
 
@@ -539,7 +539,7 @@ pub extern "C" fn handle_accept(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let nanny = NANNY.get().unwrap();
 
@@ -588,7 +588,7 @@ pub extern "C" fn handle_connect(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     let nanny = NANNY.get().unwrap();
 
@@ -647,7 +647,7 @@ pub extern "C" fn handle_sendto(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     charge_write_pre(cage_id, arg1);
 
@@ -670,7 +670,7 @@ pub extern "C" fn handle_recvfrom(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     charge_read_pre(cage_id, arg1);
 
@@ -693,7 +693,7 @@ pub extern "C" fn handle_sendmsg(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     charge_write_pre(cage_id, arg1);
 
@@ -716,7 +716,7 @@ pub extern "C" fn handle_recvmsg(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let cage_id = arg1cage;
     charge_read_pre(cage_id, arg1);
 
@@ -744,7 +744,7 @@ pub extern "C" fn handle_clone(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let nanny = NANNY.get().unwrap();
     let is_thread = is_thread_clone(arg1, arg1cage);
 
@@ -782,7 +782,7 @@ pub extern "C" fn handle_exit(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let nanny = NANNY.get().unwrap();
     nanny.tattle_remove_item("events");
 
@@ -806,7 +806,7 @@ pub extern "C" fn handle_getrandom(
     arg4: u64, arg4cage: u64,
     arg5: u64, arg5cage: u64,
     arg6: u64, arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let nanny = NANNY.get().unwrap();
 
     nanny.tattle_quantity("random", 0.0);

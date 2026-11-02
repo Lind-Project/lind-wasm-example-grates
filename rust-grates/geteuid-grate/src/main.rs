@@ -22,7 +22,7 @@ pub extern "C" fn geteuid_handler(
     _arg5cage: u64,
     _arg6: u64,
     _arg6cage: u64,
-) -> i32 {
+) -> i64 {
     // Return a stubbed constant value for euid.
     3000
 }

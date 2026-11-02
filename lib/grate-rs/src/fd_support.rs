@@ -205,7 +205,7 @@ fn fd_translation_handler_impl(
     arg5cage: u64,
     arg6: u64,
     arg6cage: u64,
-) -> i32 {
+) -> i64 {
     let mut args = [arg1, arg2, arg3, arg4, arg5, arg6];
     let mut argcages = [arg1cage, arg2cage, arg3cage, arg4cage, arg5cage, arg6cage];
 
@@ -279,7 +279,7 @@ fn fd_translation_handler_impl(
                     }
 
                     Err(errno_ret) => {
-                        return -(errno_ret as i32);
+                        return -(errno_ret as i64);
                     }
                 }
             }
@@ -295,7 +295,7 @@ fn fd_translation_handler_impl(
                 old_fd_entry = match fdtables::translate_virtual_fd(argcages[spec.index], args[spec.index]) {
                     Ok(entry) => entry,
                     Err(_) => {
-                        return -(EBADF as i32);
+                        return -(EBADF as i64);
                     }
                 };
                 old_fd_cageid = argcages[spec.index];
@@ -319,7 +319,7 @@ fn fd_translation_handler_impl(
                     }
 
                     Err(errno_ret) => {
-                        return -(errno_ret as i32);
+                        return -(errno_ret as i64);
                     }
                 }
             }
@@ -375,7 +375,7 @@ fn fd_translation_handler_impl(
                             }
 
                             Err(errno_ret) => {
-                                return -(errno_ret as i32);
+                                return -(errno_ret as i64);
                             }
                         }
                     }
@@ -399,7 +399,7 @@ fn fd_translation_handler_impl(
                     }
 
                     Err(errno_ret) => {
-                        return -(errno_ret as i32);
+                        return -(errno_ret as i64);
                     }
                 }
             }
@@ -512,7 +512,7 @@ fn fd_translation_handler_impl(
     ) {
         Ok(ret) => ret,
         Err(GrateError::MakeSyscallError(ret)) => ret,
-        Err(_) => ENOSYS,
+        Err(_) => ENOSYS as i64,
     };
 
     // println!("[fd-translate] syscall={}, ret={}", syscall_num, ret);
@@ -541,8 +541,8 @@ fn fd_translation_handler_impl(
             should_cloexec,
             0,
         ) {
-            Ok(_) => return new_fd as i32,
-            Err(_) => return -(EMFILE as i32),
+            Ok(_) => return new_fd as i64,
+            Err(_) => return -(EMFILE as i64),
         }
     }
 
@@ -556,8 +556,8 @@ fn fd_translation_handler_impl(
             should_cloexec,
             0,
         ) {
-            Ok(vfd) => vfd as i32,
-            Err(_) => -(EMFILE as i32),
+            Ok(vfd) => vfd as i64,
+            Err(_) => -(EMFILE as i64),
         };
     }
 
@@ -705,7 +705,7 @@ macro_rules! define_fd_handler {
             arg5cage: u64,
             arg6: u64,
             arg6cage: u64,
-        ) -> i32 {
+        ) -> i64 {
             fd_translation_handler_impl(
                 $syscall_num,
                 $fd_specs,
@@ -747,7 +747,7 @@ macro_rules! define_fd_creation_handler {
             arg5cage: u64,
             arg6: u64,
             arg6cage: u64,
-        ) -> i32 {
+        ) -> i64 {
             fd_creation_handler_impl(
                 $syscall_num,
                 $fd_specs,
@@ -764,7 +764,7 @@ macro_rules! define_fd_creation_handler {
                 arg5cage,
                 arg6,
                 arg6cage,
-            )
+            ) as i64
         }
     };
 }
