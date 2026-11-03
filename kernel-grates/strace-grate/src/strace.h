@@ -94,7 +94,7 @@ extern syscall_handler_t syscall_handler_table[MAX_SYSCALLS];
          *   (nr, primary_cage, arg_cage[6], args[6])                           \
          * primary_cage is the TARGET cage (drives thread-op / mm-op routing).  \
          */                                                                     \
-        ret = make_threei_call((uint32_t)(num), cageid, arg_cage, fwd);         \
+        ret = make_threei_call((uint32_t)(num), cageid, arg_cage, args);         \
                                                                                 \
         for (int i = 0; i < 6; i++)                                             \
             free(strbuf[i]);                                                    \

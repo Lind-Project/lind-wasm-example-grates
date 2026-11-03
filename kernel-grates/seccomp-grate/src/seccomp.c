@@ -5,21 +5,20 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* default every syscall to blacklist for safety */
+// default every syscall to blacklist for safety
 seccomp_mode_t syscall_mode[MAX_SYSCALLS] = {BL};
 
-/*
- * Blacklisted syscall handler — current 3i ABI. Denies the call with -EPERM.
- * All arguments are ignored: a blacklisted syscall is refused regardless of
- * its arguments.
- */
-long blacklist_handler(pid_t cageid, const int arg_cage[6],
-                       unsigned long args[6]) {
-  (void)cageid; (void)arg_cage; (void)args;
-  return -EPERM;
+// blacklisted syscall handler: deny the call. Returning -EPERM makes the cage's
+// syscall return -1 with errno == EPERM (3i hands the raw negative errno back).
+long blacklist_handler(pid_t cage, const int arg_cage[6],
+		       unsigned long args[6]) {
+	(void)cage;
+	(void)arg_cage;
+	(void)args;
+	return -EPERM;
 }
 
-/* build the name->number map from the X-macro list (now kernel __NR_*) */
+// creates syscall map
 static const syscall_entry_t syscall_map[] = {
 #define X(name, num) {"SYS_" #name, num},
     SYSCALL_LIST
@@ -28,84 +27,132 @@ static const syscall_entry_t syscall_map[] = {
 
 #define NUM_SYSCALLS (sizeof(syscall_map) / sizeof(syscall_map[0]))
 
+// helper function to clean whitespaces
 char *trim_whitespace(char *str) {
-  char *end;
-  while (isspace((unsigned char)*str)) str++;
-  if (*str == 0) return str;
-  end = str + strlen(str) - 1;
-  while (end > str && isspace((unsigned char)*end)) end--;
-  end[1] = '\0';
-  return str;
+	char *end;
+	while (isspace((unsigned char)*str))
+		str++;
+	if (*str == 0)
+		return str;
+	end = str + strlen(str) - 1;
+	while (end > str && isspace((unsigned char)*end))
+		end--;
+	end[1] = '\0';
+	return str;
 }
 
+// this function parses and validates the config file
 void parse_config(const char *filename) {
-  FILE *fp = fopen(filename, "r");
-  if (!fp) { perror("Failed to open config file"); exit(EXIT_FAILURE); }
+	FILE *fp = fopen(filename, "r");
+	if (!fp) {
+		perror("Failed to open config file");
+		exit(EXIT_FAILURE);
+	}
 
-  char line[256];
-  seccomp_mode_t current_mode = MODE_UNASSIGNED;
-  seccomp_mode_t default_mode = BL;
-  int explicitly_set[MAX_SYSCALLS] = {0};
-  int line_num = 0;
+	char line[256];
 
-  while (fgets(line, sizeof(line), fp)) {
-    line_num++;
-    line[strcspn(line, "\r\n")] = 0;
-    char *trimmed = trim_whitespace(line);
+	seccomp_mode_t current_mode = MODE_UNASSIGNED;
+	seccomp_mode_t default_mode = BL;
 
-    if (trimmed[0] == '\0' || trimmed[0] == ';' || trimmed[0] == '#') continue;
+	int explicitly_set[MAX_SYSCALLS] = {0};
+	int line_num = 0;
 
-    if (trimmed[0] == '[') {
-      size_t len = strlen(trimmed);
-      if (trimmed[len - 1] != ']') {
-        fprintf(stderr, "Config Error: Malformed section header on line %d\n", line_num);
-        exit(EXIT_FAILURE);
-      }
-      if (strcmp(trimmed, "[whitelist]") == 0) { current_mode = WL; continue; }
-      if (strcmp(trimmed, "[blacklist]") == 0) { current_mode = BL; continue; }
-      if (strcmp(trimmed, "[default]") == 0)   { current_mode = MODE_DEFAULT; continue; }
-      fprintf(stderr, "Config Error: Unknown section '%s' on line %d\n", trimmed, line_num);
-      exit(EXIT_FAILURE);
-    }
+	while (fgets(line, sizeof(line), fp)) {
+		line_num++;
+		line[strcspn(line, "\r\n")] = 0;
+		char *trimmed = trim_whitespace(line);
 
-    if (current_mode == MODE_UNASSIGNED) {
-      fprintf(stderr, "Config Error: Orphaned entry '%s' before any section on line %d\n", trimmed, line_num);
-      exit(EXIT_FAILURE);
-    }
+		// skip comments, empty lines
+		if (trimmed[0] == '\0' || trimmed[0] == ';' || trimmed[0] == '#')
+			continue;
 
-    if (current_mode == MODE_DEFAULT) {
-      if (strcmp(trimmed, "whitelist") == 0) default_mode = WL;
-      else if (strcmp(trimmed, "blacklist") == 0) default_mode = BL;
-      else { fprintf(stderr, "Config Error: Invalid default mode '%s' on line %d\n", trimmed, line_num); exit(EXIT_FAILURE); }
-      continue;
-    }
+		// handle section headers
+		if (trimmed[0] == '[') {
+			size_t len = strlen(trimmed);
+			if (trimmed[len - 1] != ']') {
+				fprintf(stderr,
+					"Config Error: Malformed section header on line %d\n",
+					line_num);
+				exit(EXIT_FAILURE);
+			}
+			if (strcmp(trimmed, "[whitelist]") == 0) {
+				current_mode = WL;
+				continue;
+			}
+			if (strcmp(trimmed, "[blacklist]") == 0) {
+				current_mode = BL;
+				continue;
+			}
+			if (strcmp(trimmed, "[default]") == 0) {
+				current_mode = MODE_DEFAULT;
+				continue;
+			}
 
-    int found = 0;
-    for (size_t i = 0; i < NUM_SYSCALLS; i++) {
-      if (strcmp(trimmed, syscall_map[i].name) == 0) {
-        int sys_num = syscall_map[i].num;
-        if (sys_num < 0 || sys_num >= MAX_SYSCALLS) {   /* guard the index */
-          fprintf(stderr, "Config Error: syscall '%s' number %d out of range on line %d\n", trimmed, sys_num, line_num);
-          exit(EXIT_FAILURE);
-        }
-        if (explicitly_set[sys_num]) {
-          fprintf(stderr, "Config Error: Duplicate definition of syscall '%s' on line %d\n", trimmed, line_num);
-          exit(EXIT_FAILURE);
-        }
-        syscall_mode[sys_num] = current_mode;
-        explicitly_set[sys_num] = 1;
-        found = 1;
-        break;
-      }
-    }
+			fprintf(stderr,
+				"Config Error: Unknown section '%s' on line %d\n",
+				trimmed, line_num);
+			exit(EXIT_FAILURE);
+		}
 
-    if (!found) {
-      fprintf(stderr, "Config Error: Unknown syscall '%s' on line %d\n", trimmed, line_num);
-      exit(EXIT_FAILURE);
-    }
-  }
-  fclose(fp);
+		// catch orphaned entries
+		if (current_mode == MODE_UNASSIGNED) {
+			fprintf(stderr,
+				"Config Error: Orphaned entry '%s' found before any section on "
+				"line %d\n",
+				trimmed, line_num);
+			exit(EXIT_FAILURE);
+		}
 
-  for (int i = 0; i < MAX_SYSCALLS; i++)
-    if (!explicitly_set[i]) syscall_mode[i] = default_mode;
+		// handle [default] section
+		if (current_mode == MODE_DEFAULT) {
+			if (strcmp(trimmed, "whitelist") == 0)
+				default_mode = WL;
+			else if (strcmp(trimmed, "blacklist") == 0)
+				default_mode = BL;
+			else {
+				fprintf(stderr,
+					"Config Error: Invalid default mode '%s' on line %d\n",
+					trimmed, line_num);
+				exit(EXIT_FAILURE);
+			}
+			continue;
+		}
+
+		// handle syscall mapping and validation
+		int found = 0;
+		for (size_t i = 0; i < NUM_SYSCALLS; i++) {
+			if (strcmp(trimmed, syscall_map[i].name) == 0) {
+				int sys_num = syscall_map[i].num;
+
+				// detect duplicate syscall definitions
+				if (explicitly_set[sys_num]) {
+					fprintf(
+					    stderr,
+					    "Config Error: Duplicate definition of syscall '%s' on line %d\n",
+					    trimmed, line_num);
+					exit(EXIT_FAILURE);
+				}
+
+				syscall_mode[sys_num] = current_mode;
+				explicitly_set[sys_num] = 1;
+				found = 1;
+				break;
+			}
+		}
+
+		if (!found) {
+			fprintf(stderr,
+				"Config Error: Unknown syscall '%s' on line %d\n",
+				trimmed, line_num);
+			exit(EXIT_FAILURE);
+		}
+	}
+	fclose(fp);
+
+	// backfill unconfigured syscalls with the default rule
+	for (int i = 0; i < MAX_SYSCALLS; i++) {
+		if (!explicitly_set[i]) {
+			syscall_mode[i] = default_mode;
+		}
+	}
 }

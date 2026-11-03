@@ -1,265 +1,417 @@
-#include <dirent.h>
-#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <unistd.h>
-#include <semaphore.h>
-#include <sys/mman.h>
-#include <sys/syscall.h>
 
-#include <threei.h>
+#include "threei.h"
 #include "imfs.h"
 
+/* Stores list of files on host that need to be copied in / out of the IMFS. */
 const char *preload_files;
 const char *dump_files;
 
-static void dump_outputs(const char *env) {
-    if (!env || strlen(env) == 0) return;
-    char *list = strdup(env);
-    if (!list) return;
-    char *entry = strtok(list, ";");
-    while (entry) {
-        while (*entry == ' ' || *entry == '\t') entry++;
-        if (strlen(entry) > 0) {
-            char *sep = strchr(entry, '=');
-            char *imfs_path = entry, *actual_path = entry;
-            if (sep) { *sep = '\0'; actual_path = sep + 1; }
-            if (strlen(imfs_path) > 0 && strlen(actual_path) > 0) {
-                fprintf(stderr, "dumping %s -> %s\n", imfs_path, actual_path);
-                dump_file(imfs_path, actual_path);
-            }
-        }
-        entry = strtok(NULL, ";");
-    }
-    free(list);
+/*
+ * Map a 3i cage identity (the cage's real PID, as delivered in the handler's
+ * `cage` argument) to a small dense IMFS cage index in [0, MAX_PROCS).
+ *
+ * IMFS keys its per-cage FD tables (g_fdtable[MAX_PROCS][...]) by a small
+ * index, whereas 3i hands us the cage's PID. Using the PID directly indexes
+ * far past the table and reads a garbage FileDesc. First cage seen gets index
+ * 0, which matches the index preloads() uses to populate the tree. The lock
+ * keeps the recv and ring servicing threads from racing on the table.
+ *
+ * NB: the PID stays the IN/OUT cage for copy_data_between_cages (the kernel
+ * copies by PID); only the IMFS library argument is the mapped index.
+ */
+static int cage_index(pid_t pid) {
+	static pid_t map[MAX_PROCS];
+	static int count;
+	static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+	int idx = 0;
+
+	pthread_mutex_lock(&lock);
+	for (int i = 0; i < count; i++) {
+		if (map[i] == pid) {
+			idx = i;
+			goto out;
+		}
+	}
+	if (count < MAX_PROCS) {
+		map[count] = pid;
+		idx = count++;
+	}
+out:
+	pthread_mutex_unlock(&lock);
+	return idx;
 }
 
-static inline void sys_log_args(const char *name, unsigned long a1,
-                                unsigned long a2, unsigned long a3,
-                                unsigned long a4, unsigned long a5,
-                                unsigned long a6, long ret) {
-    char buf[512]; size_t pos = 0;
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "%s (", name);
-    unsigned long args[6] = {a1, a2, a3, a4, a5, a6};
-    int first = 1;
-    for (int i = 0; i < 6; i++) {
-        if (args[i] == 0xdeadbeefdeadbeefULL) continue;
-        if (!first) pos += snprintf(buf + pos, sizeof(buf) - pos, ", ");
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "%lu", args[i]);
-        first = 0;
-    }
-    snprintf(buf + pos, sizeof(buf) - pos, ") = %ld\n", ret);
-    fprintf(stderr, "%s", buf);
+/*
+ * Resolve the cage that actually owns pointer argument `i`. The kernel's
+ * convention (threei syscall.c) is that arg_cage[i] <= 0 or arg_cage[i] ==
+ * primary means the pointer lives in the primary (calling) cage; a positive,
+ * different value means a transient grate remapped it into that cage. So for a
+ * normal direct cage syscall arg_cage[] is all zeros and the owner is `cage`.
+ */
+static inline pid_t arg_owner(const int ac[6], int i, pid_t cage) {
+	return (ac[i] <= 0 || ac[i] == cage) ? cage : (pid_t)ac[i];
+}
+
+static void dump_outputs(const char *env) {
+	if (!env || strlen(env) == 0)
+		return;
+
+	char *list = strdup(env);
+	if (!list)
+		return;
+
+	char *entry = strtok(list, ";");
+	while (entry) {
+		while (*entry == ' ' || *entry == '\t')
+			entry++;
+
+		if (strlen(entry) > 0) {
+			char *sep = strchr(entry, '=');
+			char *imfs_path = entry;
+			char *actual_path = entry;
+
+			if (sep) {
+				*sep = '\0';
+				actual_path = sep + 1;
+			}
+
+			if (strlen(imfs_path) > 0 && strlen(actual_path) > 0) {
+				fprintf(stderr, "dumping %s -> %s\n", imfs_path,
+					actual_path);
+				dump_file(imfs_path, actual_path);
+			}
+		}
+
+		entry = strtok(NULL, ";");
+	}
+
+	free(list);
+}
+
+/* Logging helper: prints the syscall name, its args and the return value. */
+static inline void sys_log_args(const char *name, unsigned long a0,
+				unsigned long a1, unsigned long a2,
+				unsigned long a3, unsigned long a4,
+				unsigned long a5, long ret) {
+	char buf[512];
+	size_t pos = 0;
+	unsigned long args[6] = { a0, a1, a2, a3, a4, a5 };
+	int first = 1;
+
+	pos += snprintf(buf + pos, sizeof(buf) - pos, "%s (", name);
+	for (int i = 0; i < 6; i++) {
+		if (args[i] == 0xdeadbeefdeadbeefULL)
+			continue;
+		if (!first)
+			pos += snprintf(buf + pos, sizeof(buf) - pos, ", ");
+		pos += snprintf(buf + pos, sizeof(buf) - pos, "%lu", args[i]);
+		first = 0;
+	}
+	snprintf(buf + pos, sizeof(buf) - pos, ") = %ld\n", ret);
+	fprintf(stderr, "%s", buf);
 }
 
 #ifdef DIAG
-#define SYS_LOG(name, ret) \
-    sys_log_args((name), args[0], args[1], args[2], args[3], args[4], args[5], (ret))
+#define SYS_LOG(name, ret)                                                     \
+	sys_log_args((name), a[0], a[1], a[2], a[3], a[4], a[5], (long)(ret))
 #else
 #define SYS_LOG(...) ((void)0)
 #endif
 
-/* ---- handlers: current ABI (pid_t cageid, const int arg_cage[6],
- *                              unsigned long args[6]) ---- */
+/*
+ * FS syscall handlers. IMFS registers open, lseek, read, write, close, fcntl,
+ * unlink, pread and pwrite.
+ */
+
+long open_grate(pid_t cage, const int ac[6], unsigned long a[6]) {
+	int thiscage = getpid();
+	int cageid = cage_index(cage);
+
+	/* Pull the path string out of the cage that owns the pointer (ac[0]). */
+	char *pathname = malloc(256);
+	if (!pathname) {
+		perror("malloc failed");
+		exit(EXIT_FAILURE);
+	}
+
+	copy_data_between_cages(arg_owner(ac, 0, cage), a[0], thiscage,
+				(unsigned long)pathname, 256, THREEI_COPY_STRNCPY);
+
+	long ifd = imfs_open(cageid, pathname, (int)a[1], (mode_t)a[2]);
+	SYS_LOG("OPEN", ifd);
+
+	free(pathname);
+	return ifd;
+}
 
 /*
- * openat(dirfd, pathname, flags, mode):
- *   args[0]=dirfd  args[1]=pathname ptr(cage)  args[2]=flags  args[3]=mode
- * NOTE: this intercepts __NR_openat, so args[0] is the DIRFD (AT_FDCWD=-100),
- * NOT the path. The path pointer is args[1]. (The lind ABI used open(path,...)
- * numbering; openat shifts everything by one and adds dirfd.)
+ * glibc routes open()->openat(AT_FDCWD,...) and unlink()->unlinkat(AT_FDCWD,.,0)
+ * on x86-64, so a cage built against glibc never issues the legacy open(2) /
+ * unlink(87) numbers. Intercept the *at forms too. openat args:
+ *   a[0]=dirfd, a[1]=path(ptr, owned by ac[1]), a[2]=flags, a[3]=mode.
  */
-long open_grate(pid_t cageid, const int arg_cage[6], unsigned long args[6]) {
-    pid_t thiscage = getpid();
-    int   dirfd    = (int)args[0];
-    /* the path pointer belongs to arg_cage[1]; 0 means the calling cage */
-    pid_t path_cage = arg_cage[1] ? arg_cage[1] : cageid;
-    char *pathname = malloc(256);
-    if (!pathname) { perror("malloc"); exit(EXIT_FAILURE); }
+long openat_grate(pid_t cage, const int ac[6], unsigned long a[6]) {
+	int thiscage = getpid();
+	int cageid = cage_index(cage);
 
-    /* copy the pathname (args[1]) from the cage into the grate */
-    long cret = copy_data_between_cages(path_cage, args[1], thiscage,
-                                        (unsigned long)pathname, 256, 1);
-    if (cret < 0) {           /* bad/unmapped cage path -> fail the open,
-                               * do NOT feed garbage to imfs_openat */
-        free(pathname);
-        return -EFAULT;
-    }
+	char *pathname = malloc(256);
+	if (!pathname) {
+		perror("malloc failed");
+		exit(EXIT_FAILURE);
+	}
 
-    /* pass the real dirfd through so AT_FDCWD is handled by imfs, not indexed */
-    int ifd = imfs_openat(cageid, dirfd, pathname, (int)args[2], (mode_t)args[3]);
-    SYS_LOG("OPEN", ifd);
-    free(pathname);
-    return ifd;
+	copy_data_between_cages(arg_owner(ac, 1, cage), a[1], thiscage,
+				(unsigned long)pathname, 256, THREEI_COPY_STRNCPY);
+
+	long ifd = imfs_openat(cageid, (int)a[0], pathname, (int)a[2],
+			       (mode_t)a[3]);
+	SYS_LOG("OPENAT", ifd);
+
+	free(pathname);
+	return ifd;
 }
 
-/* fcntl(fd, cmd, arg): args[0]=fd, args[1]=cmd, args[2]=arg */
-long fcntl_grate(pid_t cageid, const int arg_cage[6], unsigned long args[6]) {
-    (void)arg_cage;
-    long ret = imfs_fcntl(cageid, args[0], args[1], args[2]);
-    SYS_LOG("FCNTL", ret);
-    return ret;
+/* unlinkat args: a[0]=dirfd, a[1]=path(ptr, owned by ac[1]), a[2]=flags. */
+long unlinkat_grate(pid_t cage, const int ac[6], unsigned long a[6]) {
+	int thiscage = getpid();
+
+	char *pathname = malloc(256);
+	if (!pathname) {
+		perror("malloc failed");
+		exit(EXIT_FAILURE);
+	}
+
+	copy_data_between_cages(arg_owner(ac, 1, cage), a[1], thiscage,
+				(unsigned long)pathname, 256, THREEI_COPY_STRNCPY);
+
+	long ret = imfs_unlink(cage_index(cage), pathname);
+	SYS_LOG("UNLINKAT", ret);
+
+	free(pathname);
+	return ret;
 }
 
-/* unlink(path): args[0]=path ptr(cage) */
-long unlink_grate(pid_t cageid, const int arg_cage[6], unsigned long args[6]) {
-    pid_t thiscage = getpid();
-    pid_t path_cage = arg_cage[0] ? arg_cage[0] : cageid;
-    char *pathname = malloc(256);
-    if (!pathname) { perror("malloc"); exit(EXIT_FAILURE); }
-    copy_data_between_cages(path_cage, args[0], thiscage,
-                            (unsigned long)pathname, 256);
-    long ret = imfs_unlink(cageid, pathname);
-    SYS_LOG("UNLINK", ret);
-    free(pathname);
-    return ret;
+long fcntl_grate(pid_t cage, const int ac[6], unsigned long a[6]) {
+	(void)ac;
+	long ret = imfs_fcntl(cage_index(cage), (int)a[0], (int)a[1], (int)a[2]);
+	SYS_LOG("FCNTL", ret);
+	return ret;
 }
 
-/* close(fd): args[0]=fd */
-long close_grate(pid_t cageid, const int arg_cage[6], unsigned long args[6]) {
-    (void)arg_cage;
-    long ret = imfs_close(cageid, args[0]);
-    SYS_LOG("CLOSE", ret);
-    return ret;
+long unlink_grate(pid_t cage, const int ac[6], unsigned long a[6]) {
+	int thiscage = getpid();
+
+	char *pathname = malloc(256);
+	if (!pathname) {
+		perror("malloc failed");
+		exit(EXIT_FAILURE);
+	}
+
+	copy_data_between_cages(arg_owner(ac, 0, cage), a[0], thiscage,
+				(unsigned long)pathname, 256, THREEI_COPY_STRNCPY);
+
+	long ret = imfs_unlink(cage_index(cage), pathname);
+	SYS_LOG("UNLINK", ret);
+
+	free(pathname);
+	return ret;
 }
 
-/* lseek(fd, offset, whence): args[0]=fd, args[1]=offset, args[2]=whence */
-long lseek_grate(pid_t cageid, const int arg_cage[6], unsigned long args[6]) {
-    (void)arg_cage;
-    off_t ret = imfs_lseek(cageid, (int)args[0], (off_t)args[1], (int)args[2]);
-    SYS_LOG("LSEEK", ret);
-    return ret;
+long close_grate(pid_t cage, const int ac[6], unsigned long a[6]) {
+	(void)ac;
+	long ret = imfs_close(cage_index(cage), (int)a[0]);
+	SYS_LOG("CLOSE", ret);
+	return ret;
 }
 
-/* read(fd, buf, count): args[0]=fd, args[1]=buf ptr(cage), args[2]=count.
- * Read fills the grate buffer, then copies OUT to the cage's buf. */
-long read_grate(pid_t cageid, const int arg_cage[6], unsigned long args[6]) {
-    pid_t thiscage = getpid();
-    pid_t buf_cage = arg_cage[1] ? arg_cage[1] : cageid;
-    size_t count = (size_t)args[2];
-    char *buf = malloc(count);
-    if (!buf) { fprintf(stderr, "malloc failed\n"); exit(1); }
-
-    ssize_t ret = imfs_read(cageid, args[0], buf, count);
-    if (args[1] != 0)      /* skip copy-back on NULL user buffer */
-        copy_data_between_cages(thiscage, (unsigned long)buf,
-                                buf_cage, args[1], count);
-    SYS_LOG("READ", ret);
-    free(buf);
-    return ret;
+long lseek_grate(pid_t cage, const int ac[6], unsigned long a[6]) {
+	(void)ac;
+	long ret = imfs_lseek(cage_index(cage), (int)a[0], (off_t)a[1], (int)a[2]);
+	SYS_LOG("LSEEK", ret);
+	return ret;
 }
 
-/* pread(fd, buf, count, offset): args[3]=offset */
-long pread_grate(pid_t cageid, const int arg_cage[6], unsigned long args[6]) {
-    pid_t thiscage = getpid();
-    pid_t buf_cage = arg_cage[1] ? arg_cage[1] : cageid;
-    size_t count = (size_t)args[2];
-    char *buf = malloc(count);
-    if (!buf) { fprintf(stderr, "malloc failed\n"); exit(1); }
+/*
+ * read / pread: service out of the IMFS into a grate buffer, then stage the
+ * result back into the cage's OUT buffer (args[1], owned by arg_cage[1]).
+ */
+long read_grate(pid_t cage, const int ac[6], unsigned long a[6]) {
+	int thiscage = getpid();
+	int cageid = cage_index(cage);
+	int fd = (int)a[0];
+	size_t count = (size_t)a[2];
 
-    ssize_t ret = imfs_pread(cageid, args[0], buf, count, args[3]);
-    if (args[1] != 0)
-        copy_data_between_cages(thiscage, (unsigned long)buf,
-                                buf_cage, args[1], count);
-    SYS_LOG("PREAD", ret);
-    free(buf);
-    return ret;
+	char *buf = malloc(count ? count : 1);
+	if (!buf) {
+		fprintf(stderr, "malloc failed\n");
+		exit(1);
+	}
+
+	ssize_t ret = imfs_read(cageid, fd, buf, count);
+
+	/* read() is sometimes called with a NULL buffer; skip the copy then. */
+	if (a[1] != 0 && ret > 0)
+		copy_data_between_cages(thiscage, (unsigned long)buf,
+					arg_owner(ac, 1, cage), a[1],
+					(size_t)ret, THREEI_COPY_MEMCPY);
+
+	SYS_LOG("READ", ret);
+	free(buf);
+	return ret;
 }
 
-/* write(fd, buf, count): copies IN from the cage's buf, then imfs_write */
-long write_grate(pid_t cageid, const int arg_cage[6], unsigned long args[6]) {
-    pid_t thiscage = getpid();
-    pid_t buf_cage = arg_cage[1] ? arg_cage[1] : cageid;
-    size_t count = (size_t)args[2];
-    char *buffer = malloc(count);
-    if (!buffer) { perror("malloc"); exit(1); }
+long pread_grate(pid_t cage, const int ac[6], unsigned long a[6]) {
+	int thiscage = getpid();
+	int cageid = cage_index(cage);
+	int fd = (int)a[0];
+	size_t count = (size_t)a[2];
+	off_t offset = (off_t)a[3];
 
-    copy_data_between_cages(buf_cage, args[1], thiscage,
-                            (unsigned long)buffer, count);
+	char *buf = malloc(count ? count : 1);
+	if (!buf) {
+		fprintf(stderr, "malloc failed\n");
+		exit(1);
+	}
 
-    long ret;
-    if (args[0] < 3) {                 /* stdio passthrough */
-        ret = write((int)args[0], buffer, count);
-    } else {
-        ret = imfs_write(cageid, args[0], buffer, count);
-    }
-    SYS_LOG("WRITE", ret);
-    free(buffer);
-    return ret;
+	ssize_t ret = imfs_pread(cageid, fd, buf, count, offset);
+
+	if (a[1] != 0 && ret > 0)
+		copy_data_between_cages(thiscage, (unsigned long)buf,
+					arg_owner(ac, 1, cage), a[1],
+					(size_t)ret, THREEI_COPY_MEMCPY);
+
+	SYS_LOG("PREAD", ret);
+	free(buf);
+	return ret;
 }
 
-/* pwrite(fd, buf, count, offset): args[3]=offset */
-long pwrite_grate(pid_t cageid, const int arg_cage[6], unsigned long args[6]) {
-    pid_t thiscage = getpid();
-    pid_t buf_cage = arg_cage[1] ? arg_cage[1] : cageid;
-    size_t count = (size_t)args[2];
-    char *buffer = malloc(count);
-    if (!buffer) { perror("malloc"); exit(1); }
+long write_grate(pid_t cage, const int ac[6], unsigned long a[6]) {
+	int thiscage = getpid();
+	int cageid = cage_index(cage);
+	int fd = (int)a[0];
+	size_t count = (size_t)a[2];
 
-    copy_data_between_cages(buf_cage, args[1], thiscage,
-                            (unsigned long)buffer, count);
+	char *buffer = malloc(count ? count : 1);
+	if (!buffer) {
+		perror("malloc failed");
+		exit(1);
+	}
 
-    long ret;
-    if (args[0] < 3) {
-        ret = write((int)args[0], buffer, count);
-    } else {
-        ret = imfs_pwrite(cageid, args[0], buffer, count, args[3]);
-    }
-    SYS_LOG("PWRITE", ret);
-    free(buffer);
-    return ret;
+	copy_data_between_cages(arg_owner(ac, 1, cage), a[1], thiscage,
+				(unsigned long)buffer, count, THREEI_COPY_MEMCPY);
+
+	long ret;
+	if (fd < 3)
+		ret = write(fd, buffer, count);
+	else
+		ret = imfs_write(cageid, fd, buffer, count);
+
+	SYS_LOG("WRITE", ret);
+	free(buffer);
+	return ret;
 }
+
+long pwrite_grate(pid_t cage, const int ac[6], unsigned long a[6]) {
+	int thiscage = getpid();
+	int cageid = cage_index(cage);
+	int fd = (int)a[0];
+	size_t count = (size_t)a[2];
+	off_t offset = (off_t)a[3];
+
+	char *buffer = malloc(count ? count : 1);
+	if (!buffer) {
+		perror("malloc failed");
+		exit(1);
+	}
+
+	copy_data_between_cages(arg_owner(ac, 1, cage), a[1], thiscage,
+				(unsigned long)buffer, count, THREEI_COPY_MEMCPY);
+
+	long ret;
+	if (fd < 3)
+		ret = write(fd, buffer, count);
+	else
+		ret = imfs_pwrite(cageid, fd, buffer, count, offset);
+
+	SYS_LOG("PWRITE", ret);
+	free(buffer);
+	return ret;
+}
+
+/* (cage-syscall-nr, handler) table, registered for the cage below. */
+static const struct {
+	__u32 nr;
+	threei_handler_fn fn;
+} HANDLERS[] = {
+	{ __NR_read,	 read_grate     },
+	{ __NR_write,	 write_grate    },
+	{ __NR_open,	 open_grate     },
+	{ __NR_openat,	 openat_grate   },
+	{ __NR_close,	 close_grate    },
+	{ __NR_lseek,	 lseek_grate    },
+	{ __NR_pread64,	 pread_grate    },
+	{ __NR_pwrite64, pwrite_grate   },
+	{ __NR_fcntl,	 fcntl_grate    },
+	{ __NR_unlink,	 unlink_grate   },
+	{ __NR_unlinkat, unlinkat_grate },
+};
 
 int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <cage_file>\n", argv[0]);
-        exit(EXIT_FAILURE);
-    }
+	if (argc < 2) {
+		fprintf(stderr, "Usage: %s <cage_file> [args...]\n", argv[0]);
+		exit(EXIT_FAILURE);
+	}
 
-    sem_t *sem = mmap(NULL, sizeof(*sem), PROT_READ | PROT_WRITE,
-                      MAP_SHARED | MAP_ANON, -1, 0);
-    sem_init(sem, 1, 0);
+	int grateid = getpid();
 
-    pid_t grateid = getpid();
-    imfs_init();
-    preload_files = getenv("PRELOADS");
-    preloads(preload_files);
+	/* Bring up the IMFS and preload host files BEFORE the cage can run, so
+	 * the filesystem is populated by the time any syscall is serviced. */
+	imfs_init();
+	preload_files = getenv("PRELOADS");
+	preloads(preload_files);
 
-    pid_t cageid = fork();
-    if (cageid < 0) { perror("fork"); exit(EXIT_FAILURE); }
-    if (cageid == 0) {
-        sem_wait(sem);                 /* wait until the grate registers */
-        if (execv(argv[1], &argv[1]) == -1) { perror("execv"); exit(EXIT_FAILURE); }
-    }
+	pid_t cageid = fork();
+	if (cageid < 0) {
+		perror("fork failed");
+		exit(EXIT_FAILURE);
+	}
 
-    /* register handlers by __NR_* (was raw numbers). open() -> __NR_openat on
-     * x86-64 glibc, so register openat; also register __NR_open if the cage
-     * might issue it directly. */
-    register_handler(cageid, __NR_openat, grateid, (unsigned long)&open_grate);
-#ifdef __NR_open
-    register_handler(cageid, __NR_open,   grateid, (unsigned long)&open_grate);
-#endif
-    register_handler(cageid, __NR_lseek,  grateid, (unsigned long)&lseek_grate);
-    register_handler(cageid, __NR_read,   grateid, (unsigned long)&read_grate);
-    register_handler(cageid, __NR_write,  grateid, (unsigned long)&write_grate);
-    register_handler(cageid, __NR_close,  grateid, (unsigned long)&close_grate);
-    register_handler(cageid, __NR_fcntl,  grateid, (unsigned long)&fcntl_grate);
-    register_handler(cageid, __NR_unlink, grateid, (unsigned long)&unlink_grate);
-    register_handler(cageid, __NR_pread64,  grateid, (unsigned long)&pread_grate);
-    register_handler(cageid, __NR_pwrite64, grateid, (unsigned long)&pwrite_grate);
+	if (cageid == 0) {
+		/*
+		 * Register every handler for this (soon-to-be) cage, pointing at
+		 * the grate's handler functions, then exec the cage image.
+		 * Registering here, before execv, means the handlers are in
+		 * place the instant the cage starts issuing syscalls -- no setup
+		 * semaphore needed. The grate's transparent runtime (threei.h
+		 * constructor) services them from the parent.
+		 */
+		for (size_t i = 0; i < sizeof(HANDLERS) / sizeof(HANDLERS[0]);
+		     i++) {
+			if (register_handler(getpid(), HANDLERS[i].nr, grateid,
+					     (unsigned long)HANDLERS[i].fn) < 0) {
+				perror("register_handler failed");
+				_exit(EXIT_FAILURE);
+			}
+		}
 
-    sem_post(sem);                     /* let the cage exec */
+		execv(argv[1], &argv[1]);
+		perror("execv failed");
+		_exit(EXIT_FAILURE);
+	}
 
-    int status, w;
-    while (1) { w = wait(&status); if (w > 0) break; }
+	/* Grate: wait for the cage to finish; its syscalls are serviced
+	 * asynchronously by the 3i runtime threads. */
+	int status, w;
+	while ((w = wait(&status)) < 0 && errno == EINTR)
+		;
 
-    dump_files = getenv("DUMPS");
-    dump_outputs(dump_files);
+	/* Dump selected IMFS files back to disk after the cage exits. */
+	dump_files = getenv("DUMPS");
+	dump_outputs(dump_files);
 
-    sem_destroy(sem);
-    munmap(sem, sizeof(*sem));
+	return WIFEXITED(status) ? WEXITSTATUS(status) : EXIT_FAILURE;
 }
