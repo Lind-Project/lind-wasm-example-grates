@@ -1177,8 +1177,10 @@ pub extern "C" fn close_handler(
                 ret
             }
             None => {
-                // Not in our table at all — forward as-is for runtime to error.
-                forward_syscall(SYS_CLOSE, cage_id, &args, &arg_cages)
+                // Not open in this cage. The number is not forwarded: below this grate it
+                // names whatever the lower layer numbered so, which the cage holds under
+                // another number.
+                EBADF_NEG
             }
         }
     } else {
@@ -1700,7 +1702,9 @@ pub extern "C" fn fork_handler(
             // Preserve those child-side entries, and merge only parent fds
             // that are still absent.  Overwriting child entries here would
             // undo redirections performed between clone and exec.
-            if !is_vfork {
+            // A child that already has its inheritance (installed from
+            // the pending snapshot) lacks only what it has closed since.
+            if !is_vfork && !ipc::is_settled(child_cage_id) {
                 for (fd, entry) in &parent_fds {
                     if fdtables::translate_virtual_fd(child_cage_id, *fd).is_err() {
                         let _ = fdtables::get_specific_virtual_fd(
@@ -1717,6 +1721,7 @@ pub extern "C" fn fork_handler(
         } else {
             let _ = fdtables::copy_fdtable_for_cage(cage_id, child_cage_id);
         }
+        ipc::mark_settled(child_cage_id);
 
         // Give the child the parent's handler table so its read/write/
         // close/etc. keep flowing through us instead of crashing the
