@@ -31,6 +31,27 @@ struct PendingFdTable {
 
 static PENDING_FDTABLES: Mutex<Vec<PendingFdTable>> = Mutex::new(Vec::new());
 
+/// Cages that have their inheritance: installed from the parent's pending
+/// snapshot, or copied by the parent's clone handler. Nothing is added to
+/// such a cage afterwards; a descriptor missing from it was closed by it.
+/// One bit per cage id (ids are not reused), lock-free.
+const SETTLED_WORDS: usize = 4096;
+static SETTLED: [std::sync::atomic::AtomicU64; SETTLED_WORDS] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; SETTLED_WORDS];
+
+pub fn mark_settled(cage_id: u64) {
+    if let Some(word) = SETTLED.get(cage_id as usize / 64) {
+        word.fetch_or(1 << (cage_id % 64), std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+pub fn is_settled(cage_id: u64) -> bool {
+    SETTLED
+        .get(cage_id as usize / 64)
+        .map(|word| word.load(std::sync::atomic::Ordering::SeqCst) & (1 << (cage_id % 64)) != 0)
+        .unwrap_or(false)
+}
+
 // =====================================================================
 //  Constants
 // =====================================================================
@@ -216,9 +237,23 @@ pub fn remove_pending_fdtable(parent_cage: u64) {
 }
 
 fn install_pending_fdtable(cage_id: u64) -> bool {
+    if is_settled(cage_id) {
+        return false;
+    }
+    // The snapshot of this cage's own parent. With two forks in flight the
+    // latest snapshot can be another family's: a pipeline stage then holds
+    // the write end of a pipe it never opened, and its reader never sees
+    // the end of the pipe.
+    let parent = crate::helpers::forward_syscall(
+        grate_rs::constants::SYS_GETPPID, cage_id, &[0; 6], &[cage_id; 6],
+    );
     let snapshot = {
         let pending = PENDING_FDTABLES.lock().unwrap();
-        pending.last().cloned()
+        pending
+            .iter()
+            .rev()
+            .find(|snapshot| parent > 0 && snapshot.parent_cage == parent as u64)
+            .cloned()
     };
     let Some(snapshot) = snapshot else {
         return false;
@@ -241,6 +276,7 @@ fn install_pending_fdtable(cage_id: u64) -> bool {
         }
     }
 
+    mark_settled(cage_id);
     true
 }
 
@@ -275,6 +311,9 @@ pub fn wait_for_cage_fdtable(cage_id: u64) -> bool {
 /// Look up a virtual fd, allowing a short window for the parent to merge
 /// inherited fds into a child table that was created early.
 pub fn wait_for_fdtable_entry(cage_id: u64, fd: u64) -> Option<fdtables::FDTableEntry> {
+    if is_settled(cage_id) {
+        return fdtables::translate_virtual_fd(cage_id, fd).ok();
+    }
     for _ in 0..FDTABLE_WAIT_ATTEMPTS {
         match fdtables::translate_virtual_fd(cage_id, fd) {
             Ok(entry) => return Some(entry),
