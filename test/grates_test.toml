@@ -285,3 +285,14 @@ type = "rust"
 [[grate.tests]]
 test_src = "test/umask_test.c"
 grate_args = ["--force-bits", "022"]
+
+# ── Seeded random (Rust) ────────────────────────────────────────────
+
+[[grate]]
+name = "seeded-random-grate"
+dir = "seeded-random-grate"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/random_test.c"
+env = ["RANDOM_GRATE_SEED=42"]
