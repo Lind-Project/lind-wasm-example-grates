@@ -3823,7 +3823,7 @@ pub extern "C" fn accept4_handler(
         let extra_perfdinfo = (arg4) & (O_NONBLOCK as u64);
         return accept_ipc_inner(
             cage_id, socket_id, listen_flags, cloexec, extra_perfdinfo,
-            arg2, arg3,
+            arg2, arg2cage, arg3, arg3cage,
         );
     }
 

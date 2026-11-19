@@ -206,7 +206,7 @@ pub extern "C" fn handle_open(
 
     // Check filesopened cap before the syscall.
     if nanny.tattle_add_item("filesopened").is_err() {
-        return -EMFILE;
+        return -(EMFILE as i64);
     }
 
     // Pre-check fileread capacity.
@@ -467,7 +467,7 @@ pub extern "C" fn handle_bind(
     // Check port against both allowlists.
     if let Some(port) = extract_port(arg2, arg2cage) {
         if !nanny.is_item_allowed("messport", port) && !nanny.is_item_allowed("connport", port) {
-            return -EACCES;
+            return -(EACCES as i64);
         }
     }
 
@@ -505,7 +505,7 @@ pub extern "C" fn handle_listen(
     let nanny = NANNY.get().unwrap();
 
     if nanny.tattle_add_item("insockets").is_err() {
-        return -EMFILE;
+        return -(EMFILE as i64);
     }
 
     let ret = forward(
@@ -544,7 +544,7 @@ pub extern "C" fn handle_accept(
     let nanny = NANNY.get().unwrap();
 
     if nanny.tattle_add_item("outsockets").is_err() {
-        return -EMFILE;
+        return -(EMFILE as i64);
     }
 
     let ret = forward(
@@ -593,7 +593,7 @@ pub extern "C" fn handle_connect(
     let nanny = NANNY.get().unwrap();
 
     if nanny.tattle_add_item("outsockets").is_err() {
-        return -EMFILE;
+        return -(EMFILE as i64);
     }
 
     // Pre-check network capacity.
@@ -750,7 +750,7 @@ pub extern "C" fn handle_clone(
 
     if is_thread {
         if nanny.tattle_add_item("events").is_err() {
-            return -EAGAIN;
+            return -(EAGAIN as i64);
         }
     }
 
