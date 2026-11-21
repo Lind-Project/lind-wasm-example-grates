@@ -1,12 +1,22 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
+use crate::state::norm_fd;
 use grate_rs::constants::error::{EFAULT, EINVAL};
 use grate_rs::{copy_data_between_cages, getcageid};
 
-use crate::handlers::Call;
-use crate::state::Mode;
-
+/// Set from `--log` at startup; read by `rlog!`.
 pub static LOG: AtomicBool = AtomicBool::new(false);
+
+/// `eprintln!` with a `[revoke-grate]` prefix, only when `--log` is set. The
+/// arguments are not formatted at all when logging is off.
+macro_rules! rlog {
+    ($($arg:tt)*) => {
+        if $crate::utils::LOG.load(::std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("[revoke-grate] {}", format_args!($($arg)*));
+        }
+    };
+}
+pub(crate) use rlog;
 
 /// Upper bound on iovcnt, matches Linux IOV_MAX.
 const IOV_MAX: u64 = 1024;
@@ -19,31 +29,6 @@ static ZEROS: [u8; ZERO_CHUNK] = [0; ZERO_CHUNK];
 #[inline]
 pub fn neg(e: i32) -> i64 {
     -(e as i64)
-}
-
-/// fd arguments arrive as u64; only the low 32 bits are meaningful. Negative
-/// values (AT_FDCWD, -1) normalize to large numbers that never match an entry.
-#[inline]
-pub fn norm_fd(raw: u64) -> u64 {
-    raw as u32 as u64
-}
-
-pub fn log(what: &str) {
-    if LOG.load(Ordering::Relaxed) {
-        eprintln!("{}", what);
-    }
-}
-
-pub fn log_emulated(what: &str, c: &Call, idx: usize, mode: Mode) {
-    if LOG.load(Ordering::Relaxed) {
-        eprintln!(
-            "[revoke-grate] cage {} fd {}: {} -> {:?}",
-            c.cages[idx],
-            norm_fd(c.args[idx]),
-            what,
-            mode
-        );
-    }
 }
 
 // ── Cage memory helpers ─────────────────────────────────────────────

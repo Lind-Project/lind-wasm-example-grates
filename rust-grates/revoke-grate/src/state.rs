@@ -6,7 +6,7 @@
 //! descriptor stays open (so the fd number cannot be reused by the kernel and
 //! alias some new object while still marked revoked).
 //!
-//! Entries are created from the CLI at startup and then follow the descriptor:
+//! Entries are created by the `revoke` syscall and then follow the descriptor:
 //! - `dup`/`dup2`/`dup3`/`fcntl(F_DUPFD*)` copy the entry to the new fd
 //! - `dup2`/`dup3` onto a revoked fd from a non-revoked fd clear it
 //! - `close` clears it
@@ -17,8 +17,6 @@
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
-
-use crate::utils::norm_fd;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -66,10 +64,11 @@ pub fn inherit(parent: u64, child: u64) {
         t.insert((child, fd), m);
     }
 }
-
-/// Snapshot of the whole table, for logging.
-pub fn all() -> Vec<((u64, u64), Mode)> {
-    table().iter().map(|(&k, &v)| (k, v)).collect()
+/// fd arguments arrive as u64; only the low 32 bits are meaningful. Negative
+/// values (AT_FDCWD, -1) normalize to large numbers that never match an entry.
+#[inline]
+pub fn norm_fd(raw: u64) -> u64 {
+    raw as u32 as u64
 }
 
 // ── Cage tree ───────────────────────────────────────────────────────

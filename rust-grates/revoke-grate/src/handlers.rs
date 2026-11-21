@@ -18,10 +18,8 @@ use grate_rs::constants::*;
 use grate_rs::{GrateError, SyscallHandler, getcageid, is_thread_clone, make_threei_call};
 
 use crate::abi;
-use crate::state::{self, Mode};
-use crate::utils::{
-    arg_first_byte, iov_total, log, log_emulated, neg, norm_fd, read_iovecs, zero_fill,
-};
+use crate::state::{self, Mode, norm_fd};
+use crate::utils::{arg_first_byte, iov_total, neg, read_iovecs, rlog, zero_fill};
 
 // ── Call plumbing ───────────────────────────────────────────────────
 
@@ -37,7 +35,7 @@ impl Call {
         // forward_raw(nr, self.cages[0], &self.args, &self.cages)
         match make_threei_call(
             nr as u32,
-            nr,
+            0,
             getcageid(),
             self.cages[0],
             self.args[0],
@@ -64,6 +62,17 @@ impl Call {
     fn revoked(&self, idx: usize) -> Option<Mode> {
         state::lookup(self.cages[idx], self.args[idx])
     }
+}
+
+/// Log that a call on the revoked fd in argument `idx` was emulated.
+fn log_emulated(what: &str, c: &Call, idx: usize, mode: Mode) {
+    rlog!(
+        "cage {} fd {}: {} -> {:?}",
+        c.cages[idx],
+        norm_fd(c.args[idx]),
+        what,
+        mode
+    );
 }
 
 /// Define an `extern "C"` handler with the 3i signature, binding the
@@ -378,10 +387,10 @@ handler!(revoke_handler, |c| {
     let fd_raw = c.args[1] as u32 as i32;
     let flags = c.args[2] as u32;
 
-    let mode = match abi::decode_flags(flags) {
-        Some(m) => m,
-        None => return neg(EINVAL),
+    let Some(mode) = abi::decode_flags(flags) else {
+        return neg(EINVAL);
     };
+
     if fd_raw < 0 {
         return neg(EBADF);
     }
@@ -400,11 +409,7 @@ handler!(revoke_handler, |c| {
     }
     state::revoke(target, fd, mode);
 
-    log(format!(
-        "[revoke-grate] cage {} revoked cage {} fd {} as {:?}",
-        caller, target, fd, mode
-    )
-    .as_str());
+    rlog!("cage {caller} revoked cage {target} fd {fd} as {mode:?}");
 
     0
 });
@@ -413,11 +418,7 @@ handler!(exec_handler, |c| {
     let cage = c.cages[0];
     // Drop revocations whose real fd is close-on-exec; the rest survive exec.
     for (fd, _) in state::fds_of(cage) {
-        let new_call = Call {
-            args: [fd, F_GETFD as u64, 0, 0, 0, 0],
-            cages: [cage; 6],
-        };
-        let flags = new_call.forward(SYS_FCNTL);
+        let flags = fcntl_getfd(cage, fd);
         if flags >= 0 && flags & (FD_CLOEXEC as i64) != 0 {
             state::unrevoke(cage, fd);
         }
@@ -432,11 +433,6 @@ fn fcntl_getfd(cage: u64, fd: u64) -> i64 {
         cages: [cage; 6],
     };
     new_call.forward(SYS_FCNTL)
-}
-
-/// Ask the kernel layer whether `fd` is currently open in `cage`.
-pub fn fd_is_open(cage: u64, fd: u64) -> bool {
-    fcntl_getfd(cage, fd) >= 0
 }
 
 /// Every (syscall, handler) pair this grate registers.

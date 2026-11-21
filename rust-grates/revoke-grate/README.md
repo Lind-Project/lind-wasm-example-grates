@@ -53,31 +53,17 @@ instead.
 ## Usage
 
 ```bash
-lind-wasm grates/revoke-grate.cwasm [--log] \
-    [--revoke <cageid>:<fd>[:null|zero] ...] [--] <program> [args...]
+lind-wasm grates/revoke-grate.cwasm [--log] [--] <program> [args...]
 ```
 
-- `--revoke` / `-r`: optional, repeatable. Arms a revocation at startup.
-  Mode defaults to `null`. Unlike the syscall, the fd need not be open yet
-  (see Known gaps).
 - `--log`: print the cage IDs at startup, every revoke, and every emulated
   call to stderr.
 
-Cage IDs are allocated in increasing order starting at 1. When the grate is
-launched directly by `lind-wasm` it is cage 1, `<program>` is cage 2, and
-cages that `<program>` forks get 3, 4 and so on. Only cages descended from
-`<program>` route through this grate; the grate warns at startup about pairs it
-can never intercept.
-
-### Example
-
-```bash
-# Program's stdin reads as an endless stream of zeros
-lind-wasm grates/revoke-grate.cwasm --revoke 2:0:zero myapp.cwasm
-
-# Silence stdout and stderr of the first child myapp forks
-lind-wasm grates/revoke-grate.cwasm -r 3:1 -r 3:2 myapp.cwasm
-```
+Revocations are made at runtime through the syscall above. Cage IDs are
+allocated in increasing order starting at 1. When the grate is launched
+directly by `lind-wasm` it is cage 1, `<program>` is cage 2, and cages that
+`<program>` forks get 3, 4 and so on. Only `<program>` and its descendants
+route through this grate, so only they can be revoked (others get `ESRCH`).
 
 ## Semantics
 
@@ -127,9 +113,6 @@ does not leak.
   are not revoked (see Semantics). Revoking the open file itself is future work.
 - A call already blocked in the kernel (e.g. a `read` on a socket) is not woken
   by a revoke; only later calls are emulated.
-- Startup `--revoke` of an fd that is not open still arms the slot: whatever
-  the cage later opens at that number is revoked until closed. The syscall
-  rejects such fds with `EBADF` instead.
 - No permission check yet (see above).
 - `readv`/`writev` assume a wasm32 `struct iovec` layout.
 
@@ -159,25 +142,25 @@ cd rust-grates/revoke-grate && cargo lind_compile --release --output-dir grates
 make test GRATE=revoke-grate
 ```
 
-- `test/revoke_syscall_test.c` (no grate args): runtime revocation through
-  the syscall. Error cases (`EINVAL`/`EBADF`/`ESRCH`), revoking its own fd as
-  null and zero, an earlier `dup` staying live, and a parent revoking a forked
-  child's fd while the child is running.
+`test/revoke_syscall_test.c` (no grate args) revokes fds at runtime through
+the syscall and checks:
 
-The other two arm a revocation of the test program's stdin (cage 2, fd 0) at
-startup:
-
-- `test/revoke_null_test.c` (`--revoke 2:0`): EOF reads, swallowed writes,
-  `isatty`/`fstat`/`mmap` errors, `F_DUPFD` propagation, untouched regular files.
-- `test/revoke_zero_test.c` (`--revoke 2:0:zero`): zero-filled read/readv,
-  zero mmap, dup/dup2 propagation, overwriting the slot with dup2, fork
-  inheritance, and close clearing the slot.
+- error cases (`EINVAL`/`EBADF`/`ESRCH`);
+- null mode: EOF reads, swallowed writes, `isatty`/`fstat`/`mmap` errors,
+  `F_DUPFD` propagation, and a regular file left untouched;
+- zero mode: zero-filled `read`/`readv`, zero `mmap`, `dup`/`dup2`
+  propagation, overwriting the slot with `dup2`, and `close` clearing it;
+- slot semantics: an earlier `dup` stays live;
+- fork: a child inherits the parent's revocations, and a parent can revoke a
+  running child's fd without affecting its own copy.
 
 ## Code layout
 
-- `src/main.rs`: CLI parsing, handler registration, startup checks.
+- `src/main.rs`: CLI parsing and handler registration.
 - `src/abi.rs`: revoke syscall number and flag encoding.
 - `src/state.rs`: the `(cage, fd) -> mode` revocation table and the cage tree.
 - `src/handlers.rs`: syscall handlers, emulation, the revoke handler and its
   `authorize` hook.
+- `src/utils.rs`: the `rlog!` macro and helpers for copying to and from cage
+  memory.
 - `include/lind_revoke.h`: header-only C client wrapper.
