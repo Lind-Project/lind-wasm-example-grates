@@ -84,6 +84,12 @@ pub fn read_iovecs(cage: u64, ptr: u64, cnt: u64) -> Result<Vec<(u64, u64)>, i64
         0,
     )
     .map_err(|_| neg(EFAULT))?;
+    // Compare with the test's DEBUG lines: each base should be the guest base
+    // plus a constant offset, and the lengths should match.
+    rlog!(
+        "iovecs: ptr={ptr:#x} cage={cage} cnt={cnt} entry_size={} parsed={iovs:x?}",
+        size_of::<iovec>()
+    );
     Ok(iovs.iter().map(|v| (v.iov_base, v.iov_len)).collect())
 }
 

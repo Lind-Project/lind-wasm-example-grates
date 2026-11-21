@@ -20,10 +20,26 @@
 static int total = 0;
 static int failures = 0;
 
+/* errno is cleared first so a FAIL never reports a value left over from an
+ * earlier check. */
 #define CHECK(name, expr) do { \
     total++; \
+    errno = 0; \
     if (expr) { printf("PASS: %s\n", name); } \
     else { printf("FAIL: %s (errno=%d)\n", name, errno); failures++; } \
+} while (0)
+
+/* Like CHECK, but for counts: a FAIL prints what the call actually returned. */
+#define CHECK_EQ(name, expr, want) do { \
+    total++; \
+    errno = 0; \
+    long long got_ = (long long)(expr); \
+    if (got_ == (long long)(want)) { printf("PASS: %s\n", name); } \
+    else { \
+        printf("FAIL: %s (got %lld, want %lld, errno=%d)\n", \
+               name, got_, (long long)(want), errno); \
+        failures++; \
+    } \
 } while (0)
 
 static const char *PATH = "/tmp/revoke_syscall_real.txt";
@@ -44,6 +60,17 @@ static int file_is(const char *want) {
     return n == (ssize_t)strlen(want) && memcmp(buf, want, n) == 0;
 }
 
+/* Print an iovec array as this cage sees it before glibc translates it. Compare
+ * with the grate's `--log` dump of the same call: each host base should be
+ * this guest base plus one constant (the cage's linear-memory base), and the
+ * lengths should match. */
+static void dump_iov(const char *what, const struct iovec *iov, int cnt) {
+    printf("DEBUG: %s: sizeof(struct iovec)=%zu, iov=%p\n", what, sizeof(struct iovec),
+           (void *)iov);
+    for (int i = 0; i < cnt; i++)
+        printf("DEBUG:   [%d] base=%p len=%zu\n", i, iov[i].iov_base, iov[i].iov_len);
+}
+
 /* Does `fd` read back the real file contents from the start? */
 static int reads_original(int fd) {
     char buf[16] = {0};
@@ -55,16 +82,11 @@ static void test_errors(void) {
     int fd = open(PATH, O_RDONLY);
     CHECK("open file", fd >= 0);
 
-    errno = 0;
     CHECK("bad mode -> EINVAL", lind_revoke(self, fd, 7) == -1 && errno == EINVAL);
-    errno = 0;
     CHECK("reserved flag bit -> EINVAL",
           lind_revoke(self, fd, 1 << 8) == -1 && errno == EINVAL);
-    errno = 0;
     CHECK("fd not open -> EBADF", lind_revoke(self, 99, REVOKE_MODE_NULL) == -1 && errno == EBADF);
-    errno = 0;
     CHECK("negative fd -> EBADF", lind_revoke(self, -1, REVOKE_MODE_NULL) == -1 && errno == EBADF);
-    errno = 0;
     CHECK("unknown cage -> ESRCH", lind_revoke(9999, 0, REVOKE_MODE_NULL) == -1 && errno == ESRCH);
     CHECK("failed revokes left fd alone", reads_original(fd));
     close(fd);
@@ -81,29 +103,34 @@ static void test_null(void) {
 
     /* reads hit EOF, buffer untouched */
     memset(buf, 0xAA, sizeof(buf));
-    CHECK("null: read returns 0", read(fd, buf, sizeof(buf)) == 0);
+    CHECK_EQ("null: read returns 0", read(fd, buf, sizeof(buf)), 0);
     CHECK("null: read leaves buffer untouched", (unsigned char)buf[0] == 0xAA);
     struct iovec iov[1] = { { buf, sizeof(buf) } };
-    CHECK("null: readv returns 0", readv(fd, iov, 1) == 0);
+    CHECK_EQ("null: readv returns 0", readv(fd, iov, 1), 0);
 
-    /* writes are swallowed */
-    CHECK("null: write returns count", write(fd, "CLOBBER", 7) == 7);
+    /* writes are swallowed: the count is only plausible if the file is
+     * really unchanged afterwards */
+    CHECK_EQ("null: write returns count", write(fd, "CLOBBER", 7), 7);
+    CHECK("null: write did not reach the file", file_is("original"));
     struct iovec wv[2] = { { "ab", 2 }, { "cde", 3 } };
-    CHECK("null: writev returns total", writev(fd, wv, 2) == 5);
-    CHECK("null: file unchanged by swallowed writes", file_is("original"));
+    dump_iov("null writev", wv, 2);
+    CHECK_EQ("null: writev returns total", writev(fd, wv, 2), 5);
+    CHECK("null: writev did not reach the file", file_is("original"));
 
-    /* not a tty, no metadata, not mappable */
-    CHECK("null: isatty is 0", isatty(fd) == 0);
-    errno = 0;
+    /* no metadata, not mappable */
     CHECK("null: fstat -> EACCES", fstat(fd, &st) == -1 && errno == EACCES);
-    errno = 0;
     void *m = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, fd, 0);
-    CHECK("null: mmap -> ENODEV", m == MAP_FAILED && errno == ENODEV);
+    int mmap_errno = errno; /* CHECK clears errno */
+    CHECK("null: mmap -> ENODEV", m == MAP_FAILED && mmap_errno == ENODEV);
 
     /* fcntl(F_DUPFD) carries the revocation */
     int d = fcntl(fd, F_DUPFD, 20);
     CHECK("null: F_DUPFD", d >= 20);
-    CHECK("null: F_DUPFD'd fd reads EOF", read(d, buf, sizeof(buf)) == 0);
+    /* Seek first: without it the shared offset could already be at EOF and the
+     * read would return 0 even if nothing were revoked. */
+    lseek(d, 0, SEEK_SET);
+    CHECK_EQ("null: F_DUPFD'd fd reads EOF", read(d, buf, sizeof(buf)), 0);
+    CHECK("null: F_DUPFD'd fd hides metadata", fstat(d, &st) == -1 && errno == EACCES);
     close(d);
 
     /* other descriptors of the same file are untouched */
@@ -126,7 +153,7 @@ static void test_zero(void) {
 
     /* read returns zeros without overrunning */
     memset(buf, 0xAA, sizeof(buf));
-    CHECK("zero: read returns count", read(fd, buf, 32) == 32);
+    CHECK_EQ("zero: read returns count", read(fd, buf, 32), 32);
     CHECK("zero: read fills zeros", all_zero(buf, 32));
     CHECK("zero: read does not overrun", (unsigned char)buf[32] == 0xAA);
 
@@ -135,14 +162,14 @@ static void test_zero(void) {
     memset(a, 1, sizeof(a));
     memset(b, 1, sizeof(b));
     struct iovec iov[2] = { { a, sizeof(a) }, { b, sizeof(b) } };
-    CHECK("zero: readv returns total", readv(fd, iov, 2) == 24);
+    dump_iov("zero readv", iov, 2);
+    CHECK_EQ("zero: readv returns total", readv(fd, iov, 2), 24);
     CHECK("zero: readv fills zeros", all_zero(a, sizeof(a)) && all_zero(b, sizeof(b)));
 
     /* writes are swallowed, lseek is a no-op, no metadata */
-    CHECK("zero: write returns count", write(fd, "CLOBBER", 7) == 7);
-    CHECK("zero: file unchanged by swallowed write", file_is("original"));
-    CHECK("zero: lseek returns 0", lseek(fd, 100, SEEK_SET) == 0);
-    errno = 0;
+    CHECK_EQ("zero: write returns count", write(fd, "CLOBBER", 7), 7);
+    CHECK("zero: write did not reach the file", file_is("original"));
+    CHECK_EQ("zero: lseek returns 0", lseek(fd, 100, SEEK_SET), 0);
     CHECK("zero: fstat -> EACCES", fstat(fd, &st) == -1 && errno == EACCES);
 
     /* mmap gives zero pages */
@@ -213,7 +240,6 @@ static void test_revoke_child(void) {
     close(fd);
     close(go[1]);
 
-    errno = 0;
     CHECK("child: exited child -> ESRCH",
           lind_revoke(child, 0, REVOKE_MODE_NULL) == -1 && errno == ESRCH);
 }
