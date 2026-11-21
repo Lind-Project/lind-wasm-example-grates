@@ -2,6 +2,7 @@ use std::sync::atomic::AtomicBool;
 
 use crate::state::norm_fd;
 use grate_rs::constants::error::{EFAULT, EINVAL};
+use grate_rs::ffi::iovec;
 use grate_rs::{copy_data_between_cages, getcageid};
 
 /// Set from `--log` at startup; read by `rlog!`.
@@ -20,8 +21,6 @@ pub(crate) use rlog;
 
 /// Upper bound on iovcnt, matches Linux IOV_MAX.
 const IOV_MAX: u64 = 1024;
-/// Size of `struct iovec` in a wasm32 cage: { u32 iov_base; u32 iov_len; }.
-const IOVEC_SIZE: u64 = 8;
 /// Chunk size used when writing zeros into a cage buffer.
 const ZERO_CHUNK: usize = 64 * 1024;
 static ZEROS: [u8; ZERO_CHUNK] = [0; ZERO_CHUNK];
@@ -59,7 +58,11 @@ pub fn zero_fill(cage: u64, dst: u64, len: u64) -> i64 {
     done as i64
 }
 
-/// Read a wasm32 iovec array from `cage`. Returns (base, len) pairs.
+/// Read an iovec array from `cage`. Returns (base, len) pairs.
+///
+/// lind's glibc translates the cage's iovecs before the syscall
+/// (`__lind_translate_iov`), so `ptr` holds host-layout `{ u64 base; u64 len }`
+/// entries with host addresses, the same layout imfs-grate and rawposix read.
 pub fn read_iovecs(cage: u64, ptr: u64, cnt: u64) -> Result<Vec<(u64, u64)>, i64> {
     let cnt = norm_fd(cnt); // low 32 bits, same as an int argument
     if cnt > IOV_MAX {
@@ -69,19 +72,19 @@ pub fn read_iovecs(cage: u64, ptr: u64, cnt: u64) -> Result<Vec<(u64, u64)>, i64
         return Ok(Vec::new());
     }
     let this = getcageid();
-    let mut raw = vec![0u32; (cnt * 2) as usize];
+    let mut iovs = vec![iovec::default(); cnt as usize];
     copy_data_between_cages(
         this,
         cage,
         ptr,
         cage,
-        raw.as_mut_ptr() as u64,
+        iovs.as_mut_ptr() as u64,
         this,
-        cnt * IOVEC_SIZE,
+        cnt * size_of::<iovec>() as u64,
         0,
     )
     .map_err(|_| neg(EFAULT))?;
-    Ok(raw.chunks(2).map(|p| (p[0] as u64, p[1] as u64)).collect())
+    Ok(iovs.iter().map(|v| (v.iov_base, v.iov_len)).collect())
 }
 
 pub fn iov_total(iovs: &[(u64, u64)]) -> i64 {
