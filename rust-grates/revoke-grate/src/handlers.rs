@@ -401,7 +401,7 @@ handler!(revoke_handler, |c| {
     state::revoke(target, fd, mode);
 
     log(format!(
-        "[revoke-grate] cage {} revoked cagE{} fd {} as {:?}",
+        "[revoke-grate] cage {} revoked cage {} fd {} as {:?}",
         caller, target, fd, mode
     )
     .as_str());
