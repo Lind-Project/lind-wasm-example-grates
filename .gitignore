@@ -23,3 +23,7 @@ target
 .DS_Store
 
 **/Cargo.lock
+
+# Compiled programs
+*.wasm
+*.cwasm
