@@ -2,10 +2,6 @@
 //!
 //! Usage:
 //!   revoke-grate [--log] [--] <program> [args...]
-//!
-//! Cages below the grate revoke fds at runtime with the `revokefd` syscall
-//! (see abi.rs / include/lind_revokefd.h). A revoked fd behaves like /dev/null
-//! (default) or /dev/zero. See README.md for the exact semantics.
 
 mod abi;
 mod handlers;
@@ -55,7 +51,7 @@ fn main() {
         Ok(c) => c,
         Err(e) => {
             if !e.is_empty() {
-                eprintln!("[revoke-grate] {}", e);
+                eprintln!("argument parsing failed: {}", e);
             }
             eprintln!("{}", USAGE);
             std::process::exit(2);
@@ -78,7 +74,7 @@ fn main() {
         })
         .teardown(|result: Result<i32, GrateError>| {
             if let Err(e) = result {
-                eprintln!("[revoke-grate] error: {:?}", e);
+                eprintln!("grate teardown error: {:?}", e);
             }
         })
         .run(config.argv);

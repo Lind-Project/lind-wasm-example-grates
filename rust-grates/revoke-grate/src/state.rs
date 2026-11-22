@@ -1,19 +1,15 @@
-//! Revocation table.
+//! Revocation table state.
 //!
-//! Maps `(cageid, fd)` -> `Mode`. An entry means "fd slot `fd` in cage
-//! `cageid` is revoked": syscalls the cage makes on it are emulated as if the
-//! descriptor pointed at `/dev/null` or `/dev/zero`, while the real underlying
-//! descriptor stays open (so the fd number cannot be reused by the kernel and
-//! alias some new object while still marked revoked).
+//! Maintains a map of (cageid, fd) -> Option<Mode> representing whether a given tuple
+//! is revoked, and if it is revoked which mode was used to revoke it.
 //!
-//! Entries are created by the `revokefd` syscall and then follow the descriptor:
-//! - `dup`/`dup2`/`dup3`/`fcntl(F_DUPFD*)` copy the entry to the new fd
-//! - `dup2`/`dup3` onto a revoked fd from a non-revoked fd clear it
-//! - `close` clears it
-//! - `fork` copies all of the parent's entries to the child
-//! - `exec` clears entries whose real fd is close-on-exec
+//! Apart from the revokefd syscall, the following can also modify this state:
 //!
-//! The lock is never held across a threei call.
+//! - dup calls: copies the state to the new fd. If a non-revoked fd is dup'd to a revoked fd,
+//! the revocation gets cleared.
+//! - close clears it
+//! - fork copies the table to the forked cage.
+//! - exec clears the revocation if the FD was opened with close-on-exec
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -71,16 +67,10 @@ pub fn norm_fd(raw: u64) -> u64 {
     raw as u32 as u64
 }
 
-// ── Cage tree ───────────────────────────────────────────────────────
+// Cage tree.
 //
-// Every cage routed through this grate, mapped to its parent. Filled at
-// startup (the grate's child) and on each process clone. Used to reject
-// revokes aimed at cages this grate cannot intercept, and is the data a
-// descendant-only permission check would need.
-//
-// Exited cages are not removed (the grate does not intercept exit), but cage
-// IDs are never reused and calls into a dead cage fail with ESRCH anyway.
-
+// Used to check whether this grate can see a cageid provided (i.e. if it was ever
+// registered).
 static CAGES: Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
 
 fn cages() -> std::sync::MutexGuard<'static, BTreeMap<u64, u64>> {
@@ -93,10 +83,4 @@ pub fn add_cage(cage: u64, parent: u64) {
 
 pub fn is_known_cage(cage: u64) -> bool {
     cages().contains_key(&cage)
-}
-
-/// Parent of `cage`, if known.
-#[allow(dead_code)] // for a future permission check
-pub fn parent_of(cage: u64) -> Option<u64> {
-    cages().get(&cage).copied()
 }

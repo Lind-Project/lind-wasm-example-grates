@@ -1,13 +1,8 @@
-//! Syscall handlers for revoke-grate.
+//! Syscall handlers for revoke-grate.//! Syscall handlers for revoke-grate.
 //!
-//! Every handler follows the same shape: look up whether the fd argument(s)
-//! of the call are revoked in the calling cage. If not, forward the call
-//! unchanged through threei. If so, return what the call would have returned
-//! had the descriptor been `/dev/null` (or `/dev/zero`), without touching the
-//! real descriptor.
-//!
-//! The calling cage is taken from the fd argument's own `argNcage`, the same
-//! convention the other grates use.
+//! None of the handlers touches the actual FDs, all calls are either forwarded
+//! if they haven't been revoked, or emulates `/dev/null` or `/dev/zero` as if
+//! the the FD was `open`'d with these paths.
 
 use grate_rs::constants::error::{
     EACCES, EBADF, EINVAL, ENODEV, ENOTDIR, ENOTSOCK, ENOTTY, EPERM, ESRCH,
@@ -21,8 +16,8 @@ use crate::abi;
 use crate::state::{self, Mode, norm_fd};
 use crate::utils::{arg_first_byte, iov_total, neg, read_iovecs, rlog, zero_fill};
 
-// ── Call plumbing ───────────────────────────────────────────────────
-
+/// Syscall plumbing helpers.
+///
 /// The six (arg, argcage) pairs of an intercepted syscall.
 pub struct Call {
     pub args: [u64; 6],
@@ -32,7 +27,6 @@ pub struct Call {
 impl Call {
     /// Forward the call unchanged on behalf of the calling cage.
     fn forward(&self, nr: u64) -> i64 {
-        // forward_raw(nr, self.cages[0], &self.args, &self.cages)
         match make_threei_call(
             nr as u32,
             0,
@@ -58,7 +52,7 @@ impl Call {
         }
     }
 
-    /// Revocation state of the fd held in argument `idx`.
+    /// Check if an fd has been revoked.
     fn revoked(&self, idx: usize) -> Option<Mode> {
         state::lookup(self.cages[idx], self.args[idx])
     }
@@ -75,8 +69,13 @@ fn log_emulated(what: &str, c: &Call, idx: usize, mode: Mode) {
     );
 }
 
-/// Define an `extern "C"` handler with the 3i signature, binding the
-/// arguments to a `Call` named `$c`.
+/// Macros for syscall handlers.
+///
+/// The general pattern is that the body of the handler is provided
+/// as an function enclosure that takes as arguments `c` (Call context
+/// defined above) and optionally an `m` (Mode of handling the revoked fd)
+
+/// General purpose handler.
 macro_rules! handler {
     ($name:ident, |$c:ident| $body:expr) => {
         pub extern "C" fn $name(
@@ -117,7 +116,7 @@ macro_rules! on_revoked {
     };
 }
 
-/// `read`/`pread` on a revoked fd.
+/// Emulate `read`/`pread` on a revoked fd.
 fn emu_read(c: &Call, m: Mode) -> i64 {
     match m {
         Mode::Null => 0,
@@ -125,7 +124,7 @@ fn emu_read(c: &Call, m: Mode) -> i64 {
     }
 }
 
-/// `readv`/`preadv` on a revoked fd.
+/// Emulate `readv`/`preadv` on a revoked fd.
 fn emu_readv(c: &Call, m: Mode) -> i64 {
     if m == Mode::Null {
         return 0;
@@ -148,7 +147,7 @@ fn emu_readv(c: &Call, m: Mode) -> i64 {
     total
 }
 
-/// `writev`/`pwritev` on a revoked fd: report everything as written.
+/// Emulate `writev`/`pwritev` on a revoked fd by reporting everything as written.
 fn emu_writev(c: &Call) -> i64 {
     match read_iovecs(c.cages[1], c.args[1], c.args[2]) {
         Ok(v) => iov_total(&v),
@@ -173,15 +172,14 @@ fn at_blocked(c: &Call, dirfd_idx: usize, path_idx: usize) -> Option<i64> {
     Some(r)
 }
 
-// ── Data path ───────────────────────────────────────────────────────
-
+// Syscalls that carry data.
 on_revoked!(read_handler, SYS_READ, 0, |c, m| emu_read(&c, m));
 on_revoked!(pread_handler, SYS_PREAD, 0, |c, m| emu_read(&c, m));
 on_revoked!(readv_handler, SYS_READV, 0, |c, m| emu_readv(&c, m));
 on_revoked!(preadv_handler, SYS_PREADV, 0, |c, m| emu_readv(&c, m));
 
-on_revoked!(write_handler, SYS_WRITE, 0, |c, _m| c.args[2] as i64);
-on_revoked!(pwrite_handler, SYS_PWRITE, 0, |c, _m| c.args[2] as i64);
+on_revoked!(write_handler, SYS_WRITE, 0, |c, _m| c.args[2] as i64); // Return count
+on_revoked!(pwrite_handler, SYS_PWRITE, 0, |c, _m| c.args[2] as i64); // Return count
 on_revoked!(writev_handler, SYS_WRITEV, 0, |c, _m| emu_writev(&c));
 on_revoked!(pwritev_handler, SYS_PWRITEV, 0, |c, _m| emu_writev(&c));
 
@@ -227,8 +225,7 @@ handler!(mmap_handler, |c| {
     }
 });
 
-// ── Sockets: /dev/null is not a socket ──────────────────────────────
-
+// Socket calls. /dev/null is not a socket.
 on_revoked!(bind_handler, SYS_BIND, 0, |_c, _m| neg(ENOTSOCK));
 on_revoked!(listen_handler, SYS_LISTEN, 0, |_c, _m| neg(ENOTSOCK));
 on_revoked!(connect_handler, SYS_CONNECT, 0, |_c, _m| neg(ENOTSOCK));
@@ -252,11 +249,8 @@ on_revoked!(getpeername_handler, SYS_GETPEERNAME, 0, |_c, _m| neg(
     ENOTSOCK
 ));
 
-// ── epoll ───────────────────────────────────────────────────────────
-
 on_revoked!(epoll_wait_handler, SYS_EPOLL_WAIT, 0, |_c, _m| neg(EINVAL));
 
-// epoll_ctl(epfd, op, fd, event)
 handler!(epoll_ctl_handler, |c| {
     if let Some(m) = c.revoked(0) {
         log_emulated("epoll_ctl_handler", &c, 0, m);
@@ -270,8 +264,7 @@ handler!(epoll_ctl_handler, |c| {
     c.forward(SYS_EPOLL_CTL)
 });
 
-// ── *at calls with a revoked dirfd ──────────────────────────────────
-
+/// Handler for *at calls, where we need to check validity of dirfd.
 macro_rules! at_handler {
     ($name:ident, $nr:expr, $(($d:expr, $p:expr)),+) => {
         handler!($name, |c| {
@@ -297,8 +290,9 @@ at_handler!(symlinkat_handler, SYS_SYMLINKAT, (1, 2));
 at_handler!(renameat_handler, SYS_RENAMEAT, (0, 1), (2, 3));
 at_handler!(renameat2_handler, SYS_RENAMEAT2, (0, 1), (2, 3));
 
-// ── Descriptor lifecycle ────────────────────────────────────────────
+// Lifecyclesyscalls.
 
+// Forward close and unrevoke the FD.
 handler!(close_handler, |c| {
     let r = c.forward(SYS_CLOSE);
     // Linux releases the fd even when close reports EINTR/EIO.
@@ -308,7 +302,7 @@ handler!(close_handler, |c| {
     r
 });
 
-/// After a successful dup-like call that produced `newfd` from `oldfd`.
+// After a successful dup-like call that produced `newfd` from `oldfd`.
 fn propagate_dup(cage: u64, oldfd: u64, newfd: u64) {
     if norm_fd(oldfd) == norm_fd(newfd) {
         return;
@@ -365,22 +359,13 @@ handler!(clone_handler, |c| {
     r
 });
 
-// ── The revokefd syscall ────────────────────────────────────────────
-
-/// Permission hook for `revokefd`. Every call passes through here exactly
-/// once, before any state changes; returning `Err(errno)` refuses it.
-///
-/// Currently allows everything. A descendant-only policy (like `kill`) would
-/// walk `state::parent_of` from `target` up to `caller`.
-///
-/// Caveat: `caller` comes from the argument cage IDs, which the calling cage
-/// supplies itself. 3i does not pass the grate an unforgeable caller ID, so
-/// any check built on this hook trusts that value.
+// TODO extension: add a authorization policy for who is allowed to revoke fd's
+// for which cage.
 fn authorize(_caller: u64, _target: u64, _fd: u64) -> Result<(), i32> {
     Ok(())
 }
 
-// revokefd(target_cage, fd, flags). See abi.rs.
+// Handler for the revokefd syscall itself. Parse flags, update state.
 handler!(revokefd_handler, |c| {
     let caller = c.cages[0];
     let target = c.args[0];

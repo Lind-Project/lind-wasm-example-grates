@@ -1,3 +1,5 @@
+//! Misc util functions.
+
 use std::sync::atomic::AtomicBool;
 
 use crate::state::norm_fd;
@@ -5,11 +7,10 @@ use grate_rs::constants::error::{EFAULT, EINVAL};
 use grate_rs::ffi::iovec;
 use grate_rs::{copy_data_between_cages, getcageid};
 
-/// Set from `--log` at startup; read by `rlog!`.
+/// Set from `--log` at startup
 pub static LOG: AtomicBool = AtomicBool::new(false);
 
-/// `eprintln!` with a `[revoke-grate]` prefix, only when `--log` is set. The
-/// arguments are not formatted at all when logging is off.
+/// `eprintln!` with a `[revoke-grate]` prefix, only when `--log` is set
 macro_rules! rlog {
     ($($arg:tt)*) => {
         if $crate::utils::LOG.load(::std::sync::atomic::Ordering::Relaxed) {
@@ -25,12 +26,13 @@ const IOV_MAX: u64 = 1024;
 const ZERO_CHUNK: usize = 64 * 1024;
 static ZEROS: [u8; ZERO_CHUNK] = [0; ZERO_CHUNK];
 
+/// Used for error handlers since they expect -ERRNO on return.
 #[inline]
 pub fn neg(e: i32) -> i64 {
     -(e as i64)
 }
 
-// ── Cage memory helpers ─────────────────────────────────────────────
+// Cage memory helpers.
 
 /// Write `len` zero bytes to `dst` in `cage`. Returns bytes written, or
 /// -EFAULT if nothing could be written.
@@ -98,6 +100,7 @@ pub fn iov_total(iovs: &[(u64, u64)]) -> i64 {
 }
 
 /// First byte of a path argument. `Ok(None)` for a NULL pointer.
+/// This is used by *at syscalls to detect whether the path passed was absolute.
 pub fn arg_first_byte(cage: u64, ptr: u64) -> Result<Option<u8>, i64> {
     if ptr == 0 {
         return Ok(None);
