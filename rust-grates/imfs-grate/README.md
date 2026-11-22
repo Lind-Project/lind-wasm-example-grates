@@ -229,6 +229,14 @@ was preloaded at the same path passed to `tcc`. In practice, `/hello.c` is safer
 than `hello.c` because the target program's current working directory may not
 match the host shell's current directory.
 
+## File Times
+
+IMFS has no wall clock. Node times come from a logical clock that ticks on
+every update, so a later change always gets a later time. The clock starts at
+zero, or at `LOGICAL_CLOCK_EPOCH` seconds when that variable is set. Set it to
+the epoch that `logical-clock-grate` declares, so that file times and the
+current time start from the same point.
+
 ## Symlink Notes
 
 IMFS supports symlink syscalls, but `PRELOADS` currently stages regular files by

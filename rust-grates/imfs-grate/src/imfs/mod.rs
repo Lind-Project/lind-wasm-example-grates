@@ -362,6 +362,10 @@ impl ImfsState {
 
     /// Mark a node slot as free and return it to the free list for reuse.
     fn reclaim_node(&mut self, idx: usize) {
+        // Once: a slot that is already free is on the free list.
+        if self.nodes[idx].node_type == NodeType::Free {
+            return;
+        }
         if let NodeInfo::Reg { chunks } = &mut self.nodes[idx].info {
             let chunks = std::mem::take(chunks);
             self.reclaim_chunks(chunks);
@@ -369,6 +373,8 @@ impl ImfsState {
 
         self.nodes[idx].node_type = NodeType::Free;
         self.nodes[idx].info = NodeInfo::Free;
+        self.nodes[idx].doomed = false;
+        self.nodes[idx].in_use = 0;
         self.node_free_list.push(idx);
     }
 
@@ -1126,6 +1132,13 @@ impl ImfsState {
         for ((cage_id, fd), underfd_arc) in self.fd_info.clone().iter() {
             if *cage_id == parent_cage {
                 self.fd_info.insert((child_cage, *fd), underfd_arc.clone());
+                // The child's copy is one more open descriptor of the node.
+                if let Ok(entry) = fdtables::translate_virtual_fd(parent_cage, *fd) {
+                    let node_idx = entry.underfd as usize;
+                    if entry.fdkind == IMFS_FDKIND && node_idx < self.nodes.len() {
+                        self.nodes[node_idx].in_use += 1;
+                    }
+                }
             }
         }
 
