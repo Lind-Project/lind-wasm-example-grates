@@ -265,6 +265,31 @@ type = "rust"
 [[grate.tests]]
 test_src = "test/fs_view_test.c"
 
+# ── API key (Rust) ──────────────────────────────────────────────────
+# The test runs its own "API" and a second host on loopback; the policy lets
+# the key go to the first only.
+
+[[grate]]
+name = "api-key-grate"
+dir = "api-key-grate"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/akg_test.c"
+grate_args = ["--policy", "akg_test.conf"]
+files = ["test/akg_test.conf", "test/akg_demo.key"]
+
+[[grate.tests]]
+test_src = "test/akg_race_test.c"
+grate_args = ["--policy", "akg_test.conf"]
+files = ["test/akg_test.conf", "test/akg_demo.key"]
+
+[[grate.tests]]
+test_src = "test/akg_env_test.c"
+grate_args = ["--policy", "akg_env.conf"]
+files = ["test/akg_env.conf"]
+env = ["DEMO_API_KEY=sk-demo-7Qp2Xv9Lm4Zr8Tn6Wb3Hc5Jd1Kf0Gs"]
+
 # ── fdtables stress test (Rust) ─────────────────────────────────────
 
 [[grate]]
