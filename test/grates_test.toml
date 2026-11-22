@@ -190,6 +190,16 @@ type = "rust"
 [[grate.tests]]
 test_src = "test/devnull_test.c"
 
+# ── Revoke (Rust) ───────────────────────────────────────────────────
+
+[[grate]]
+name = "revoke-grate"
+dir = "revoke-grate"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/revoke_syscall_test.c"
+
 # ── FS Routing Clamp (Rust) ─────────────────────────────────────────
 
 [[grate]]
