@@ -1,0 +1,8 @@
+[package]
+name = "api-key-grate"
+version = "0.1.0"
+edition = "2024"
+description = "API keys a program can use but never read: it holds a placeholder, and the key takes its place on the way to the hosts that may have it"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+grate-rs = { git = "https://github.com/Lind-Project/lind-wasm-example-grates", branch = "main", subdir = "lib/grate-rs" }
