@@ -105,14 +105,17 @@ static void test_null(void) {
     memset(buf, 0xAA, sizeof(buf));
     CHECK_EQ("null: read returns 0", read(fd, buf, sizeof(buf)), 0);
     CHECK("null: read leaves buffer untouched", (unsigned char)buf[0] == 0xAA);
-    struct iovec iov[1] = { { buf, sizeof(buf) } };
+    /* Designated initializers: lind's struct iovec has padding fields between
+     * iov_base and iov_len, so { base, len } would put len into padding. */
+    struct iovec iov[1] = { { .iov_base = buf, .iov_len = sizeof(buf) } };
     CHECK_EQ("null: readv returns 0", readv(fd, iov, 1), 0);
 
     /* writes are swallowed: the count is only plausible if the file is
      * really unchanged afterwards */
     CHECK_EQ("null: write returns count", write(fd, "CLOBBER", 7), 7);
     CHECK("null: write did not reach the file", file_is("original"));
-    struct iovec wv[2] = { { "ab", 2 }, { "cde", 3 } };
+    struct iovec wv[2] = { { .iov_base = "ab", .iov_len = 2 },
+                           { .iov_base = "cde", .iov_len = 3 } };
     dump_iov("null writev", wv, 2);
     CHECK_EQ("null: writev returns total", writev(fd, wv, 2), 5);
     CHECK("null: writev did not reach the file", file_is("original"));
@@ -161,7 +164,8 @@ static void test_zero(void) {
     char a[8], b[16];
     memset(a, 1, sizeof(a));
     memset(b, 1, sizeof(b));
-    struct iovec iov[2] = { { a, sizeof(a) }, { b, sizeof(b) } };
+    struct iovec iov[2] = { { .iov_base = a, .iov_len = sizeof(a) },
+                            { .iov_base = b, .iov_len = sizeof(b) } };
     dump_iov("zero readv", iov, 2);
     CHECK_EQ("zero: readv returns total", readv(fd, iov, 2), 24);
     CHECK("zero: readv fills zeros", all_zero(a, sizeof(a)) && all_zero(b, sizeof(b)));
