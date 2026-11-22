@@ -265,6 +265,35 @@ type = "rust"
 [[grate.tests]]
 test_src = "test/fs_view_test.c"
 
+# ── User view (Rust) ────────────────────────────────────────────────
+# One policy, four runs as different users. The first run rewrites alice's
+# line of /uvg_shadow through her view; the second, as root, checks what that
+# did to the real file. They must stay in this order.
+
+[[grate]]
+name = "user-view-grate"
+dir = "user-view-grate"
+type = "rust"
+
+[[grate.tests]]
+test_src = "test/uvg_shadow_test.c"
+grate_args = ["--policy", "uvg_test.conf", "--user", "alice"]
+files = ["test/uvg_test.conf", "test/uvg_shadow"]
+
+[[grate.tests]]
+test_src = "test/uvg_raw_test.c"
+grate_args = ["--policy", "uvg_test.conf", "--user", "root"]
+
+[[grate.tests]]
+test_src = "test/uvg_redact_test.c"
+grate_args = ["--policy", "uvg_test.conf", "--user", "support"]
+files = ["test/uvg_payments.log", "test/uvg_invoices.csv", "test/uvg_secret", "test/uvg_audit.log", "test/uvg_notes"]
+
+[[grate.tests]]
+test_src = "test/uvg_uid_test.c"
+grate_args = ["--policy", "uvg_test.conf"]
+files = ["test/uvg_uid"]
+
 # ── fdtables stress test (Rust) ─────────────────────────────────────
 
 [[grate]]

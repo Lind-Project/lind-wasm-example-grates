@@ -1,0 +1,14 @@
+[package]
+name = "user-view-grate"
+version = "0.1.0"
+edition = "2024"
+description = "Per-user views of a file: line filtering, redaction, and write-back of a user's own lines"
+
+[dependencies]
+# Byte-oriented matching only, so the Unicode tables are left out.
+regex = { version = "1", default-features = false, features = ["std", "perf"] }
+
+# The policy, view and fd-tracking modules are plain Rust and are unit-tested on the build host
+# with `cargo test`. Only the syscall handlers need the grate runtime.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+grate-rs = { git = "https://github.com/Lind-Project/lind-wasm-example-grates", branch = "main", subdir = "lib/grate-rs" }

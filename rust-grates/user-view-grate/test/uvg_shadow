@@ -1,0 +1,3 @@
+root:$6$rootsalt$roothash:19000:0:99999:7:::
+alice:$6$alicesalt$alicehash:19500:0:99999:7:::
+bob:$6$bobsalt$bobhash:19600:0:99999:7:::

@@ -1,0 +1,4 @@
+2026-11-20T10:00:01 INFO charge user=alice card=4111-1111-1111-1111 amount=12.50 token=tok_test_9f8e7d
+2026-11-20T10:00:02 DEBUG gateway response card=4111-1111-1111-1111 cvv=123
+2026-11-20T10:00:03 INFO refund user=bob card=5500-0000-0000-0004 amount=3.00 token=tok_test_112233
+2026-11-20T10:00:04 WARN declined user=carol card=3400-0000-0000-0009
