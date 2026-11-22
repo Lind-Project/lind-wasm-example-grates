@@ -77,7 +77,7 @@ Once an FD is revoked, the following behaviour is enforced on it:
 | epoll_wait (epfd) / epoll_ctl (epfd, fd)     | `EINVAL` / `EPERM`                                                               | same                                    |
 | `*at` calls with revoked dirfd               | relative path → `ENOTDIR`, empty/NULL path → `EACCES`, absolute path → forwarded | same                                    |
 
-### Known gaps
+## Known gaps
 
 - `poll`, `ppoll` and `select` are forwarded unchanged, so readiness reflects
   the real object rather than an always-ready `/dev/null`.
@@ -85,19 +85,16 @@ Once an FD is revoked, the following behaviour is enforced on it:
   by a revoke; only later calls are emulated.
 - No permission check yet.
 
-## Building
+## Building & Testing
 
 ```bash
 make rust/revoke-grate
 # or
-cd rust-grates/revoke-grate && cargo lind_compile --release --output-dir grates
+cargo lind_compile --release --output-dir grates
 ```
 
-## Testing
+Testing:
 
 ```bash
 make test GRATE=revoke-grate
 ```
-
-`test/revoke_syscall_test.c` (no grate args) revokes fds at runtime through
-the syscall and checks:
