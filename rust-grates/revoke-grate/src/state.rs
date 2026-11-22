@@ -6,7 +6,7 @@
 //! descriptor stays open (so the fd number cannot be reused by the kernel and
 //! alias some new object while still marked revoked).
 //!
-//! Entries are created by the `revoke` syscall and then follow the descriptor:
+//! Entries are created by the `revokefd` syscall and then follow the descriptor:
 //! - `dup`/`dup2`/`dup3`/`fcntl(F_DUPFD*)` copy the entry to the new fd
 //! - `dup2`/`dup3` onto a revoked fd from a non-revoked fd clear it
 //! - `close` clears it

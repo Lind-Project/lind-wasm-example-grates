@@ -3,8 +3,8 @@
 //! Usage:
 //!   revoke-grate [--log] [--] <program> [args...]
 //!
-//! Cages below the grate revoke fds at runtime with the `revoke` syscall
-//! (see abi.rs / include/lind_revoke.h). A revoked fd behaves like /dev/null
+//! Cages below the grate revoke fds at runtime with the `revokefd` syscall
+//! (see abi.rs / include/lind_revokefd.h). A revoked fd behaves like /dev/null
 //! (default) or /dev/zero. See README.md for the exact semantics.
 
 mod abi;

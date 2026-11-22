@@ -1,7 +1,7 @@
 /*
  * Run as: revoke-grate revoke_syscall_test.cwasm
  *
- * Everything is revoked at runtime through the revoke syscall, both on this
+ * Everything is revoked at runtime through the revokefd syscall, both on this
  * cage and on a forked child. The revoked fds are regular files holding
  * "original", so a call that leaks through to the real file is visible.
  */
@@ -15,7 +15,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include "../include/lind_revoke.h"
+#include "../include/lind_revokefd.h"
 
 static int total = 0;
 static int failures = 0;
@@ -82,12 +82,12 @@ static void test_errors(void) {
     int fd = open(PATH, O_RDONLY);
     CHECK("open file", fd >= 0);
 
-    CHECK("bad mode -> EINVAL", lind_revoke(self, fd, 7) == -1 && errno == EINVAL);
+    CHECK("bad mode -> EINVAL", lind_revokefd(self, fd, 7) == -1 && errno == EINVAL);
     CHECK("reserved flag bit -> EINVAL",
-          lind_revoke(self, fd, 1 << 8) == -1 && errno == EINVAL);
-    CHECK("fd not open -> EBADF", lind_revoke(self, 99, REVOKE_MODE_NULL) == -1 && errno == EBADF);
-    CHECK("negative fd -> EBADF", lind_revoke(self, -1, REVOKE_MODE_NULL) == -1 && errno == EBADF);
-    CHECK("unknown cage -> ESRCH", lind_revoke(9999, 0, REVOKE_MODE_NULL) == -1 && errno == ESRCH);
+          lind_revokefd(self, fd, 1 << 8) == -1 && errno == EINVAL);
+    CHECK("fd not open -> EBADF", lind_revokefd(self, 99, REVOKE_MODE_NULL) == -1 && errno == EBADF);
+    CHECK("negative fd -> EBADF", lind_revokefd(self, -1, REVOKE_MODE_NULL) == -1 && errno == EBADF);
+    CHECK("unknown cage -> ESRCH", lind_revokefd(9999, 0, REVOKE_MODE_NULL) == -1 && errno == ESRCH);
     CHECK("failed revokes left fd alone", reads_original(fd));
     close(fd);
 }
@@ -99,7 +99,7 @@ static void test_null(void) {
     CHECK("null: open file", fd >= 0);
     int keep = dup(fd); /* duplicated before the revoke: stays live (slot semantics) */
 
-    CHECK("null: revoke own fd", lind_revoke(self, fd, REVOKE_MODE_NULL) == 0);
+    CHECK("null: revoke own fd", lind_revokefd(self, fd, REVOKE_MODE_NULL) == 0);
 
     /* reads hit EOF, buffer untouched */
     memset(buf, 0xAA, sizeof(buf));
@@ -140,7 +140,7 @@ static void test_null(void) {
     CHECK("null: earlier dup is still live", reads_original(keep));
     CHECK("null: fstat on earlier dup works", fstat(keep, &st) == 0 && st.st_size == 8);
 
-    CHECK("null: revoking again is fine", lind_revoke(self, fd, REVOKE_MODE_NULL) == 0);
+    CHECK("null: revoking again is fine", lind_revokefd(self, fd, REVOKE_MODE_NULL) == 0);
     CHECK("null: close revoked fd", close(fd) == 0);
     close(keep);
 }
@@ -152,7 +152,7 @@ static void test_zero(void) {
     int fd = open(PATH, O_RDWR);
     CHECK("zero: open file", real >= 0 && fd >= 0);
 
-    CHECK("zero: revoke own fd", lind_revoke(self, fd, REVOKE_MODE_ZERO) == 0);
+    CHECK("zero: revoke own fd", lind_revokefd(self, fd, REVOKE_MODE_ZERO) == 0);
 
     /* read returns zeros without overrunning */
     memset(buf, 0xAA, sizeof(buf));
@@ -235,7 +235,7 @@ static void test_revoke_child(void) {
         _exit(read(fd, cbuf, sizeof(cbuf)) == 0 ? 0 : 1);
     }
     close(go[0]);
-    CHECK("child: revoke child's fd", lind_revoke(child, fd, REVOKE_MODE_NULL) == 0);
+    CHECK("child: revoke child's fd", lind_revokefd(child, fd, REVOKE_MODE_NULL) == 0);
     write(go[1], "g", 1);
     int status = 0;
     waitpid(child, &status, 0);
@@ -245,7 +245,7 @@ static void test_revoke_child(void) {
     close(go[1]);
 
     CHECK("child: exited child -> ESRCH",
-          lind_revoke(child, 0, REVOKE_MODE_NULL) == -1 && errno == ESRCH);
+          lind_revokefd(child, 0, REVOKE_MODE_NULL) == -1 && errno == ESRCH);
 }
 
 int main(void) {

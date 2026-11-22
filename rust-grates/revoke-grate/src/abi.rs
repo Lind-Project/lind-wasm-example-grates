@@ -1,7 +1,7 @@
-//! The revoke syscall ABI. Kept in sync with `include/lind_revoke.h`.
+//! The revokefd syscall ABI. Kept in sync with `include/lind_revokefd.h`.
 //!
 //! ```text
-//! revoke(target_cage, fd, flags) -> 0 | -errno
+//! revokefd(target_cage, fd, flags) -> 0 | -errno
 //! ```
 //!
 //! - `target_cage`: cage whose fd is revoked. May be the caller itself.
@@ -16,7 +16,7 @@ use crate::state::Mode;
 
 /// Clear of Linux numbers, the 3i calls (1001-1003) and the 2001-2999 range
 /// used by lind-perf benchmarks and other grates.
-pub const SYS_REVOKE: u64 = 3001;
+pub const SYS_REVOKEFD: u64 = 3001;
 
 pub const REVOKE_MODE_MASK: u32 = 0xff;
 pub const REVOKE_MODE_NULL: u32 = 0;

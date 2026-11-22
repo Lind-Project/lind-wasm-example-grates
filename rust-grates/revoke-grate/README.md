@@ -2,7 +2,7 @@
 
 Revokes file descriptors held by running cages, in the spirit of BSD's
 `revoke(2)` but addressed by `(cage, fd)` instead of by path. The grate adds a
-`revoke` syscall that cages and grates below it can call at any time. From
+`revokefd` syscall that cages and grates below it can call at any time. From
 then on, every syscall the target cage makes on that fd is answered as if the
 descriptor pointed at `/dev/null` (default) or `/dev/zero`. The cage keeps
 running and keeps a valid-looking fd, but can no longer read, write, stat, map
@@ -17,16 +17,16 @@ revoked, so its position in the stack decides who is covered.
 The grate emulates the device itself rather than opening a real `/dev/null`,
 so it does not depend on `/dev` existing inside lindfs.
 
-## The revoke syscall
+## The revokefd syscall
 
 ```c
-#include "lind_revoke.h"   /* rust-grates/revoke-grate/include/ */
+#include "lind_revokefd.h"   /* rust-grates/revoke-grate/include/ */
 
-int lind_revoke(uint64_t target_cage, int fd, int flags);
+int lind_revokefd(uint64_t target_cage, int fd, int flags);
 /* flags: REVOKE_MODE_NULL (0) or REVOKE_MODE_ZERO (1) */
 ```
 
-Syscall number `3001` (`SYS_REVOKE`); arguments `(target_cage, fd, flags)`.
+Syscall number `3001` (`SYS_REVOKEFD`); arguments `(target_cage, fd, flags)`.
 The header is a thin `make_threei_call` wrapper with no dependency on the
 grate, and `src/abi.rs` is the Rust side of the same ABI.
 
@@ -114,7 +114,6 @@ does not leak.
 - A call already blocked in the kernel (e.g. a `read` on a socket) is not woken
   by a revoke; only later calls are emulated.
 - No permission check yet (see above).
-- `readv`/`writev` assume a wasm32 `struct iovec` layout.
 
 ## Intercepted syscalls
 
@@ -126,7 +125,7 @@ does not leak.
 | epoll           | epoll_wait, epoll_ctl                                                                                                                  |
 | `*at`           | openat, unlinkat, readlinkat, fchmodat, mkdirat, fchownat, newfstatat, faccessat, utimensat, statx, symlinkat, renameat, renameat2     |
 | Lifecycle       | close, dup, dup2, dup3, fcntl, clone, execve                                                                                           |
-| Provided        | revoke (3001)                                                                                                                          |
+| Provided        | revokefd (3001)                                                                                                                          |
 
 ## Building
 
@@ -157,10 +156,10 @@ the syscall and checks:
 ## Code layout
 
 - `src/main.rs`: CLI parsing and handler registration.
-- `src/abi.rs`: revoke syscall number and flag encoding.
+- `src/abi.rs`: revokefd syscall number and flag encoding.
 - `src/state.rs`: the `(cage, fd) -> mode` revocation table and the cage tree.
-- `src/handlers.rs`: syscall handlers, emulation, the revoke handler and its
+- `src/handlers.rs`: syscall handlers, emulation, the revokefd handler and its
   `authorize` hook.
 - `src/utils.rs`: the `rlog!` macro and helpers for copying to and from cage
   memory.
-- `include/lind_revoke.h`: header-only C client wrapper.
+- `include/lind_revokefd.h`: header-only C client wrapper.

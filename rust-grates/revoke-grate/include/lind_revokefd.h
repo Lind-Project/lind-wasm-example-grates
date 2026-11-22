@@ -1,13 +1,13 @@
-#ifndef LIND_REVOKE_H
-#define LIND_REVOKE_H
+#ifndef LIND_REVOKEFD_H
+#define LIND_REVOKEFD_H
 
 /*
- * lind_revoke.h: client side of revoke-grate's revoke syscall.
+ * lind_revokefd.h: client side of revoke-grate's revokefd syscall.
  *
  * Header-only; needs nothing but lind_syscall.h from the sysroot. Kept in
  * sync with rust-grates/revoke-grate/src/abi.rs.
  *
- *   int lind_revoke(uint64_t target_cage, int fd, int flags);
+ *   int lind_revokefd(uint64_t target_cage, int fd, int flags);
  *
  * Revokes fd slot `fd` in cage `target_cage` (which may be the caller): from
  * then on every syscall that cage makes on that fd behaves as if the fd
@@ -29,14 +29,14 @@
 #include <unistd.h>
 #include <lind_syscall.h>
 
-#define SYS_REVOKE 3001
+#define SYS_REVOKEFD 3001
 
 #define REVOKE_MODE_NULL 0
 #define REVOKE_MODE_ZERO 1
 
-static inline int lind_revoke(uint64_t target_cage, int fd, int flags) {
+static inline int lind_revokefd(uint64_t target_cage, int fd, int flags) {
     uint64_t self = (uint64_t)getpid(); /* cage ID */
-    return make_threei_call(SYS_REVOKE, 0, self, self,
+    return make_threei_call(SYS_REVOKEFD, 0, self, self,
                             target_cage, self,
                             (uint64_t)(uint32_t)fd, self,
                             (uint64_t)(uint32_t)flags, self,
@@ -44,4 +44,4 @@ static inline int lind_revoke(uint64_t target_cage, int fd, int flags) {
                             1 /* translate -errno into errno */);
 }
 
-#endif /* LIND_REVOKE_H */
+#endif /* LIND_REVOKEFD_H */

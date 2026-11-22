@@ -365,9 +365,9 @@ handler!(clone_handler, |c| {
     r
 });
 
-// ── The revoke syscall ──────────────────────────────────────────────
+// ── The revokefd syscall ────────────────────────────────────────────
 
-/// Permission hook for `revoke`. Every revoke passes through here exactly
+/// Permission hook for `revokefd`. Every call passes through here exactly
 /// once, before any state changes; returning `Err(errno)` refuses it.
 ///
 /// Currently allows everything. A descendant-only policy (like `kill`) would
@@ -380,8 +380,8 @@ fn authorize(_caller: u64, _target: u64, _fd: u64) -> Result<(), i32> {
     Ok(())
 }
 
-// revoke(target_cage, fd, flags). See abi.rs.
-handler!(revoke_handler, |c| {
+// revokefd(target_cage, fd, flags). See abi.rs.
+handler!(revokefd_handler, |c| {
     let caller = c.cages[0];
     let target = c.args[0];
     let fd_raw = c.args[1] as u32 as i32;
@@ -495,6 +495,6 @@ pub fn handler_table() -> Vec<(u64, SyscallHandler)> {
         (SYS_FCNTL, fcntl_handler),
         (SYS_CLONE, clone_handler),
         (SYS_EXECVE, exec_handler),
-        (abi::SYS_REVOKE, revoke_handler),
+        (abi::SYS_REVOKEFD, revokefd_handler),
     ]
 }
