@@ -1,0 +1,20 @@
+[package]
+name = "crypt-grate"
+version = "0.1.0"
+edition = "2024"
+description = "Transparent per-file encryption (gocryptfs-style AES-256-GCM blocks) for Lind cages"
+
+[lib]
+name = "crypt_grate"
+path = "src/lib.rs"
+
+[[bin]]
+name = "crypt-grate"
+path = "src/main.rs"
+
+[dependencies]
+grate-rs = { path = "../../lib/grate-rs" }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+hkdf = "0.12"
+sha2 = { version = "0.10", default-features = false }
+libc = "0.2"
