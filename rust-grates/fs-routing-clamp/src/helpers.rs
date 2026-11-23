@@ -105,9 +105,6 @@ pub struct NSClampState {
     /// The path prefix condition for routing.
     routing_prefix: Option<String>,
 
-    /// Set of cage IDs that are inside the clamp.
-    clamped_cages: Option<HashMap<u64, ()>>,
-
     /// Best-effort lexical current working directory per cage.
     cwd_by_cage: Option<HashMap<u64, String>>,
 
@@ -128,7 +125,6 @@ impl NSClampState {
             clamp_entry_cage: 0,
             clamp_depth: 1,
             routing_prefix: Some(prefix),
-            clamped_cages: None,
             cwd_by_cage: None,
             alt_allocator: 3000,
             interposition_map: Vec::new(),
@@ -251,22 +247,10 @@ pub fn register_clamped_cage(cage_id: u64) {
     let mut state = CLAMP_STATE.lock().unwrap();
     let s = state.as_mut().expect("CLAMP_STATE not initialized");
 
-    s.clamped_cages
-        .get_or_insert_with(HashMap::new)
-        .insert(cage_id, ());
     s.cwd_by_cage
         .get_or_insert_with(HashMap::new)
         .entry(cage_id)
         .or_insert_with(|| "/".to_string());
-}
-
-pub fn deregister_clamped_cage(cage_id: u64) {
-    let mut state = CLAMP_STATE.lock().unwrap();
-    let s = state.as_mut().expect("CLAMP_STATE not initialized");
-
-    if let Some(cages) = s.clamped_cages.as_mut() {
-        cages.remove(&cage_id);
-    }
 }
 
 pub fn push_interposition_request(request: (u64, u64, u64, u64)) {
@@ -361,10 +345,6 @@ pub fn remove_cage_state(cage_id: u64) {
 
     if let Some(routes) = s.routes.as_mut() {
         routes.retain(|&(cid, _), _| cid != cage_id);
-    }
-
-    if let Some(cages) = s.clamped_cages.as_mut() {
-        cages.remove(&cage_id);
     }
 
     if let Some(cwds) = s.cwd_by_cage.as_mut() {

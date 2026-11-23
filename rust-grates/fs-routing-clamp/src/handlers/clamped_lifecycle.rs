@@ -188,7 +188,6 @@ pub extern "C" fn exec_handler(
             // to this cage_id.
             register_target_handlers(arg1cage);
 
-            helpers::deregister_clamped_cage(arg1cage);
             helpers::exit_nested_clamp();
 
             // We've detected the clamp boundary, we need to left shift all argv[] and update the
