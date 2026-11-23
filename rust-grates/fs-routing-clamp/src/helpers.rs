@@ -269,16 +269,6 @@ pub fn deregister_clamped_cage(cage_id: u64) {
     }
 }
 
-pub fn is_cage_clamped(cage_id: u64) -> bool {
-    CLAMP_STATE
-        .lock()
-        .unwrap()
-        .as_ref()
-        .and_then(|s| s.clamped_cages.as_ref())
-        .map(|c| c.contains_key(&cage_id))
-        .unwrap_or(false)
-}
-
 pub fn push_interposition_request(request: (u64, u64, u64, u64)) {
     let mut state = CLAMP_STATE.lock().unwrap();
     let s = state.as_mut().expect("CLAMP_STATE not initialized");
@@ -446,7 +436,18 @@ pub fn resolve_path_from_cage(current_cage: u64, path_ptr: u64, path_cage: u64) 
 
 /// Check whether a path matches the routing prefix condition.
 pub fn path_matches_prefix(path: &str) -> bool {
-    path.starts_with(&get_routing_prefix())
+    prefix_contains(&get_routing_prefix(), path)
+}
+
+pub fn prefix_contains(prefix: &str, path: &str) -> bool {
+    let prefix = prefix.trim_end_matches('/');
+    if prefix.is_empty() {
+        return path.starts_with('/');
+    }
+    match path.strip_prefix(prefix) {
+        Some(rest) => rest.is_empty() || rest.starts_with('/'),
+        None => false,
+    }
 }
 
 /// Make a syscall via threei with the standard 6-arg pattern.
