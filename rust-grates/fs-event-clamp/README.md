@@ -43,7 +43,7 @@ Audit-Grate's job.
 
 ## How it works
 
-1. **Startup**: forks a child cage and installs handlers for `exec`, `clone`, `exit_group`
+1. **Startup**: forks a child cage and installs handlers for `exec`, `clone`/`clone3`, `exit_group`
    and `register_handler` (1001) on it.
 2. **Setup**: the child execs the grates inside `%{ ... %}`. Every
    `register_handler` they issue is forwarded unchanged and recorded, together

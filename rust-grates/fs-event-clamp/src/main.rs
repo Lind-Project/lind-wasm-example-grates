@@ -57,6 +57,7 @@ fn main() {
     GrateBuilder::new()
         .register(SYS_EXEC, handlers::exec_handler)
         .register(SYS_CLONE, handlers::fork_handler::<SYS_CLONE>)
+        .register(handlers::SYS_CLONE3, handlers::fork_handler::<{ handlers::SYS_CLONE3 }>)
         .register(SYS_EXIT_GROUP, handlers::exit_handler)
         .register(SYS_REGISTER_HANDLER, handlers::register_handler_handler)
         .teardown(|result: Result<i32, GrateError>| {

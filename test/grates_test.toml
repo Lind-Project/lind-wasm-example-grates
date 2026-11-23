@@ -231,7 +231,7 @@ grate_args = "--regex (null|not-a-real-secret)$ %{ grates/testing-grate.cwasm -s
 # Audit grate that also interposes on the lifecycle syscalls the clamp observes.
 [[grate.tests]]
 test_src = "test/fs_event_clamp_test.c"
-grate_args = "--regex (null|not-a-real-secret)$ %{ grates/testing-grate.cwasm -s 0:-166,1:-167,107:166,56:,59:,231:,1001: %}"
+grate_args = "--regex (null|not-a-real-secret)$ %{ grates/testing-grate.cwasm -s 0:-166,1:-167,107:166,56:,435:,59:,231:,1001: %}"
 
 # ── IPC (Rust) ──────────────────────────────────────────────────────
 

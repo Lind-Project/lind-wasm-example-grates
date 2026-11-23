@@ -15,6 +15,10 @@ use crate::state::{self, HandlerSet};
 
 const MAX_PATH_LEN: usize = 4096;
 
+/// Some lind-wasm glibc builds issue fork as clone3 instead of clone; both take a `clone_args`
+/// pointer in arg1.
+pub const SYS_CLONE3: u64 = 435;
+
 /// Forward a syscall through the clamp's own handler table (i.e. to the grates outside of it).
 fn do_syscall(calling_cage: u64, nr: u64, args: &[u64; 6], cages: &[u64; 6]) -> i64 {
     match make_threei_call(
@@ -173,6 +177,7 @@ fn start_program(cage: u64) -> i64 {
         (SYS_OPENAT, open_handler::<SYS_OPENAT>),
         (SYS_EXEC, exec_handler),
         (SYS_CLONE, fork_handler::<SYS_CLONE>),
+        (SYS_CLONE3, fork_handler::<SYS_CLONE3>),
         (SYS_EXIT_GROUP, exit_handler),
         (SYS_REGISTER_HANDLER, register_handler_handler),
     ];
@@ -186,7 +191,7 @@ fn start_program(cage: u64) -> i64 {
     0
 }
 
-/// syscall 56 (clone): propagate the parent's clamp state to a forked child.
+/// syscalls 56/435 (clone/clone3): propagate the parent's clamp state to a forked child.
 pub extern "C" fn fork_handler<const NR: u64>(
     _cageid: u64,
     arg1: u64,

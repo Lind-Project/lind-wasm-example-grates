@@ -1,10 +1,20 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <lind_syscall.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+// Readable, non-matching file opened before activation. lindfs has no /dev/zero.
+#define DATA_PATH "/tmp/fs_event_clamp_data"
+
+// Lind's glibc does not implement syscall(); dispatch through the cage's own handler table.
+static long custom_syscall(unsigned int nr) {
+    uint64_t self = getpid();
+    return make_threei_call(nr, 0, self, self, 0, self, 0, self, 0, self, 0, self, 0, self, 0, self, 0);
+}
 
 static int audited(void) {
     char byte = 0;
@@ -27,7 +37,7 @@ static int wait_success(pid_t child) {
 
 static int run_case(int use_openat, const char *program, int dummy_audit) {
     char byte;
-    int oldfd = open("/dev/zero", O_RDWR);
+    int oldfd = open(DATA_PATH, O_RDWR);
     if (oldfd < 0 || read(oldfd, &byte, 1) != 1 || geteuid() == 166)
         return 10;
 
@@ -46,10 +56,10 @@ static int run_case(int use_openat, const char *program, int dummy_audit) {
         return 14;
 
     if (dummy_audit) {
-        if (syscall(2048) != 168 || syscall(2049) != 169)
+        if (custom_syscall(2048) != 168 || custom_syscall(2049) != 169)
             return 21;
         errno = 0;
-        if (open("/dev/zero", O_RDONLY) != -1 || errno != 168)
+        if (open(DATA_PATH, O_RDONLY) != -1 || errno != 168)
             return 22;
     }
 
@@ -83,6 +93,11 @@ int main(int argc, char **argv) {
         return audited();
 
     int dummy_audit = argc == 2 && strcmp(argv[1], "--dummy-audit") == 0;
+    int data = open(DATA_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (data < 0 || write(data, "x", 1) != 1 || close(data) != 0) {
+        perror(DATA_PATH);
+        return 1;
+    }
     for (int use_openat = 0; use_openat <= 1; use_openat++) {
         pid_t child = fork();
         if (child == 0)
