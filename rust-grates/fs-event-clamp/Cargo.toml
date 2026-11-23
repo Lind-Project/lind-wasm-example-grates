@@ -1,0 +1,8 @@
+[package]
+name = "fs-event-clamp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+grate-rs = { path = "../../lib/grate-rs" }
+regex = "1"

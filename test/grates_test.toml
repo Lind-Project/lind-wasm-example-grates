@@ -216,6 +216,23 @@ test_src = "test/fcntl_dup_minimal_test.c"
 grate_args = "--prefix /tmp %{ grates/testing-grate.cwasm -s 0:166 %}"
 timeout = 30
 
+# ── FS Event Clamp (Rust) ───────────────────────────────────────────
+
+[[grate]]
+name = "fs-event-clamp"
+dir = "fs-event-clamp"
+type = "rust"
+
+# Stacked audit block: read is handled by the outer, write/geteuid by the inner audit grate.
+[[grate.tests]]
+test_src = "test/fs_event_clamp_test.c"
+grate_args = "--regex (null|not-a-real-secret)$ %{ grates/testing-grate.cwasm -s 2:,257:,0:-166 grates/testing-grate.cwasm -s 1:-167,107:166 %}"
+
+# Audit grate that also interposes on the lifecycle syscalls the clamp observes.
+[[grate.tests]]
+test_src = "test/fs_event_clamp_test.c"
+grate_args = "--regex (null|not-a-real-secret)$ %{ grates/testing-grate.cwasm -s 0:-166,1:-167,107:166,56:,59:,231:,1001: %}"
+
 # ── IPC (Rust) ──────────────────────────────────────────────────────
 
 [[grate]]
