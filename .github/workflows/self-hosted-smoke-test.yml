@@ -1,27 +1,27 @@
 name: self-hosted-smoke-test
 on:
   push:
-    branches: [feat-self-hosted-runner]   # 테스트 branch에서만 실행 (merge 전 삭제 또는 변경)
+    branches: [feat-self-hosted-runner]
 permissions:
-  contents: read                          # 최소 권한
+  contents: read 
 jobs:
   smoke:
-    runs-on: [self-hosted, lind-server]   # runner 등록 시 지정할 label과 일치해야 함
+    runs-on: [self-hosted, lind-server]
     timeout-minutes: 10
     steps:
       - name: Runner identity
         run: |
-          whoami; id                      # gh-runner 계정이고 sudo 그룹이 아닌지 확인
+          whoami; id
           hostname
       - name: Docker access
         run: |
-          docker version --format '{{.Server.Version}}'   # docker 그룹 권한 확인
-          docker buildx ls                                 # lind-ci builder가 보이는지 확인
+          docker version --format '{{.Server.Version}}'
+          docker buildx ls 
       - name: Resources
         run: |
           nproc; free -h
-          df -h /                         # Docker Root가 있는 파티션 여유 공간
+          df -h /
       - name: Checkout test
-        uses: actions/checkout@v4         # 운영 전환 시 commit SHA로 고정 권장
+        uses: actions/checkout@v4 
       - run: ls -la
       
