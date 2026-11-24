@@ -1,18 +1,27 @@
-name: GitHub Actions Demo
-run-name: ${{ github.actor }} is testing out GitHub Actions 🚀
-on: [push]
+name: self-hosted-smoke-test
+on:
+  push:
+    branches: [feat-self-hosted-runner]   # 테스트 branch에서만 실행 (merge 전 삭제 또는 변경)
+permissions:
+  contents: read                          # 최소 권한
 jobs:
-  Explore-GitHub-Actions:
-    runs-on: ubuntu-latest
+  smoke:
+    runs-on: [self-hosted, lind-server]   # runner 등록 시 지정할 label과 일치해야 함
+    timeout-minutes: 10
     steps:
-      - run: echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
-      - run: echo "🐧 This job is now running on a ${{ runner.os }} server hosted by GitHub!"
-      - run: echo "🔎 The name of your branch is ${{ github.ref }} and your repository is ${{ github.repository }}."
-      - name: Check out repository code
-        uses: actions/checkout@v6
-      - run: echo "💡 The ${{ github.repository }} repository has been cloned to the runner."
-      - run: echo "🖥️ The workflow is now ready to test your code on the runner."
-      - name: List files in the repository
+      - name: Runner identity
         run: |
-          ls ${{ github.workspace }}
-      - run: echo "🍏 This job's status is ${{ job.status }}."
+          whoami; id                      # gh-runner 계정이고 sudo 그룹이 아닌지 확인
+          hostname
+      - name: Docker access
+        run: |
+          docker version --format '{{.Server.Version}}'   # docker 그룹 권한 확인
+          docker buildx ls                                 # lind-ci builder가 보이는지 확인
+      - name: Resources
+        run: |
+          nproc; free -h
+          df -h /                         # Docker Root가 있는 파티션 여유 공간
+      - name: Checkout test
+        uses: actions/checkout@v4         # 운영 전환 시 commit SHA로 고정 권장
+      - run: ls -la
+      
