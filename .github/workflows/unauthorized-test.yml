@@ -1,0 +1,27 @@
+name: unauthorized-test
+on:
+  push:
+    branches: [feat-self-hosted-runner]
+permissions:
+  contents: read 
+jobs:
+  smoke:
+    runs-on: [self-hosted, lind-server]
+    timeout-minutes: 10
+    steps:
+      - name: Runner identity
+        run: |
+          whoami; id
+          hostname
+      - name: Docker access
+        run: |
+          docker version --format '{{.Server.Version}}'
+          docker buildx ls 
+      - name: Resources
+        run: |
+          nproc; free -h
+          df -h /
+      - name: Checkout test
+        uses: actions/checkout@v4 
+      - run: ls -la
+      
