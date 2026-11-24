@@ -3,7 +3,6 @@
 //! This module contains:
 //!   - Global routing table: (cage_id, syscall_nr) → alt syscall number
 //!   - Clamp phase flag and prefix condition
-//!   - Per-cage clamped status tracking
 //!   - Helpers for reading paths from cage memory and making syscalls
 
 use grate_rs::constants::*;
