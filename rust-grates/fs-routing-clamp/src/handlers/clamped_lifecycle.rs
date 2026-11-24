@@ -188,7 +188,6 @@ pub extern "C" fn exec_handler(
             // to this cage_id.
             register_target_handlers(arg1cage);
 
-            helpers::deregister_clamped_cage(arg1cage);
             helpers::exit_nested_clamp();
 
             // We've detected the clamp boundary, we need to left shift all argv[] and update the
@@ -300,10 +299,8 @@ pub extern "C" fn fork_handler(
         // to track fds, regardless of clamp status.
         let _ = fdtables::copy_fdtable_for_cage(arg1cage, child_cage_id);
 
-        // If the forking cage is inside the clamp, clone routes too.
-        if helpers::is_cage_clamped(arg1cage) {
-            helpers::clone_cage_routes(arg1cage, child_cage_id);
-        }
+        // Clone routes for any cage that has them. No-op for cages without routes.
+        helpers::clone_cage_routes(arg1cage, child_cage_id);
 
         helpers::clone_cage_cwd(arg1cage, child_cage_id);
     }

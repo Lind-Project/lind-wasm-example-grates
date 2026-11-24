@@ -3,7 +3,6 @@
 //! This module contains:
 //!   - Global routing table: (cage_id, syscall_nr) → alt syscall number
 //!   - Clamp phase flag and prefix condition
-//!   - Per-cage clamped status tracking
 //!   - Helpers for reading paths from cage memory and making syscalls
 
 use grate_rs::constants::*;
@@ -105,9 +104,6 @@ pub struct NSClampState {
     /// The path prefix condition for routing.
     routing_prefix: Option<String>,
 
-    /// Set of cage IDs that are inside the clamp.
-    clamped_cages: Option<HashMap<u64, ()>>,
-
     /// Best-effort lexical current working directory per cage.
     cwd_by_cage: Option<HashMap<u64, String>>,
 
@@ -128,7 +124,6 @@ impl NSClampState {
             clamp_entry_cage: 0,
             clamp_depth: 1,
             routing_prefix: Some(prefix),
-            clamped_cages: None,
             cwd_by_cage: None,
             alt_allocator: 3000,
             interposition_map: Vec::new(),
@@ -251,32 +246,10 @@ pub fn register_clamped_cage(cage_id: u64) {
     let mut state = CLAMP_STATE.lock().unwrap();
     let s = state.as_mut().expect("CLAMP_STATE not initialized");
 
-    s.clamped_cages
-        .get_or_insert_with(HashMap::new)
-        .insert(cage_id, ());
     s.cwd_by_cage
         .get_or_insert_with(HashMap::new)
         .entry(cage_id)
         .or_insert_with(|| "/".to_string());
-}
-
-pub fn deregister_clamped_cage(cage_id: u64) {
-    let mut state = CLAMP_STATE.lock().unwrap();
-    let s = state.as_mut().expect("CLAMP_STATE not initialized");
-
-    if let Some(cages) = s.clamped_cages.as_mut() {
-        cages.remove(&cage_id);
-    }
-}
-
-pub fn is_cage_clamped(cage_id: u64) -> bool {
-    CLAMP_STATE
-        .lock()
-        .unwrap()
-        .as_ref()
-        .and_then(|s| s.clamped_cages.as_ref())
-        .map(|c| c.contains_key(&cage_id))
-        .unwrap_or(false)
 }
 
 pub fn push_interposition_request(request: (u64, u64, u64, u64)) {
@@ -373,10 +346,6 @@ pub fn remove_cage_state(cage_id: u64) {
         routes.retain(|&(cid, _), _| cid != cage_id);
     }
 
-    if let Some(cages) = s.clamped_cages.as_mut() {
-        cages.remove(&cage_id);
-    }
-
     if let Some(cwds) = s.cwd_by_cage.as_mut() {
         cwds.remove(&cage_id);
     }
@@ -446,7 +415,18 @@ pub fn resolve_path_from_cage(current_cage: u64, path_ptr: u64, path_cage: u64) 
 
 /// Check whether a path matches the routing prefix condition.
 pub fn path_matches_prefix(path: &str) -> bool {
-    path.starts_with(&get_routing_prefix())
+    prefix_contains(&get_routing_prefix(), path)
+}
+
+pub fn prefix_contains(prefix: &str, path: &str) -> bool {
+    let prefix = prefix.trim_end_matches('/');
+    if prefix.is_empty() {
+        return path.starts_with('/');
+    }
+    match path.strip_prefix(prefix) {
+        Some(rest) => rest.is_empty() || rest.starts_with('/'),
+        None => false,
+    }
 }
 
 /// Make a syscall via threei with the standard 6-arg pattern.
